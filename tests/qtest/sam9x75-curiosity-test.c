@@ -371,6 +371,7 @@
 #define PMC_MCFR                0x24
 #define PMC_MCKR                0x28
 #define PMC_RESERVED_LEGACY_MCKR 0x30
+#define PMC_USB                 0x38
 #define PMC_IER                 0x60
 #define PMC_IDR                 0x64
 #define PMC_SR                  0x68
@@ -385,9 +386,14 @@
 #define PMC_PLL_CTRL0_ENPLL     BIT(28)
 #define PMC_PLL_CTRL0_ENPLLCK   BIT(29)
 #define PMC_PLL_CTRL0_ENLOCK    BIT(31)
+#define PMC_PLL_CTRL0_MASK      0xf00ff0ff
+#define PMC_PLL_ACR_MASK        0x3f073fff
+#define PMC_PLL_ACR_RESET       0x00020033
 #define PMC_PLL_UPDT_UPDATE     BIT(8)
+#define PMC_PLL_UPDT_MASK       0x003f0007
 #define PMC_MOR_MOSCXTEN        BIT(0)
 #define PMC_MOR_MOSCRCEN        BIT(3)
+#define PMC_MOR_ALWAYS_ONE      BIT(5)
 #define PMC_MOR_KEY             0x00370000
 #define PMC_MOR_MOSCSEL         BIT(24)
 #define PMC_MCFR_MAINRDY        BIT(16)
@@ -1516,17 +1522,36 @@ static void test_pmc_clock_tree_and_protection(void)
     uint32_t value;
 
     g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_MOR), ==,
-                    PMC_MOR_MOSCRCEN);
+                    PMC_MOR_MOSCRCEN | PMC_MOR_ALWAYS_ONE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_MCKR), ==, 1);
     value = qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SR);
     g_assert_cmphex(value & (PMC_SR_MCKRDY | PMC_SR_MOSCRCS), ==,
                     PMC_SR_MCKRDY | PMC_SR_MOSCRCS);
     g_assert_cmpuint(get_clock_period(qts, "/machine/soc/pmc/mainck"), ==,
+                     CLOCK_PERIOD_FROM_HZ(12000000));
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/pmc/mck"), ==,
                      CLOCK_PERIOD_FROM_HZ(12000000));
     value = qtest_readl(qts, SAM9X7_PMC_BASE + PMC_MCFR);
     g_assert_true(value & PMC_MCFR_MAINRDY);
     g_assert_false(value & PMC_MCFR_RCMEAS);
     g_assert_cmphex(value & 0xffff, ==,
                     (12000000ULL * 16 / 32000) & 0xffff);
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_ACR), ==,
+                    PMC_PLL_ACR_RESET);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_CTRL0, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_CTRL0), ==,
+                    PMC_PLL_CTRL0_MASK);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_ACR, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_ACR), ==,
+                    PMC_PLL_ACR_MASK);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT), ==,
+                    PMC_PLL_UPDT_MASK);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT, 0);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_USB, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_USB), ==,
+                    0x00000f03);
 
     /* Vendor U-Boot probes legacy locations that SAM9X7 reserves. */
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_RESERVED_LEGACY_PCR, 47);
@@ -1569,6 +1594,9 @@ static void test_pmc_clock_tree_and_protection(void)
 
     pmc_configure_pll(qts, 0);
     g_assert_true(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_ISR0) & BIT(0));
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MCKR, 2 | (4U << 8));
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/pmc/mck"), ==,
+                     CLOCK_PERIOD_FROM_HZ(160000000));
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MCKR, 2 | (3U << 8));
     g_assert_cmpuint(get_clock_period(qts, "/machine/soc/pmc/mck"), ==,
                      CLOCK_PERIOD_FROM_HZ(266666666));
@@ -1738,8 +1766,13 @@ static void test_pio_interrupt_filter_and_clock_gating(void)
     const uint32_t irq_pin = BIT(28);
     const uint32_t gate_pin = BIT(27);
     const uint32_t filter_pin = BIT(29);
+    uint64_t pclk_period_ns;
 
     pmc_write_pcr(qts, 2, PMC_PCR_EN);
+    pclk_period_ns = (get_clock_period(qts,
+                                      "/machine/soc/pmc/pclk[2]") +
+                      UINT32_MAX) >> 32;
+    g_assert_cmpuint(pclk_period_ns, >, 1);
     aic_configure(qts, 2, AIC_SMR_LEVEL_HIGH | 4, 0x02020202);
 
     pio_set_input(qts, 0, 28, 1);
@@ -1797,16 +1830,16 @@ static void test_pio_interrupt_filter_and_clock_gating(void)
     qtest_writel(qts, SAM9X7_PIOA_BASE + PIO_IER, filter_pin);
     qtest_writel(qts, SAM9X7_PIOA_BASE + PIO_IFER, filter_pin);
     pio_set_input(qts, 0, 29, 0);
-    qtest_clock_step(qts, 10000);
+    qtest_clock_step(qts, pclk_period_ns - 1);
     pio_set_input(qts, 0, 29, 1);
-    qtest_clock_step(qts, 40000);
+    qtest_clock_step(qts, 2 * pclk_period_ns);
     g_assert_true(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_PDSR) &
                   filter_pin);
     g_assert_false(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_ISR) &
                    filter_pin);
 
     pio_set_input(qts, 0, 29, 0);
-    qtest_clock_step(qts, 40000);
+    qtest_clock_step(qts, 2 * pclk_period_ns);
     g_assert_false(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_PDSR) &
                    filter_pin);
     g_assert_true(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_ISR) &

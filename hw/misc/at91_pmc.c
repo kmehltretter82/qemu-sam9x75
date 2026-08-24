@@ -60,16 +60,20 @@
 #define PMC_MMIO_SIZE  0x200
 
 #define PMC_PLL_CTRL0_DIVPMC_MASK  0x000000ff
+#define PMC_PLL_CTRL0_DIVIO_MASK   0x000ff000
 #define PMC_PLL_CTRL0_ENPLL         BIT(28)
 #define PMC_PLL_CTRL0_ENPLLCK       BIT(29)
 #define PMC_PLL_CTRL0_ENIOPLLCK     BIT(30)
 #define PMC_PLL_CTRL0_ENLOCK        BIT(31)
-#define PMC_PLL_CTRL0_MASK          0xf00000ff
+#define PMC_PLL_CTRL0_MASK          (0xf0000000 | PMC_PLL_CTRL0_DIVIO_MASK | \
+                                     PMC_PLL_CTRL0_DIVPMC_MASK)
 #define PMC_PLL_CTRL1_FRACR_MASK    0x003fffff
 #define PMC_PLL_CTRL1_MUL_MASK      0xff000000
 #define PMC_PLL_CTRL1_MASK          0xff3fffff
 #define PMC_PLL_SSR_MASK            0x10ffffff
-#define PMC_PLL_UPDT_ID_MASK        0x0000000f
+#define PMC_PLL_ACR_MASK            0x3f073fff
+#define PMC_PLL_ACR_RESET           0x00020033
+#define PMC_PLL_UPDT_ID_MASK        0x00000007
 #define PMC_PLL_UPDT_UPDATE         BIT(8)
 #define PMC_PLL_UPDT_STUPTIM_MASK   0x003f0000
 
@@ -79,7 +83,8 @@
 #define PMC_MOR_KEY_MASK            0x00ff0000
 #define PMC_MOR_KEY                 0x00370000
 #define PMC_MOR_MOSCSEL             BIT(24)
-#define PMC_MOR_MASK                0x0300ff0f
+#define PMC_MOR_ALWAYS_ONE          BIT(5)
+#define PMC_MOR_MASK                0x6700ff0f
 
 #define PMC_MCFR_MAINF_MASK         0x0000ffff
 #define PMC_MCFR_MAINRDY            BIT(16)
@@ -88,8 +93,10 @@
 
 #define PMC_MCKR_CSS_MASK           0x00000003
 #define PMC_MCKR_PRES_MASK          0x00000070
-#define PMC_MCKR_MDIV_MASK          0x00000300
-#define PMC_MCKR_MASK               0x00000373
+#define PMC_MCKR_MDIV_MASK          0x00000700
+#define PMC_MCKR_MASK               0x00000773
+
+#define PMC_USB_MASK                0x00000f03
 
 #define PMC_SR_MOSCXTS              BIT(0)
 #define PMC_SR_MCKRDY               BIT(3)
@@ -236,7 +243,7 @@ static uint64_t at91_pmc_gck_source_hz(AT91PMCState *s, unsigned int css,
 static void at91_pmc_update_clocks(AT91PMCState *s)
 {
     static const unsigned int pres_div[] = { 1, 2, 4, 8, 16, 32, 64, 3 };
-    static const unsigned int mck_div[] = { 1, 2, 4, 3 };
+    static const unsigned int mck_div[] = { 1, 2, 4, 3, 5, 1, 1, 1 };
     uint64_t pll_hz[AT91_PMC_NUM_PLLS];
     uint64_t main_hz;
     uint64_t cpu_hz;
@@ -494,7 +501,7 @@ static uint64_t at91_pmc_read(void *opaque, hwaddr offset, unsigned int size)
     case PMC_PLL_UPDT:
         return s->pll_updt;
     case PMC_MOR:
-        return s->mor;
+        return s->mor | PMC_MOR_ALWAYS_ONE;
     case PMC_MCFR:
         return at91_pmc_get_mcfr(s);
     case PMC_MCKR:
@@ -604,7 +611,7 @@ static void at91_pmc_write(void *opaque, hwaddr offset, uint64_t value,
     case PMC_PLL_ACR:
         id = s->pll_updt & PMC_PLL_UPDT_ID_MASK;
         if (id < AT91_PMC_NUM_PLLS) {
-            s->pll_acr[id] = value;
+            s->pll_acr[id] = value & PMC_PLL_ACR_MASK;
         }
         break;
     case PMC_PLL_UPDT:
@@ -640,7 +647,7 @@ static void at91_pmc_write(void *opaque, hwaddr offset, uint64_t value,
         /* Reserved locations are read-zero/write-ignore on SAM9X7. */
         break;
     case PMC_USB:
-        s->usb = value & 0x00000f01;
+        s->usb = value & PMC_USB_MASK;
         break;
     case PMC_PCK0:
     case PMC_PCK1:
@@ -735,15 +742,20 @@ static void at91_pmc_clock_changed(void *opaque, ClockEvent event)
 static void at91_pmc_reset(DeviceState *dev)
 {
     AT91PMCState *s = AT91_PMC(dev);
+    unsigned int i;
 
     memset(s->pll_ctrl0, 0, sizeof(s->pll_ctrl0));
     memset(s->pll_ctrl1, 0, sizeof(s->pll_ctrl1));
     memset(s->pll_ssr, 0, sizeof(s->pll_ssr));
-    memset(s->pll_acr, 0, sizeof(s->pll_acr));
+    for (i = 0; i < AT91_PMC_NUM_PLLS; i++) {
+        s->pll_acr[i] = PMC_PLL_ACR_RESET;
+    }
     memset(s->active_pll_ctrl0, 0, sizeof(s->active_pll_ctrl0));
     memset(s->active_pll_ctrl1, 0, sizeof(s->active_pll_ctrl1));
     memset(s->active_pll_ssr, 0, sizeof(s->active_pll_ssr));
-    memset(s->active_pll_acr, 0, sizeof(s->active_pll_acr));
+    for (i = 0; i < AT91_PMC_NUM_PLLS; i++) {
+        s->active_pll_acr[i] = PMC_PLL_ACR_RESET;
+    }
     memset(s->pcr, 0, sizeof(s->pcr));
     memset(s->pck_reg, 0, sizeof(s->pck_reg));
 
@@ -751,7 +763,7 @@ static void at91_pmc_reset(DeviceState *dev)
     s->pll_updt = 3 << 16;
     s->mor = PMC_MOR_MOSCRCEN;
     s->mcfr = 0;
-    s->mckr = 0;
+    s->mckr = 1;
     s->usb = 0;
     s->imr = 0;
     s->fsmr = 0;
