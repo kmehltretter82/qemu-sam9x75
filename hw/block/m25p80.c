@@ -31,10 +31,12 @@
 #include "hw/ssi/ssi.h"
 #include "migration/vmstate.h"
 #include "qemu/bitops.h"
+#include "qemu/cutils.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
+#include "net/net.h"
 #include "trace.h"
 #include "qom/object.h"
 #include "m25p80_sfdp.h"
@@ -77,6 +79,7 @@ typedef struct FlashPartInfo {
      */
     uint8_t die_cnt;
     uint8_t (*sfdp_read)(uint32_t sfdp_addr);
+    uint32_t sfdp_eui48_offset;
 } FlashPartInfo;
 
 /* adapted from linux */
@@ -320,7 +323,11 @@ static const FlashPartInfo known_devices[] = {
     { INFO("sst25wf040",  0xbf2504,      0,  64 << 10,   8, ER_4K) },
     { INFO("sst25wf080",  0xbf2505,      0,  64 << 10,  16, ER_4K) },
     { INFO("sst26vf064b", 0xbf2643,      0,  64 << 10, 128, ER_4K),
-      .sfdp_read = m25p80_sfdp_sst26vf064b },
+      .sfdp_read = m25p80_sfdp_sst26vf064b,
+      .sfdp_eui48_offset = 0x261 },
+    { INFO("sst26vf064beui", 0xbf2643,   0,  64 << 10, 128, ER_4K),
+      .sfdp_read = m25p80_sfdp_sst26vf064b,
+      .sfdp_eui48_offset = 0x261 },
 
     /* ST Microelectronics -- newer production may have feature updates */
     { INFO("m25p05",      0x202010,      0,  32 << 10,   2, 0) },
@@ -529,6 +536,7 @@ struct Flash {
     int64_t dirty_page;
 
     const FlashPartInfo *pi;
+    MACAddr eui48;
 
 };
 
@@ -1730,7 +1738,14 @@ static uint32_t m25p80_transfer8(SSIPeripheral *ss, uint32_t tx)
         break;
     case STATE_READING_SFDP:
         assert(s->pi->sfdp_read);
-        r = s->pi->sfdp_read(s->cur_addr);
+        if (s->pi->sfdp_eui48_offset &&
+            !buffer_is_zero(s->eui48.a, sizeof(s->eui48.a)) &&
+            s->cur_addr >= s->pi->sfdp_eui48_offset &&
+            s->cur_addr < s->pi->sfdp_eui48_offset + sizeof(s->eui48.a)) {
+            r = s->eui48.a[s->cur_addr - s->pi->sfdp_eui48_offset];
+        } else {
+            r = s->pi->sfdp_read(s->cur_addr);
+        }
         trace_m25p80_read_sfdp(s, s->cur_addr, (uint8_t)r);
         s->cur_addr = (s->cur_addr + 1) & (M25P80_SFDP_MAX_SIZE - 1);
         break;
@@ -1818,6 +1833,7 @@ static const Property m25p80_properties[] = {
     DEFINE_PROP_UINT8("spansion-cr2nv", Flash, spansion_cr2nv, 0x8),
     DEFINE_PROP_UINT8("spansion-cr3nv", Flash, spansion_cr3nv, 0x2),
     DEFINE_PROP_UINT8("spansion-cr4nv", Flash, spansion_cr4nv, 0x10),
+    DEFINE_PROP_MACADDR("eui48", Flash, eui48),
     DEFINE_PROP_DRIVE("drive", Flash, blk),
 };
 
