@@ -21,6 +21,7 @@
 #define SAM9X7_QSPI_MEM_BASE    0x60000000
 #define SAM9X7_XDMAC_BASE       0xf0008000
 #define SAM9X7_QSPI_BASE        0xf0014000
+#define SAM9X7_SHA_BASE         0xf002c000
 #define SAM9X7_FLEXCOM6_BASE    0xf8010000
 #define SAM9X7_TWI6_BASE        (SAM9X7_FLEXCOM6_BASE + 0x600)
 #define SAM9X7_PIT64B0_BASE     0xf0028000
@@ -465,6 +466,7 @@
 #define XDMAC_CC_DWIDTH_HALFWORD (1U << 11)
 #define XDMAC_CC_DWIDTH_WORD    (2U << 11)
 #define XDMAC_CC_CSIZE_4        (2U << 8)
+#define XDMAC_CC_CSIZE_16       (4U << 8)
 #define XDMAC_CC_SAM_INC        (1U << 16)
 #define XDMAC_CC_DAM_INC        (1U << 18)
 #define XDMAC_CC_DAM_UBS        (2U << 18)
@@ -519,6 +521,48 @@
 #define AES_WPMR_WPCREN         BIT(2)
 #define AES_WPMR_KEY            0x41455300
 #define AES_WPSR_WPVS           BIT(0)
+
+#define SHA_CR                  0x00
+#define SHA_MR                  0x04
+#define SHA_IER                 0x10
+#define SHA_IDR                 0x14
+#define SHA_IMR                 0x18
+#define SHA_ISR                 0x1c
+#define SHA_MSR                 0x20
+#define SHA_BCR                 0x30
+#define SHA_IDATAR(index)       (0x40 + (index) * 4)
+#define SHA_IODATAR(index)      (0x80 + (index) * 4)
+#define SHA_WPMR                0xe4
+#define SHA_WPSR                0xe8
+#define SHA_VERSION             0xfc
+
+#define SHA_CR_START            BIT(0)
+#define SHA_CR_FIRST            BIT(4)
+#define SHA_CR_SWRST            BIT(8)
+#define SHA_CR_WUIHV            BIT(12)
+#define SHA_CR_WUIEHV           BIT(13)
+#define SHA_MR_SMOD_AUTO        1
+#define SHA_MR_SMOD_DMA         2
+#define SHA_MR_ALGO(algo)       ((algo) << 8)
+#define SHA_MR_CHECK_EHV        (1U << 24)
+#define SHA_MR_CHECK_MESSAGE    (2U << 24)
+#define SHA_ALGO_SHA1           0
+#define SHA_ALGO_SHA256         1
+#define SHA_ALGO_SHA384         2
+#define SHA_ALGO_SHA512         3
+#define SHA_ALGO_SHA224         4
+#define SHA_ALGO_HMAC_SHA256    9
+#define SHA_INT_DATRDY          BIT(0)
+#define SHA_INT_URAD            BIT(8)
+#define SHA_INT_CHECKF          BIT(16)
+#define SHA_INT_SECE            BIT(24)
+#define SHA_ISR_CHKST_OK        (5U << 20)
+#define SHA_WPMR_WPEN           BIT(0)
+#define SHA_WPMR_WPITEN         BIT(1)
+#define SHA_WPMR_WPCREN         BIT(2)
+#define SHA_WPMR_KEY            0x53484100
+#define SHA_WPSR_WPVS           BIT(0)
+#define SHA_WPSR_WPVSRC(offset) ((offset) << 8)
 
 #define TRNG_CR                 0x00
 #define TRNG_MR                 0x04
@@ -2550,6 +2594,373 @@ static void test_aes_feedback_and_xts(void)
     qtest_quit(qts);
 }
 
+static unsigned int sha_processing_cycles(unsigned int algorithm)
+{
+    switch (algorithm) {
+    case SHA_ALGO_SHA1:
+        return 87;
+    case SHA_ALGO_SHA384:
+    case SHA_ALGO_SHA512:
+        return 90;
+    default:
+        return 74;
+    }
+}
+
+static void sha_write_bytes(QTestState *qts, uint64_t offset,
+                            const uint8_t *data, size_t length)
+{
+    size_t i;
+
+    for (i = 0; i < length; i += sizeof(uint32_t)) {
+        uint8_t word[sizeof(uint32_t)] = { 0 };
+        size_t count = MIN(sizeof(word), length - i);
+
+        memcpy(word, data + i, count);
+        qtest_writel(qts, SAM9X7_SHA_BASE + offset,
+                     ldl_le_p(word));
+        offset += sizeof(uint32_t);
+    }
+}
+
+static void sha_read_digest(QTestState *qts, uint8_t *digest, size_t length)
+{
+    size_t i;
+
+    g_assert_cmpuint(length % sizeof(uint32_t), ==, 0);
+    for (i = 0; i < length; i += sizeof(uint32_t)) {
+        stl_le_p(digest + i,
+                 qtest_readl(qts, SAM9X7_SHA_BASE + SHA_IODATAR(i / 4)));
+    }
+}
+
+static uint64_t sha_duration(QTestState *qts, unsigned int algorithm)
+{
+    uint64_t period = get_clock_period(qts, "/machine/soc/pmc/pclk[41]");
+
+    g_assert_cmpuint(period, !=, 0);
+    return (period * sha_processing_cycles(algorithm)) >> 32;
+}
+
+static void sha_start_auto(QTestState *qts, unsigned int algorithm,
+                           uint32_t extra_mode, const uint8_t *message,
+                           size_t length)
+{
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_SWRST);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MR,
+                 SHA_MR_SMOD_AUTO | SHA_MR_ALGO(algorithm) | extra_mode);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MSR, length);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_BCR, length);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_IER, SHA_INT_DATRDY);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_FIRST);
+    sha_write_bytes(qts, SHA_IDATAR(0), message, length);
+}
+
+static void test_sha_vectors_timing_irq_and_protection(void)
+{
+    static const struct {
+        unsigned int algorithm;
+        size_t digest_length;
+        uint8_t digest[64];
+    } vectors[] = {
+        {
+            .algorithm = SHA_ALGO_SHA1,
+            .digest_length = 20,
+            .digest = {
+                0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a,
+                0xba, 0x3e, 0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c,
+                0x9c, 0xd0, 0xd8, 0x9d,
+            },
+        }, {
+            .algorithm = SHA_ALGO_SHA224,
+            .digest_length = 28,
+            .digest = {
+                0x23, 0x09, 0x7d, 0x22, 0x34, 0x05, 0xd8, 0x22,
+                0x86, 0x42, 0xa4, 0x77, 0xbd, 0xa2, 0x55, 0xb3,
+                0x2a, 0xad, 0xbc, 0xe4, 0xbd, 0xa0, 0xb3, 0xf7,
+                0xe3, 0x6c, 0x9d, 0xa7,
+            },
+        }, {
+            .algorithm = SHA_ALGO_SHA256,
+            .digest_length = 32,
+            .digest = {
+                0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
+                0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
+                0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
+                0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+            },
+        }, {
+            .algorithm = SHA_ALGO_SHA384,
+            .digest_length = 48,
+            .digest = {
+                0xcb, 0x00, 0x75, 0x3f, 0x45, 0xa3, 0x5e, 0x8b,
+                0xb5, 0xa0, 0x3d, 0x69, 0x9a, 0xc6, 0x50, 0x07,
+                0x27, 0x2c, 0x32, 0xab, 0x0e, 0xde, 0xd1, 0x63,
+                0x1a, 0x8b, 0x60, 0x5a, 0x43, 0xff, 0x5b, 0xed,
+                0x80, 0x86, 0x07, 0x2b, 0xa1, 0xe7, 0xcc, 0x23,
+                0x58, 0xba, 0xec, 0xa1, 0x34, 0xc8, 0x25, 0xa7,
+            },
+        }, {
+            .algorithm = SHA_ALGO_SHA512,
+            .digest_length = 64,
+            .digest = {
+                0xdd, 0xaf, 0x35, 0xa1, 0x93, 0x61, 0x7a, 0xba,
+                0xcc, 0x41, 0x73, 0x49, 0xae, 0x20, 0x41, 0x31,
+                0x12, 0xe6, 0xfa, 0x4e, 0x89, 0xa9, 0x7e, 0xa2,
+                0x0a, 0x9e, 0xee, 0xe6, 0x4b, 0x55, 0xd3, 0x9a,
+                0x21, 0x92, 0x99, 0x2a, 0x27, 0x4f, 0xc1, 0xa8,
+                0x36, 0xba, 0x3c, 0x23, 0xa3, 0xfe, 0xeb, 0xbd,
+                0x45, 0x4d, 0x44, 0x23, 0x64, 0x3c, 0xe8, 0x0e,
+                0x2a, 0x9a, 0xc9, 0x4f, 0xa5, 0x4c, 0xa4, 0x9f,
+            },
+        },
+    };
+    static const uint8_t message[] = { 'a', 'b', 'c' };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint8_t digest[64];
+    unsigned int i;
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_MR), ==, 0x100);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_VERSION), ==,
+                    0x700);
+
+    pmc_write_pcr(qts, 41, PMC_PCR_EN);
+    aic_configure(qts, 41, AIC_SMR_LEVEL_HIGH | 3, 0x41414141);
+
+    for (i = 0; i < G_N_ELEMENTS(vectors); i++) {
+        uint64_t duration = sha_duration(qts, vectors[i].algorithm);
+
+        g_assert_cmpuint(duration, >, 1);
+        sha_start_auto(qts, vectors[i].algorithm, 0,
+                       message, sizeof(message));
+        qtest_clock_step(qts, duration - 1);
+        g_assert_false(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR) &
+                       SHA_INT_DATRDY);
+        qtest_clock_step(qts, 1);
+        g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(9));
+        g_assert_true(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR) &
+                      SHA_INT_DATRDY);
+        memset(digest, 0, sizeof(digest));
+        sha_read_digest(qts, digest, vectors[i].digest_length);
+        g_assert_cmpmem(digest, vectors[i].digest_length,
+                        vectors[i].digest, vectors[i].digest_length);
+        g_assert_false(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR) &
+                       SHA_INT_DATRDY);
+    }
+
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_SWRST);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_WPMR,
+                 SHA_WPMR_KEY | SHA_WPMR_WPEN | SHA_WPMR_WPITEN |
+                 SHA_WPMR_WPCREN);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_MR), ==, 0x100);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_WPSR), ==,
+                    SHA_WPSR_WPVSRC(SHA_MR) | SHA_WPSR_WPVS);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_IER, SHA_INT_DATRDY);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_WPSR), ==,
+                    SHA_WPSR_WPVSRC(SHA_IER) | SHA_WPSR_WPVS);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_FIRST);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_WPSR), ==,
+                    SHA_WPSR_WPVSRC(SHA_CR) | SHA_WPSR_WPVS);
+
+    qtest_quit(qts);
+}
+
+static void sha_process_unpadded_sha256_block(QTestState *qts,
+                                               const uint8_t block[64],
+                                               uint32_t state[8])
+{
+    uint64_t duration = sha_duration(qts, SHA_ALGO_SHA256);
+    unsigned int i;
+
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_SWRST);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MR,
+                 SHA_MR_SMOD_AUTO | SHA_MR_ALGO(SHA_ALGO_SHA256));
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_FIRST);
+    sha_write_bytes(qts, SHA_IDATAR(0), block, 64);
+    qtest_clock_step(qts, duration);
+    g_assert_true(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR) &
+                  SHA_INT_DATRDY);
+    for (i = 0; i < 8; i++) {
+        state[i] = qtest_readl(qts,
+                               SAM9X7_SHA_BASE + SHA_IODATAR(i));
+    }
+}
+
+static void sha_load_ir(QTestState *qts, uint32_t command,
+                        const uint32_t state[8])
+{
+    unsigned int i;
+
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, command);
+    for (i = 0; i < 8; i++) {
+        qtest_writel(qts, SAM9X7_SHA_BASE + SHA_IDATAR(i), state[i]);
+    }
+}
+
+static void test_sha_hmac_check_and_manual_padding(void)
+{
+    static const uint8_t sha256_abc[32] = {
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
+        0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
+        0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
+        0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+    };
+    static const uint8_t hmac_sha256[32] = {
+        0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53,
+        0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b, 0xf1, 0x2b,
+        0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7,
+        0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32, 0xcf, 0xf7,
+    };
+    static const uint8_t hmac_message[] = "Hi There";
+    uint8_t ipad[64];
+    uint8_t opad[64];
+    uint8_t padded[64] = { 'a', 'b', 'c', 0x80 };
+    uint8_t digest[32];
+    uint32_t ipad_state[8];
+    uint32_t opad_state[8];
+    uint32_t expected_state[8];
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint64_t duration;
+    uint32_t status;
+    unsigned int i;
+
+    pmc_write_pcr(qts, 41, PMC_PCR_EN);
+    duration = sha_duration(qts, SHA_ALGO_SHA256);
+
+    memset(ipad, 0x36, sizeof(ipad));
+    memset(opad, 0x5c, sizeof(opad));
+    for (i = 0; i < 20; i++) {
+        ipad[i] ^= 0x0b;
+        opad[i] ^= 0x0b;
+    }
+    sha_process_unpadded_sha256_block(qts, ipad, ipad_state);
+    sha_process_unpadded_sha256_block(qts, opad, opad_state);
+
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_SWRST);
+    sha_load_ir(qts, SHA_CR_WUIHV, ipad_state);
+    sha_load_ir(qts, SHA_CR_WUIEHV, opad_state);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MR,
+                 SHA_MR_SMOD_AUTO | SHA_MR_ALGO(SHA_ALGO_HMAC_SHA256));
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MSR,
+                 sizeof(hmac_message) - 1);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_BCR,
+                 sizeof(hmac_message) - 1);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_FIRST);
+    sha_write_bytes(qts, SHA_IDATAR(0), hmac_message,
+                    sizeof(hmac_message) - 1);
+    qtest_clock_step(qts, 2 * duration);
+    sha_read_digest(qts, digest, sizeof(digest));
+    g_assert_cmpmem(digest, sizeof(digest), hmac_sha256,
+                    sizeof(hmac_sha256));
+
+    /* Exercise the software-padded block path used by the Linux driver. */
+    padded[63] = 24;
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_SWRST);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MR,
+                 SHA_MR_SMOD_AUTO | SHA_MR_ALGO(SHA_ALGO_SHA256));
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_FIRST);
+    sha_write_bytes(qts, SHA_IDATAR(0), padded, sizeof(padded));
+    qtest_clock_step(qts, duration);
+    sha_read_digest(qts, digest, sizeof(digest));
+    g_assert_cmpmem(digest, sizeof(digest), sha256_abc,
+                    sizeof(sha256_abc));
+
+    for (i = 0; i < 8; i++) {
+        expected_state[i] = ldl_le_p(sha256_abc + i * 4);
+    }
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_SWRST);
+    sha_load_ir(qts, SHA_CR_WUIEHV, expected_state);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MR,
+                 SHA_MR_SMOD_AUTO | SHA_MR_ALGO(SHA_ALGO_SHA256) |
+                 SHA_MR_CHECK_EHV);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MSR, 3);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_BCR, 3);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_FIRST);
+    sha_write_bytes(qts, SHA_IDATAR(0), (const uint8_t *)"abc", 3);
+    qtest_clock_step(qts, duration);
+    status = qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR);
+    g_assert_cmphex(status & (SHA_INT_DATRDY | SHA_INT_CHECKF |
+                             SHA_ISR_CHKST_OK), ==,
+                    SHA_INT_DATRDY | SHA_INT_CHECKF | SHA_ISR_CHKST_OK);
+    sha_read_digest(qts, digest, sizeof(digest));
+
+    sha_start_auto(qts, SHA_ALGO_SHA256, SHA_MR_CHECK_MESSAGE,
+                   (const uint8_t *)"abc", 3);
+    qtest_clock_step(qts, duration);
+    status = qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR);
+    g_assert_true(status & SHA_INT_DATRDY);
+    g_assert_false(status & SHA_INT_CHECKF);
+    for (i = 0; i < 8; i++) {
+        qtest_writel(qts, SAM9X7_SHA_BASE + SHA_IDATAR(0),
+                     expected_state[i]);
+    }
+    status = qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR);
+    g_assert_cmphex(status & (SHA_INT_CHECKF | SHA_ISR_CHKST_OK), ==,
+                    SHA_INT_CHECKF | SHA_ISR_CHKST_OK);
+
+    qtest_quit(qts);
+}
+
+static void test_sha_xdmac_auto_padding(void)
+{
+    static const uint8_t expected[32] = {
+        0x47, 0x1f, 0xb9, 0x43, 0xaa, 0x23, 0xc5, 0x11,
+        0xf6, 0xf7, 0x2f, 0x8d, 0x16, 0x52, 0xd9, 0xc8,
+        0x80, 0xcf, 0xa3, 0x92, 0xad, 0x80, 0x50, 0x31,
+        0x20, 0x54, 0x77, 0x03, 0xe5, 0x6a, 0x2b, 0xe5,
+    };
+    const uint32_t source_address = SAM9X7_DDR_BASE + 0x12000;
+    uint8_t source[128];
+    uint8_t digest[32];
+    uint64_t channel = XDMAC_CHANNEL(0);
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint64_t duration;
+    unsigned int i;
+
+    for (i = 0; i < sizeof(source); i++) {
+        source[i] = i;
+    }
+    qtest_memwrite(qts, source_address, source, sizeof(source));
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    pmc_write_pcr(qts, 41, PMC_PCR_EN);
+    duration = sha_duration(qts, SHA_ALGO_SHA256);
+    aic_configure(qts, 41, AIC_SMR_LEVEL_HIGH | 3, 0x41414141);
+
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_SWRST);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MR,
+                 SHA_MR_SMOD_DMA | SHA_MR_ALGO(SHA_ALGO_SHA256));
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MSR, sizeof(source));
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_BCR, sizeof(source));
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_IER, SHA_INT_DATRDY);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_FIRST);
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CSA,
+                 source_address);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CDA,
+                 SAM9X7_SHA_BASE + SHA_IDATAR(0));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC,
+                 sizeof(source) / sizeof(uint32_t));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_DSYNC_MEM2PER |
+                 XDMAC_CC_PERID(34) | XDMAC_CC_CSIZE_16 |
+                 XDMAC_CC_DWIDTH_WORD | XDMAC_CC_SAM_INC);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
+    qtest_clock_step(qts, duration);
+    xdmac_waitl(qts, XDMAC_GS, BIT(0), 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_BCR), ==, 0);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(9));
+
+    qtest_clock_step(qts, 2 * duration);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(9));
+    sha_read_digest(qts, digest, sizeof(digest));
+    g_assert_cmpmem(digest, sizeof(digest), expected, sizeof(expected));
+
+    qtest_quit(qts);
+}
+
 static void test_trng_timing_irq_and_protection(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE " -seed 1");
@@ -3889,6 +4300,12 @@ int main(int argc, char **argv)
                    test_aes_chaining_gcm_and_xdmac);
     qtest_add_func("sam9x75/aes/feedback-and-xts",
                    test_aes_feedback_and_xts);
+    qtest_add_func("sam9x75/sha/vectors-timing-irq-and-protection",
+                   test_sha_vectors_timing_irq_and_protection);
+    qtest_add_func("sam9x75/sha/hmac-check-and-manual-padding",
+                   test_sha_hmac_check_and_manual_padding);
+    qtest_add_func("sam9x75/sha/xdmac-auto-padding",
+                   test_sha_xdmac_auto_padding);
     qtest_add_func("sam9x75/trng/timing-irq-and-protection",
                    test_trng_timing_irq_and_protection);
     qtest_add_func("sam9x75/system/slowclock-pit-reset-and-protection",

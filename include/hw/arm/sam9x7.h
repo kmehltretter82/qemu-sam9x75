@@ -17,6 +17,7 @@
 #include "hw/i2c/at91_twi.h"
 #include "hw/intc/at91_aic.h"
 #include "hw/misc/at91_aes.h"
+#include "hw/misc/at91_sha.h"
 #include "hw/misc/at91_flexcom.h"
 #include "hw/misc/at91_gpbr.h"
 #include "hw/misc/at91_pmc.h"
@@ -71,6 +72,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_XDMAC_BASE            0xf0008000
 #define SAM9X7_QSPI_BASE             0xf0014000
 #define SAM9X7_PIT64B0_BASE          0xf0028000
+#define SAM9X7_SHA_BASE              0xf002c000
 #define SAM9X7_TRNG_BASE             0xf0030000
 #define SAM9X7_AES_BASE              0xf0034000
 #define SAM9X7_PIT64B1_BASE          0xf0040000
@@ -111,6 +113,7 @@ struct SAM9X7State {
     ARMCPU cpu;
     AT91AIC5State aic;
     AT91AESState aes;
+    AT91SHAState sha;
     AT91TRNGState trng;
     AT91DBGUState dbgu;
     AT91PMCState pmc;

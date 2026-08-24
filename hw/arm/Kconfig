@@ -177,6 +177,7 @@ config SAM9X7
     default y
     depends on TCG && ARM
     select AT91_AES
+    select AT91_SHA
     select AT91_TRNG
     select AT91_XDMAC
     select AT91_AIC

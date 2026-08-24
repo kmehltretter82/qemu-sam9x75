@@ -191,7 +191,17 @@ Support matrix
        reports and migration state.  The unmodified Linux hwrng driver
        completes its runtime-PM read path.  Private-key-bus data delivery,
        fault injection and hardware entropy characteristics remain missing.
-       SHA, TDES, OTP and PUF are missing.
+       SHA supports SHA-1/224/256/384/512 and their HMAC variants, standard and
+       user initial values, manual/automatic/IDATAR0 start modes, automatic
+       padding and digest checking, clocked processing, AIC source 41, XDMAC
+       request 34, write protection, security-access reports and migration.
+       Known-answer coverage includes every hash width, RFC HMAC-SHA256,
+       software and automatic padding, both check modes, timing and multi-block
+       DMA.  The unmodified Linux driver probes version 0x700 and acquires its
+       DMA channel.  SHA double-buffer performance, Always-On dummy processing,
+       exact check latency, tamper/fault injection and the AES/SHA protocol path
+       remain incomplete; version and timing values require hardware
+       confirmation.  TDES, OTP and PUF are missing.
    * - Display and camera
      - Missing
      - XLCDC, GFX2D, LVDS, DSI/CSI, MIPI PHY, CSI2DC and ISC backends.
@@ -219,12 +229,12 @@ This currently loads unmodified U-Boot, initializes DDR, NAND, MMC and QSPI,
 discovers the LAN8840, and supports DHCP and packet exchange through GEM0.  It
 then loads and enters the Linux image from SD.  The in-memory Linux log reaches
 the RTC, RTT, reset, shutdown-controller and watchdog probes.  The AES driver
-probes version 0x700 and acquires both XDMAC channels, while the TRNG driver
-completes its clocked random-data path without an external abort.  The next
-fatal probe is the unmodeled SHA engine at ``0xf002c000``.  The selected
-FLEXCOM USART console remains missing.  RomBOOT itself is also missing;
-``-kernel`` is a development entry path and not a substitute for ROM media
-selection.
+probes version 0x700 and acquires two XDMAC channels, the SHA driver probes
+version 0x700 and acquires a third channel, and the TRNG driver completes its
+clocked random-data path.  The next fatal probe is the unmodeled TDES engine at
+``0xf0038000``.  The selected FLEXCOM USART console remains missing.  RomBOOT
+itself is also missing; ``-kernel`` is a development entry path and not a
+substitute for ROM media selection.
 
 By default a valid SHDWC shutdown command requests a normal QEMU guest
 shutdown.  Backup-domain wake-up experiments can leave the process running
