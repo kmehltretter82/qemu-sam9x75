@@ -334,6 +334,12 @@ static void sdhci_data_transfer(void *opaque);
 
 #define BLOCK_SIZE_MASK (4 * KiB - 1)
 
+static bool sdhci_block_count_enabled(SDHCIState *s)
+{
+    return (s->trnmod & (SDHC_TRNS_MULTI | SDHC_TRNS_BLK_CNT_EN)) ==
+           (SDHC_TRNS_MULTI | SDHC_TRNS_BLK_CNT_EN);
+}
+
 static void sdhci_send_command(SDHCIState *s)
 {
     SDRequest request;
@@ -347,6 +353,8 @@ static void sdhci_send_command(SDHCIState *s)
     request.arg = s->argument;
 
     trace_sdhci_send_command(request.cmd, request.arg);
+    trace_sdhci_command_config(s->blksize & BLOCK_SIZE_MASK, s->blkcnt,
+                               s->trnmod, s->cmdreg, s->admasysaddr);
     rlen = sdbus_do_command(&s->sdbus, &request, response, sizeof(response));
 
     if (s->cmdreg & SDHC_CMD_RESPONSE) {
@@ -378,7 +386,7 @@ static void sdhci_send_command(SDHCIState *s)
         }
     }
 
-    if (s->norintstsen & SDHC_NISEN_CMDCMP) {
+    if (!timeout && (s->norintstsen & SDHC_NISEN_CMDCMP)) {
         s->norintsts |= SDHC_NIS_CMDCMP;
     }
 
@@ -495,7 +503,7 @@ static uint32_t sdhci_read_dataport(SDHCIState *s, unsigned size)
             s->prnsts &= ~SDHC_DATA_AVAILABLE; /* no more data in a buffer */
             s->data_count = 0;  /* next buff read must start at position [0] */
 
-            if (s->trnmod & SDHC_TRNS_BLK_CNT_EN) {
+            if (sdhci_block_count_enabled(s)) {
                 s->blkcnt--;
             }
 
@@ -527,7 +535,7 @@ static void sdhci_write_block_to_card(SDHCIState *s)
         return;
     }
 
-    if (s->trnmod & SDHC_TRNS_BLK_CNT_EN) {
+    if (sdhci_block_count_enabled(s)) {
         if (s->blkcnt == 0) {
             return;
         } else {
@@ -699,7 +707,9 @@ static void sdhci_sdma_transfer_single_block(SDHCIState *s)
                         MEMTXATTRS_UNSPECIFIED);
         sdbus_write_data(&s->sdbus, s->fifo_buffer, datacnt);
     }
-    s->blkcnt--;
+    if (sdhci_block_count_enabled(s)) {
+        s->blkcnt--;
+    }
 
     if (s->norintstsen & SDHC_NISEN_DMA) {
         s->norintsts |= SDHC_NIS_DMA;
@@ -782,7 +792,7 @@ static void sdhci_do_adma(SDHCIState *s)
     MemTxResult res = MEMTX_ERROR;
     int i;
 
-    if (s->trnmod & SDHC_TRNS_BLK_CNT_EN && !s->blkcnt) {
+    if (sdhci_block_count_enabled(s) && !s->blkcnt) {
         /* Stop Multiple Transfer */
         sdhci_end_transfer(s);
         return;
@@ -838,7 +848,7 @@ static void sdhci_do_adma(SDHCIState *s)
                     dscr.addr += s->data_count - begin;
                     if (s->data_count == block_size) {
                         s->data_count = 0;
-                        if (s->trnmod & SDHC_TRNS_BLK_CNT_EN) {
+                        if (sdhci_block_count_enabled(s)) {
                             s->blkcnt--;
                             if (s->blkcnt == 0) {
                                 break;
@@ -868,7 +878,7 @@ static void sdhci_do_adma(SDHCIState *s)
                     if (s->data_count == block_size) {
                         sdbus_write_data(&s->sdbus, s->fifo_buffer, block_size);
                         s->data_count = 0;
-                        if (s->trnmod & SDHC_TRNS_BLK_CNT_EN) {
+                        if (sdhci_block_count_enabled(s)) {
                             s->blkcnt--;
                             if (s->blkcnt == 0) {
                                 break;
@@ -911,11 +921,11 @@ static void sdhci_do_adma(SDHCIState *s)
         }
 
         /* ADMA transfer terminates if blkcnt == 0 or by END attribute */
-        if (((s->trnmod & SDHC_TRNS_BLK_CNT_EN) &&
-                    (s->blkcnt == 0)) || (dscr.attr & SDHC_ADMA_ATTR_END)) {
+        if ((sdhci_block_count_enabled(s) && s->blkcnt == 0) ||
+            (dscr.attr & SDHC_ADMA_ATTR_END)) {
             trace_sdhci_adma_transfer_completed();
             if (length || ((dscr.attr & SDHC_ADMA_ATTR_END) &&
-                (s->trnmod & SDHC_TRNS_BLK_CNT_EN) &&
+                sdhci_block_count_enabled(s) &&
                 s->blkcnt != 0)) {
                 trace_sdhci_error("SD/MMC host ADMA length mismatch");
                 s->admaerr |= SDHC_ADMAERR_LENGTH_MISMATCH |

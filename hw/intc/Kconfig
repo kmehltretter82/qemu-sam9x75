@@ -43,6 +43,9 @@ config ARM_GICV5
     depends on TCG
     select MSI_NONBROKEN
 
+config AT91_AIC
+    bool
+
 config XICS
     bool
 

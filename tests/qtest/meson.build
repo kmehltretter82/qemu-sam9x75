@@ -256,6 +256,7 @@ qtests_arm = \
   (config_all_devices.has_key('CONFIG_CAN_FLEXCAN') ? ['flexcan-test'] : []) + \
   (config_all_devices.has_key('CONFIG_STM32L4X5_SOC') and
    config_all_devices.has_key('CONFIG_DM163')? ['dm163-test'] : []) + \
+  (config_all_devices.has_key('CONFIG_SAM9X7') ? ['sam9x75-curiosity-test'] : []) + \
   ['arm-cpu-features',
    'boot-serial-test']
 

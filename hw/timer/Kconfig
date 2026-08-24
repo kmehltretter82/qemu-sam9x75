@@ -27,6 +27,14 @@ config ALLWINNER_A10_PIT
     bool
     select PTIMER
 
+config AT91_PIT64B
+    bool
+    select PTIMER
+
+config AT91_PIT
+    bool
+    select PTIMER
+
 config PXA2XX_TIMER
     bool
 

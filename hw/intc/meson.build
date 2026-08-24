@@ -1,4 +1,5 @@
 system_ss.add(files('intc.c'))
+system_ss.add(when: 'CONFIG_AT91_AIC', if_true: files('at91_aic.c'))
 system_ss.add(when: 'CONFIG_ARM_GIC', if_true: files(
   'arm_gic.c',
   'arm_gic_common.c',

@@ -52,6 +52,32 @@ config A9SCU
 config ARM11SCU
     bool
 
+config AT91_PMC
+    bool
+
+config AT91_PMECC
+    bool
+
+config AT91_SMC
+    bool
+
+config AT91_SYSC
+    bool
+
+config AT91_SFR
+    bool
+
+config AT91_SCKC
+    bool
+    select AT91_SYSC
+
+config AT91_MPDDRC
+    bool
+
+config AT91_RSTC
+    bool
+    select AT91_SYSC
+
 config MAX78000_AES
     bool
 

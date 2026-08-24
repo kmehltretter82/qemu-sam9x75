@@ -1,0 +1,400 @@
+/*
+ * Microchip SAM9X7 SoC
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#include "qemu/osdep.h"
+
+#include "hw/arm/sam9x7.h"
+#include "hw/core/qdev-clock.h"
+#include "hw/core/qdev-properties.h"
+#include "qapi/error.h"
+#include "qemu/module.h"
+#include "target/arm/cpu-qom.h"
+
+static void sam9x7_realize(DeviceState *dev, Error **errp)
+{
+    SAM9X7State *s = SAM9X7(dev);
+    MemoryRegion *mr;
+    static const hwaddr pit64b_base[] = {
+        SAM9X7_PIT64B0_BASE,
+        SAM9X7_PIT64B1_BASE,
+    };
+    static const unsigned int pit64b_irq[] = { 37, 58 };
+    static const hwaddr pio_base[] = {
+        SAM9X7_PIOA_BASE,
+        SAM9X7_PIOB_BASE,
+        SAM9X7_PIOC_BASE,
+        SAM9X7_PIOD_BASE,
+    };
+    static const unsigned int pio_irq[] = { 2, 3, 4, 44 };
+    static const hwaddr sdmmc_base[] = {
+        SAM9X7_SDMMC0_BASE,
+        SAM9X7_SDMMC1_BASE,
+    };
+    static const unsigned int sdmmc_irq[] = { 12, 26 };
+    unsigned int i;
+
+    if (!s->memory) {
+        error_setg(errp, TYPE_SAM9X7 " property 'memory' was not set");
+        return;
+    }
+
+    if (!qdev_realize(DEVICE(&s->cpu), NULL, errp)) {
+        return;
+    }
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->aic), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->aic), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_AIC_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->aic), 0,
+                       qdev_get_gpio_in(DEVICE(&s->cpu), ARM_CPU_IRQ));
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->aic), 1,
+                       qdev_get_gpio_in(DEVICE(&s->cpu), ARM_CPU_FIQ));
+
+    if (!qdev_realize(DEVICE(&s->sys_irq), NULL, errp)) {
+        return;
+    }
+    qdev_connect_gpio_out(DEVICE(&s->sys_irq), 0,
+                          qdev_get_gpio_in(DEVICE(&s->aic), 1));
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->sysc), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->sysc), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_SYSCWP_BASE, mr);
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->sckc), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->sckc), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_SCKC_BASE, mr);
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->pmc), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->pmc), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_PMC_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->pmc), 0,
+                       qdev_get_gpio_in(DEVICE(&s->sys_irq), 0));
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->rstc), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->rstc), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_RSTC_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->rstc), 0,
+                       qdev_get_gpio_in(DEVICE(&s->sys_irq), 1));
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->wdt), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->wdt), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_WDT_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->wdt), 0,
+                       qdev_get_gpio_in(DEVICE(&s->sys_irq), 2));
+    qdev_connect_gpio_out_named(DEVICE(&s->wdt), "reset", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->rstc), "wdt-reset", 0));
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->pit), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->pit), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_PIT_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->pit), 0,
+                       qdev_get_gpio_in(DEVICE(&s->sys_irq), 3));
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->sfr), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->sfr), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_SFR_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->sfr), 0,
+                       qdev_get_gpio_in(DEVICE(&s->sys_irq), 4));
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->mpddrc), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->mpddrc), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_MPDDRC_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->mpddrc), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 49));
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->pmecc), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->pmecc), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_PMECC_BASE, mr);
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->pmecc), 1);
+    memory_region_add_subregion(s->memory, SAM9X7_PMERRLOC_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->pmecc), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 48));
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->smc), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->smc), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_SMC_BASE, mr);
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->nand), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->nand), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_NAND_BASE, mr);
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->qspi), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->qspi), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_QSPI_BASE, mr);
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->qspi), 1);
+    memory_region_add_subregion(s->memory, SAM9X7_QSPI_MEM_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->qspi), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 35));
+
+    for (i = 0; i < ARRAY_SIZE(s->sdmmc); i++) {
+        if (!sysbus_realize(SYS_BUS_DEVICE(&s->sdmmc[i]), errp)) {
+            return;
+        }
+        mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->sdmmc[i]), 0);
+        memory_region_add_subregion(s->memory, sdmmc_base[i], mr);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->sdmmc[i]), 0,
+                           qdev_get_gpio_in(DEVICE(&s->aic),
+                                            sdmmc_irq[i]));
+    }
+
+    for (i = 0; i < ARRAY_SIZE(s->pio); i++) {
+        if (!sysbus_realize(SYS_BUS_DEVICE(&s->pio[i]), errp)) {
+            return;
+        }
+        mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->pio[i]), 0);
+        memory_region_add_subregion(s->memory, pio_base[i], mr);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->pio[i]), 0,
+                           qdev_get_gpio_in(DEVICE(&s->aic), pio_irq[i]));
+    }
+
+    for (i = 0; i < ARRAY_SIZE(s->pit64b); i++) {
+        if (!sysbus_realize(SYS_BUS_DEVICE(&s->pit64b[i]), errp)) {
+            return;
+        }
+        mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->pit64b[i]), 0);
+        memory_region_add_subregion(s->memory, pit64b_base[i], mr);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->pit64b[i]), 0,
+                           qdev_get_gpio_in(DEVICE(&s->aic), pit64b_irq[i]));
+    }
+
+    if (!memory_region_init_rom(&s->rom, OBJECT(dev), "sam9x7.rom",
+                                SAM9X7_ROM_SIZE, errp)) {
+        return;
+    }
+    memory_region_add_subregion(s->memory, SAM9X7_ROM_BASE, &s->rom);
+
+    /* At reset the internal ROM is visible through the boot window. */
+    memory_region_init_alias(&s->boot_alias, OBJECT(dev),
+                             "sam9x7.boot-rom-alias", &s->rom, 0,
+                             SAM9X7_ROM_SIZE);
+    memory_region_add_subregion(s->memory, SAM9X7_BOOT_BASE, &s->boot_alias);
+
+    if (!memory_region_init_ram(&s->sram0, OBJECT(dev), "sam9x7.sram0",
+                                SAM9X7_SRAM0_SIZE, errp)) {
+        return;
+    }
+    memory_region_add_subregion(s->memory, SAM9X7_SRAM0_BASE, &s->sram0);
+
+    /* SRAM1 backs the OTP controller's emulation mode. */
+    if (!memory_region_init_ram(&s->sram1, OBJECT(dev), "sam9x7.sram1",
+                                SAM9X7_SRAM1_SIZE, errp)) {
+        return;
+    }
+    memory_region_add_subregion(s->memory, SAM9X7_SRAM1_BASE, &s->sram1);
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->dbgu), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->dbgu), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_DBGU_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->dbgu), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 47));
+}
+
+static void sam9x7_init(Object *obj)
+{
+    SAM9X7State *s = SAM9X7(obj);
+    static const unsigned int pit64b_pid[] = { 37, 58 };
+    static const unsigned int pio_pid[] = { 2, 3, 4, 44 };
+    static const unsigned int sdmmc_pid[] = { 12, 26 };
+    static const uint32_t pio_valid_mask[] = {
+        UINT32_MAX,
+        0x07ffffff,
+        UINT32_MAX,
+        0x00007fff,
+    };
+    static const uint32_t pio_reset_pio_mask[] = {
+        UINT32_MAX,
+        0x07ffffff,
+        0xfdffffff,
+        0x00007ff3,
+    };
+    static const uint32_t pio_reset_pullup_mask[] = {
+        UINT32_MAX,
+        0x07ffffff,
+        0xfdffffff,
+        0x00007ff3,
+    };
+    static const uint32_t pio_reset_pulldown_mask[] = {
+        0,
+        0,
+        0x02000000,
+        0x0000000c,
+    };
+    unsigned int i;
+
+    object_initialize_child(obj, "cpu", &s->cpu,
+                            ARM_CPU_TYPE_NAME("arm926"));
+    object_property_set_bool(OBJECT(&s->cpu), "vfp", false, &error_abort);
+
+    object_initialize_child(obj, "aic", &s->aic, TYPE_AT91_AIC5);
+    object_initialize_child(obj, "dbgu", &s->dbgu, TYPE_AT91_DBGU);
+    qdev_prop_set_uint32(DEVICE(&s->dbgu), "chip-id", SAM9X75_A1_CIDR);
+    qdev_prop_set_uint32(DEVICE(&s->dbgu), "extension-id",
+                         SAM9X75_D2G_EXID);
+
+    object_initialize_child(obj, "sys-irq", &s->sys_irq, TYPE_OR_IRQ);
+    object_property_set_int(OBJECT(&s->sys_irq), "num-lines", 8,
+                            &error_abort);
+
+    s->main_xtal = qdev_init_clock_out(DEVICE(s), "main-xtal");
+    s->slow_rc = qdev_init_clock_out(DEVICE(s), "slow-rc");
+    s->slow_xtal = qdev_init_clock_out(DEVICE(s), "slow-xtal");
+    clock_set_hz(s->main_xtal, 24000000);
+    clock_set_hz(s->slow_rc, 32000);
+    clock_set_hz(s->slow_xtal, 32768);
+
+    object_initialize_child(obj, "sysc", &s->sysc, TYPE_AT91_SYSCWP);
+
+    object_initialize_child(obj, "sckc", &s->sckc, TYPE_AT91_SCKC);
+    qdev_connect_clock_in(DEVICE(&s->sckc), "slow-rc", s->slow_rc);
+    qdev_connect_clock_in(DEVICE(&s->sckc), "slow-xtal", s->slow_xtal);
+    s->sckc.sysc = &s->sysc;
+
+    object_initialize_child(obj, "pmc", &s->pmc, TYPE_AT91_PMC);
+    qdev_connect_clock_in(DEVICE(&s->pmc), "main-xtal", s->main_xtal);
+    qdev_connect_clock_in(DEVICE(&s->pmc), "td-slck",
+                          qdev_get_clock_out(DEVICE(&s->sckc), "td-slck"));
+    qdev_connect_clock_in(DEVICE(&s->pmc), "md-slck",
+                          qdev_get_clock_out(DEVICE(&s->sckc), "md-slck"));
+
+    object_initialize_child(obj, "rstc", &s->rstc, TYPE_AT91_RSTC);
+    qdev_connect_clock_in(DEVICE(&s->rstc), "slck",
+                          qdev_get_clock_out(DEVICE(&s->sckc), "md-slck"));
+    s->rstc.sysc = &s->sysc;
+
+    object_initialize_child(obj, "wdt", &s->wdt, TYPE_AT91_WDT);
+    qdev_connect_clock_in(DEVICE(&s->wdt), "slck",
+                          qdev_get_clock_out(DEVICE(&s->sckc), "md-slck"));
+    s->wdt.sysc = &s->sysc;
+
+    object_initialize_child(obj, "pit", &s->pit, TYPE_AT91_PIT);
+    qdev_connect_clock_in(DEVICE(&s->pit), "mck",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "mck"));
+    s->pit.sysc = &s->sysc;
+
+    object_initialize_child(obj, "sfr", &s->sfr, TYPE_AT91_SFR);
+
+    object_initialize_child(obj, "mpddrc", &s->mpddrc, TYPE_AT91_MPDDRC);
+
+    object_initialize_child(obj, "pmecc", &s->pmecc, TYPE_AT91_PMECC);
+    qdev_connect_clock_in(DEVICE(&s->pmecc), "pclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "pclk[48]"));
+
+    object_initialize_child(obj, "smc", &s->smc, TYPE_AT91_SMC);
+    object_initialize_child(obj, "nand", &s->nand, TYPE_AT91_NAND);
+
+    object_initialize_child(obj, "qspi", &s->qspi, TYPE_AT91_OSPI);
+    qdev_connect_clock_in(DEVICE(&s->qspi), "pclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "pclk[35]"));
+    qdev_connect_clock_in(DEVICE(&s->qspi), "gclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "gclk[35]"));
+
+    for (i = 0; i < ARRAY_SIZE(s->sdmmc); i++) {
+        g_autofree char *name = g_strdup_printf("sdmmc[%u]", i);
+        g_autofree char *pclk_name =
+            g_strdup_printf("pclk[%u]", sdmmc_pid[i]);
+        g_autofree char *gclk_name =
+            g_strdup_printf("gclk[%u]", sdmmc_pid[i]);
+
+        object_initialize_child(obj, name, &s->sdmmc[i], TYPE_AT91_SDHCI);
+        qdev_connect_clock_in(DEVICE(&s->sdmmc[i]), "hclock",
+                             qdev_get_clock_out(DEVICE(&s->pmc), pclk_name));
+        qdev_connect_clock_in(DEVICE(&s->sdmmc[i]), "gclock",
+                             qdev_get_clock_out(DEVICE(&s->pmc), gclk_name));
+    }
+
+    for (i = 0; i < ARRAY_SIZE(s->pio); i++) {
+        g_autofree char *name = g_strdup_printf("pio[%u]", i);
+        g_autofree char *pclk_name =
+            g_strdup_printf("pclk[%u]", pio_pid[i]);
+
+        object_initialize_child(obj, name, &s->pio[i], TYPE_AT91_PIO);
+        qdev_prop_set_uint32(DEVICE(&s->pio[i]), "valid-mask",
+                            pio_valid_mask[i]);
+        qdev_prop_set_uint32(DEVICE(&s->pio[i]), "reset-pio-mask",
+                            pio_reset_pio_mask[i]);
+        qdev_prop_set_uint32(DEVICE(&s->pio[i]), "reset-pullup-mask",
+                            pio_reset_pullup_mask[i]);
+        qdev_prop_set_uint32(DEVICE(&s->pio[i]), "reset-pulldown-mask",
+                            pio_reset_pulldown_mask[i]);
+        qdev_connect_clock_in(DEVICE(&s->pio[i]), "pclk",
+                             qdev_get_clock_out(DEVICE(&s->pmc), pclk_name));
+        qdev_connect_clock_in(DEVICE(&s->pio[i]), "slck",
+                             qdev_get_clock_out(DEVICE(&s->sckc),
+                                                "md-slck"));
+    }
+
+    for (i = 0; i < ARRAY_SIZE(s->pit64b); i++) {
+        g_autofree char *name = g_strdup_printf("pit64b[%u]", i);
+        g_autofree char *pclk_name =
+            g_strdup_printf("pclk[%u]", pit64b_pid[i]);
+        g_autofree char *gclk_name =
+            g_strdup_printf("gclk[%u]", pit64b_pid[i]);
+
+        object_initialize_child(obj, name, &s->pit64b[i], TYPE_AT91_PIT64B);
+        qdev_connect_clock_in(DEVICE(&s->pit64b[i]), "pclk",
+                             qdev_get_clock_out(DEVICE(&s->pmc), pclk_name));
+        qdev_connect_clock_in(DEVICE(&s->pit64b[i]), "gclk",
+                             qdev_get_clock_out(DEVICE(&s->pmc), gclk_name));
+    }
+}
+
+static const Property sam9x7_properties[] = {
+    DEFINE_PROP_LINK("memory", SAM9X7State, memory, TYPE_MEMORY_REGION,
+                     MemoryRegion *),
+};
+
+static void sam9x7_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->desc = "Microchip SAM9X7 SoC";
+    dc->realize = sam9x7_realize;
+    dc->user_creatable = false;
+    device_class_set_props(dc, sam9x7_properties);
+}
+
+static const TypeInfo sam9x7_info = {
+    .name = TYPE_SAM9X7,
+    .parent = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(SAM9X7State),
+    .instance_init = sam9x7_init,
+    .class_init = sam9x7_class_init,
+};
+
+static void sam9x7_register_types(void)
+{
+    type_register_static(&sam9x7_info);
+}
+
+type_init(sam9x7_register_types)

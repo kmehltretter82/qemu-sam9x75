@@ -9,6 +9,14 @@ aspeed_smc_dma_rw(const char *dir, uint32_t flash_addr, uint64_t dram_addr, uint
 aspeed_smc_write(uint64_t addr,  uint32_t size, uint64_t data) "@0x%" PRIx64 " size %u: 0x%" PRIx64
 aspeed_smc_flash_select(int cs, const char *prefix) "CS%d %sselect"
 
+# at91_ospi.c
+
+at91_ospi_reg_write(uint64_t offset, uint32_t value) "offset 0x%02" PRIx64 " value 0x%08" PRIx32
+at91_ospi_status_read(uint32_t isr, uint32_t sr) "ISR 0x%08" PRIx32 " SR 0x%08" PRIx32
+at91_ospi_transfer(bool write, uint32_t code, uint32_t addr, uint32_t ifr) "write %d code 0x%06" PRIx32 " address 0x%08" PRIx32 " IFR 0x%08" PRIx32
+at91_ospi_memory_read(uint64_t offset, unsigned int size, uint64_t value) "offset 0x%08" PRIx64 " size %u value 0x%" PRIx64
+at91_ospi_memory_write(uint64_t offset, unsigned int size, uint64_t value) "offset 0x%08" PRIx64 " size %u value 0x%" PRIx64
+
 # npcm7xx_fiu.c
 
 npcm7xx_fiu_enter_reset(const char *id, int reset_type) "%s reset type: %d"

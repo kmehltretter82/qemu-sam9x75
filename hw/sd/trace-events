@@ -24,6 +24,7 @@ sdbus_get_cmd_line(const char *bus_name, bool cmd_line) "@%s cmd_line: %u"
 # sdhci.c
 sdhci_set_inserted(const char *level) "card state changed: %s"
 sdhci_send_command(uint8_t cmd, uint32_t arg) "CMD%02u ARG[0x%08x]"
+sdhci_command_config(uint16_t blksize, uint16_t blkcnt, uint16_t trnmod, uint16_t cmdreg, uint64_t adma) "blksize=%u blkcnt=%u trnmod=0x%04x cmdreg=0x%04x adma=0x%08" PRIx64
 sdhci_error(const char *msg) "%s"
 sdhci_response4(uint32_t r0) "RSPREG[31..0]=0x%08x"
 sdhci_response16(uint32_t r3, uint32_t r2, uint32_t r1, uint32_t r0) "RSPREG[127..96]=0x%08x, RSPREG[95..64]=0x%08x, RSPREG[63..32]=0x%08x, RSPREG[31..0]=0x%08x"

@@ -319,6 +319,8 @@ static const FlashPartInfo known_devices[] = {
     { INFO("sst25wf020",  0xbf2503,      0,  64 << 10,   4, ER_4K) },
     { INFO("sst25wf040",  0xbf2504,      0,  64 << 10,   8, ER_4K) },
     { INFO("sst25wf080",  0xbf2505,      0,  64 << 10,  16, ER_4K) },
+    { INFO("sst26vf064b", 0xbf2643,      0,  64 << 10, 128, ER_4K),
+      .sfdp_read = m25p80_sfdp_sst26vf064b },
 
     /* ST Microelectronics -- newer production may have feature updates */
     { INFO("m25p05",      0x202010,      0,  32 << 10,   2, 0) },
@@ -425,6 +427,7 @@ typedef enum {
 
     RESET_ENABLE = 0x66,
     RESET_MEMORY = 0x99,
+    GLOBAL_BLOCK_UNLOCK = 0x98,
 
     /*
      * Micron: 0x35 - enable QPI
@@ -805,6 +808,12 @@ static void complete_collecting_data(Flash *s)
         }
 
         switch (get_man(s)) {
+        case MAN_SST:
+            if (s->pi->id[1] == 0x26 && s->len > 1) {
+                s->volatile_cfg = s->data[1];
+                s->quad_enable = !!(s->data[1] & BIT(1));
+            }
+            break;
         case MAN_SPANSION:
             s->quad_enable = !!(s->data[1] & 0x02);
             break;
@@ -903,6 +912,12 @@ static void reset_memory(Flash *s)
     s->aai_enable = false;
 
     switch (get_man(s)) {
+    case MAN_SST:
+        if (s->pi->id[1] == 0x26) {
+            /* BPNV=1; QE and the remaining configuration bits reset low. */
+            s->volatile_cfg = BIT(3);
+        }
+        break;
     case MAN_NUMONYX:
         s->volatile_cfg = 0;
         s->volatile_cfg |= VCFG_DUMMY;
@@ -1120,6 +1135,9 @@ static void decode_dio_read_cmd(Flash *s)
     s->needed_bytes = get_addr_length(s);
     /* Dummy cycles modeled with bytes writes instead of bits */
     switch (get_man(s)) {
+    case MAN_SST:
+        s->needed_bytes += 1;
+        break;
     case MAN_WINBOND:
         s->needed_bytes += WINBOND_CONTINUOUS_READ_MODE_CMD_LEN;
         break;
@@ -1156,6 +1174,10 @@ static void decode_qio_read_cmd(Flash *s)
     s->needed_bytes = get_addr_length(s);
     /* Dummy cycles modeled with bytes writes instead of bits */
     switch (get_man(s)) {
+    case MAN_SST:
+        /* SST26VF064B uses two mode and four dummy cycles on four I/Os. */
+        s->needed_bytes += 3;
+        break;
     case MAN_WINBOND:
         s->needed_bytes += WINBOND_CONTINUOUS_READ_MODE_CMD_LEN;
         s->needed_bytes += 2;
@@ -1326,6 +1348,10 @@ static void decode_new_cmd(Flash *s, uint32_t value)
         }
 
         switch (get_man(s)) {
+        case MAN_SST:
+            s->needed_bytes = (s->pi->id[1] == 0x26) ? 2 : 1;
+            s->state = STATE_COLLECTING_DATA;
+            break;
         case MAN_SPANSION:
             s->needed_bytes = 2;
             s->state = STATE_COLLECTING_DATA;
@@ -1530,6 +1556,12 @@ static void decode_new_cmd(Flash *s, uint32_t value)
         break;
     case RDCR_EQIO:
         switch (get_man(s)) {
+        case MAN_SST:
+            s->data[0] = s->volatile_cfg & 0xff;
+            s->pos = 0;
+            s->len = 1;
+            s->state = STATE_READING_DATA;
+            break;
         case MAN_SPANSION:
             s->data[0] = (!!s->quad_enable) << 1;
             s->pos = 0;
@@ -1551,6 +1583,15 @@ static void decode_new_cmd(Flash *s, uint32_t value)
         break;
     case RSTQIO:
         s->quad_enable = false;
+        break;
+    case GLOBAL_BLOCK_UNLOCK:
+        if (get_man(s) == MAN_SST && s->write_enable) {
+            s->block_protect0 = false;
+            s->block_protect1 = false;
+            s->block_protect2 = false;
+            s->block_protect3 = false;
+            s->write_enable = false;
+        }
         break;
     case AAI_WP:
         if (get_man(s) == MAN_SST) {
