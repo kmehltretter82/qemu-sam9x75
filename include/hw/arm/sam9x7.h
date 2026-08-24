@@ -29,6 +29,7 @@
 #include "hw/ssi/at91_ospi.h"
 #include "hw/timer/at91_pit64b.h"
 #include "hw/timer/at91_pit.h"
+#include "hw/timer/at91_rtt.h"
 #include "hw/watchdog/at91_wdt.h"
 #include "qom/object.h"
 #include "system/memory.h"
@@ -116,6 +117,7 @@ struct SAM9X7State {
     AT91PIOState pio[SAM9X7_NUM_PIO];
     AT91PIT64BState pit64b[2];
     AT91PITState pit;
+    AT91RTTState rtt;
     AT91WDTState wdt;
     OrIRQState sys_irq;
 

@@ -31,6 +31,7 @@
 #define SAM9X7_MPDDRC_BASE      0xffffe800
 #define SAM9X7_SMC_BASE         0xffffea00
 #define SAM9X7_RSTC_BASE        0xfffffe00
+#define SAM9X7_RTT_BASE         0xfffffe20
 #define SAM9X7_PIT_BASE         0xfffffe40
 #define SAM9X7_SCKC_BASE        0xfffffe50
 #define SAM9X7_SYSCWP_BASE      0xfffffedc
@@ -222,6 +223,24 @@
 #define RSTC_MR_URSTEN          BIT(0)
 #define RSTC_MR_URSTIEN         BIT(4)
 #define RSTC_KEY                0xa5000000
+
+#define RTT_MR                  0x00
+#define RTT_AR                  0x04
+#define RTT_VR                  0x08
+#define RTT_SR                  0x0c
+#define RTT_MODR                0x10
+#define RTT_TSR                 0x14
+
+#define RTT_MR_ALMIEN           BIT(16)
+#define RTT_MR_RTTINCIEN        BIT(17)
+#define RTT_MR_RTTRST           BIT(18)
+#define RTT_MR_RTTDIS           BIT(20)
+#define RTT_MR_INC2AEN          BIT(21)
+#define RTT_MR_RTC1HZ           BIT(24)
+#define RTT_SR_ALMS             BIT(0)
+#define RTT_SR_RTTINC           BIT(1)
+#define RTT_SR_RTTINC2          BIT(2)
+#define RTT_TSR_TS_OVF          BIT(31)
 
 #define PIT_MR                  0x00
 #define PIT_SR                  0x04
@@ -1399,6 +1418,106 @@ static void test_system_slowclock_pit_reset_and_protection(void)
     qtest_quit(qts);
 }
 
+static void test_rtt_count_alarm_modulo_and_protection(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+    uint32_t stopped_value;
+
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    aic_configure(qts, 1, AIC_SMR_LEVEL_HIGH | 3, 0x1111e771);
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_MR), ==,
+                    0x00008000);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_AR), ==,
+                    UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_VR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_SR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_MODR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_TSR), ==, 0);
+
+    qtest_writel(qts, SAM9X7_RTT_BASE + RTT_AR, 3);
+    qtest_writel(qts, SAM9X7_RTT_BASE + RTT_MR,
+                 RTT_MR_RTTRST | RTT_MR_ALMIEN | RTT_MR_RTTINCIEN | 32);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_MR), ==,
+                    RTT_MR_ALMIEN | RTT_MR_RTTINCIEN | 32);
+
+    /* RTPRES=32 on the 32 kHz slow clock produces a 1 ms increment. */
+    qtest_clock_step(qts, 1100000);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_VR), ==, 1);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(1));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_SR), ==,
+                    RTT_SR_RTTINC);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(1));
+
+    qtest_clock_step(qts, 2000000);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_VR), ==, 3);
+    value = qtest_readl(qts, SAM9X7_RTT_BASE + RTT_SR);
+    g_assert_cmphex(value, ==, RTT_SR_ALMS | RTT_SR_RTTINC);
+
+    qtest_writel(qts, SAM9X7_RTT_BASE + RTT_AR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_RTT_BASE + RTT_MODR, 1);
+    qtest_writel(qts, SAM9X7_RTT_BASE + RTT_MR,
+                 RTT_MR_RTTRST | RTT_MR_INC2AEN | 32);
+    qtest_clock_step(qts, 64100000);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_VR), ==, 64);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(1));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_TSR), ==, 64);
+    value = qtest_readl(qts, SAM9X7_RTT_BASE + RTT_SR);
+    g_assert_cmphex(value, ==, RTT_SR_RTTINC | RTT_SR_RTTINC2);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(1));
+
+    /* A second modulo event before SR is read marks the timestamp stale. */
+    qtest_clock_step(qts, 128000000);
+    value = qtest_readl(qts, SAM9X7_RTT_BASE + RTT_TSR);
+    g_assert_true(value & RTT_TSR_TS_OVF);
+    g_assert_cmphex(value & ~RTT_TSR_TS_OVF, ==, 192);
+    g_assert_true(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_SR) &
+                  RTT_SR_RTTINC2);
+    g_assert_false(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_TSR) &
+                   RTT_TSR_TS_OVF);
+
+    stopped_value = qtest_readl(qts, SAM9X7_RTT_BASE + RTT_VR);
+    qtest_writel(qts, SAM9X7_RTT_BASE + RTT_MR, RTT_MR_RTTDIS | 32);
+    qtest_clock_step(qts, 10000000);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_VR), ==,
+                    stopped_value);
+    qtest_writel(qts, SAM9X7_RTT_BASE + RTT_MR, 32);
+    qtest_clock_step(qts, 1100000);
+    g_assert_cmpuint(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_VR), >,
+                     stopped_value);
+
+    /* RTC1HZ changes the counter source but not the prescaler status flag. */
+    qtest_writel(qts, SAM9X7_RTT_BASE + RTT_MR,
+                 RTT_MR_RTTRST | RTT_MR_RTC1HZ | RTT_MR_RTTINCIEN | 32);
+    qtest_clock_step(qts, 2100000);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_VR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_SR), ==,
+                    RTT_SR_RTTINC);
+    qtest_clock_step(qts, 1000000000);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_VR), ==, 1);
+    qtest_readl(qts, SAM9X7_RTT_BASE + RTT_SR);
+
+    qtest_writel(qts, SAM9X7_SYSCWP_BASE + SYSC_WPMR,
+                 SYSC_WPMR_KEY | SYSC_WPMR_WPEN);
+    qtest_writel(qts, SAM9X7_RTT_BASE + RTT_MR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_MR), ==,
+                    RTT_MR_RTC1HZ | RTT_MR_RTTINCIEN | 32);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SYSCWP_BASE + SYSC_WPSR), ==,
+                    (0x20 << 8) | 1);
+    qtest_writel(qts, SAM9X7_RTT_BASE + RTT_AR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_AR), ==,
+                    UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SYSCWP_BASE + SYSC_WPSR), ==,
+                    (0x24 << 8) | 1);
+    qtest_writel(qts, SAM9X7_RTT_BASE + RTT_MODR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_MODR), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SYSCWP_BASE + SYSC_WPSR), ==,
+                    (0x30 << 8) | 1);
+
+    qtest_quit(qts);
+}
+
 static void test_sfr_registers_resume_and_protection(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -1925,6 +2044,8 @@ int main(int argc, char **argv)
                    test_pit64b_timing_gating_and_irq);
     qtest_add_func("sam9x75/system/slowclock-pit-reset-and-protection",
                    test_system_slowclock_pit_reset_and_protection);
+    qtest_add_func("sam9x75/rtt/count-alarm-modulo-and-protection",
+                   test_rtt_count_alarm_modulo_and_protection);
     qtest_add_func("sam9x75/sfr/registers-resume-and-protection",
                    test_sfr_registers_resume_and_protection);
     qtest_add_func("sam9x75/mpddrc/registers-errors-and-irq",

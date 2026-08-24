@@ -35,6 +35,10 @@ config AT91_PIT
     bool
     select PTIMER
 
+config AT91_RTT
+    bool
+    select PTIMER
+
 config PXA2XX_TIMER
     bool
 

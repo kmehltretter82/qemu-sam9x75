@@ -122,6 +122,14 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     qdev_connect_gpio_out_named(DEVICE(&s->wdt), "reset", 0,
         qdev_get_gpio_in_named(DEVICE(&s->rstc), "wdt-reset", 0));
 
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->rtt), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->rtt), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_RTT_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->rtt), 0,
+                       qdev_get_gpio_in(DEVICE(&s->sys_irq), 5));
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->pit), errp)) {
         return;
     }
@@ -355,6 +363,11 @@ static void sam9x7_init(Object *obj)
     qdev_connect_clock_in(DEVICE(&s->pit), "mck",
                           qdev_get_clock_out(DEVICE(&s->pmc), "mck"));
     s->pit.sysc = &s->sysc;
+
+    object_initialize_child(obj, "rtt", &s->rtt, TYPE_AT91_RTT);
+    qdev_connect_clock_in(DEVICE(&s->rtt), "slck",
+                          qdev_get_clock_out(DEVICE(&s->sckc), "md-slck"));
+    s->rtt.sysc = &s->sysc;
 
     object_initialize_child(obj, "sfr", &s->sfr, TYPE_AT91_SFR);
 

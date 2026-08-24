@@ -102,8 +102,10 @@ Support matrix
      - WDT has its startup-enabled down-counter, window/level events,
        interrupts, lock and key rules, synchronization guard, reset policy and
        migration state.  RSTC has keyed user/external reset control, status and
-       interrupt behavior.  SHDWC, RTT, RTC, GPBR and several wake/reset causes
-       are missing.  Both PIT64B instances have clocked one-shot/continuous
+       interrupt behavior.  RTT has slow-clock prescaling, RTC 1 Hz selection,
+       alarm and modulo events, the shared system interrupt, write protection
+       and migration state.  SHDWC, RTC, GPBR and several wake/reset causes are
+       missing.  Both PIT64B instances have clocked one-shot/continuous
        operation, interrupts, protection, sequence errors and migration
        coverage.
    * - FLEXCOM0--12
