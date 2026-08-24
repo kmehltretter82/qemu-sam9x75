@@ -57,5 +57,8 @@ struct AT91TWIState {
 };
 
 I2CBus *at91_twi_get_bus(AT91TWIState *s);
+uint64_t at91_twi_flexcom_read(AT91TWIState *s, unsigned int size);
+void at91_twi_flexcom_write(AT91TWIState *s, uint64_t value,
+                            unsigned int size);
 
 #endif /* HW_I2C_AT91_TWI_H */

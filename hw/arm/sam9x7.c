@@ -344,18 +344,37 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
         mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->flexcom[i]), 0);
         memory_region_add_subregion(s->memory, sam9x7_flexcom_base[i], mr);
 
+        if (!sysbus_realize(SYS_BUS_DEVICE(&s->usart[i]), errp)) {
+            return;
+        }
+        mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->usart[i]), 0);
+        memory_region_add_subregion(s->memory,
+                                    sam9x7_flexcom_base[i] + 0x200, mr);
+
         if (!sysbus_realize(SYS_BUS_DEVICE(&s->twi[i]), errp)) {
             return;
         }
         mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->twi[i]), 0);
         memory_region_add_subregion(s->memory,
                                     sam9x7_flexcom_base[i] + 0x600, mr);
+        qdev_connect_gpio_out_named(DEVICE(&s->flexcom[i]),
+                                    "usart-enabled", 0,
+            qdev_get_gpio_in_named(DEVICE(&s->usart[i]),
+                                   "flexcom-enabled", 0));
         qdev_connect_gpio_out_named(DEVICE(&s->flexcom[i]), "twi-enabled", 0,
             qdev_get_gpio_in_named(DEVICE(&s->twi[i]),
                                    "flexcom-enabled", 0));
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->usart[i]), 0,
+            qdev_get_gpio_in_named(DEVICE(&s->flexcom[i]), "usart-irq", 0));
         sysbus_connect_irq(SYS_BUS_DEVICE(&s->twi[i]), 0,
+            qdev_get_gpio_in_named(DEVICE(&s->flexcom[i]), "twi-irq", 0));
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->flexcom[i]), 0,
                            qdev_get_gpio_in(DEVICE(&s->aic),
                                             sam9x7_flexcom_pid[i]));
+        qdev_connect_gpio_out_named(DEVICE(&s->usart[i]), "tx-request", 0,
+            qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", i * 2));
+        qdev_connect_gpio_out_named(DEVICE(&s->usart[i]), "rx-request", 0,
+            qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", i * 2 + 1));
     }
 
     for (i = 0; i < ARRAY_SIZE(s->sdmmc); i++) {
@@ -599,14 +618,24 @@ static void sam9x7_init(Object *obj)
     for (i = 0; i < ARRAY_SIZE(s->flexcom); i++) {
         g_autofree char *flexcom_name =
             g_strdup_printf("flexcom[%u]", i);
+        g_autofree char *usart_name = g_strdup_printf("usart[%u]", i);
         g_autofree char *twi_name = g_strdup_printf("twi[%u]", i);
         g_autofree char *bus_name = g_strdup_printf("i2c%u", i);
         g_autofree char *pclk_name =
             g_strdup_printf("pclk[%u]", sam9x7_flexcom_pid[i]);
+        g_autofree char *gclk_name =
+            g_strdup_printf("gclk[%u]", sam9x7_flexcom_pid[i]);
 
         object_initialize_child(obj, flexcom_name, &s->flexcom[i],
                                 TYPE_AT91_FLEXCOM);
+        object_initialize_child(obj, usart_name, &s->usart[i],
+                                TYPE_AT91_USART);
         object_initialize_child(obj, twi_name, &s->twi[i], TYPE_AT91_TWI);
+        at91_flexcom_set_children(&s->flexcom[i], &s->usart[i], &s->twi[i]);
+        qdev_connect_clock_in(DEVICE(&s->usart[i]), "pclk",
+                             qdev_get_clock_out(DEVICE(&s->pmc), pclk_name));
+        qdev_connect_clock_in(DEVICE(&s->usart[i]), "gclk",
+                             qdev_get_clock_out(DEVICE(&s->pmc), gclk_name));
         qdev_prop_set_string(DEVICE(&s->twi[i]), "bus-name", bus_name);
         qdev_connect_clock_in(DEVICE(&s->twi[i]), "pclk",
                              qdev_get_clock_out(DEVICE(&s->pmc), pclk_name));

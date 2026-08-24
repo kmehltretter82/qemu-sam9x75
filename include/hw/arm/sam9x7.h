@@ -11,6 +11,7 @@
 #include "hw/audio/at91_i2smcc.h"
 #include "hw/block/at91_nand.h"
 #include "hw/char/at91_dbgu.h"
+#include "hw/char/at91_usart.h"
 #include "hw/core/clock.h"
 #include "hw/core/or-irq.h"
 #include "hw/core/sysbus.h"
@@ -144,6 +145,7 @@ struct SAM9X7State {
     AT91XDMACState xdmac;
     CadenceGEMState gmac;
     AT91FlexcomState flexcom[SAM9X7_NUM_FLEXCOM];
+    AT91USARTState usart[SAM9X7_NUM_FLEXCOM];
     AT91TWIState twi[SAM9X7_NUM_FLEXCOM];
     AT91SDHCIState sdmmc[SAM9X7_NUM_SDMMC];
     AT91PIOState pio[SAM9X7_NUM_PIO];

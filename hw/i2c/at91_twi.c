@@ -787,6 +787,17 @@ static const MemoryRegionOps at91_twi_ops = {
     },
 };
 
+uint64_t at91_twi_flexcom_read(AT91TWIState *s, unsigned int size)
+{
+    return at91_twi_read(s, TWI_RHR, size);
+}
+
+void at91_twi_flexcom_write(AT91TWIState *s, uint64_t value,
+                            unsigned int size)
+{
+    at91_twi_write(s, TWI_THR, value, size);
+}
+
 static void at91_twi_set_flexcom_enabled(void *opaque, int n, int level)
 {
     AT91TWIState *s = AT91_TWI(opaque);

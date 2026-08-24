@@ -10,6 +10,9 @@
 #include "hw/core/sysbus.h"
 #include "qom/object.h"
 
+typedef struct AT91TWIState AT91TWIState;
+typedef struct AT91USARTState AT91USARTState;
+
 #define TYPE_AT91_FLEXCOM "at91-flexcom"
 OBJECT_DECLARE_SIMPLE_TYPE(AT91FlexcomState, AT91_FLEXCOM)
 
@@ -22,8 +25,20 @@ struct AT91FlexcomState {
     SysBusDevice parent_obj;
 
     MemoryRegion mmio;
+    qemu_irq irq;
+    qemu_irq usart_enabled;
+    qemu_irq spi_enabled;
     qemu_irq twi_enabled;
+    AT91USARTState *usart;
+    AT91TWIState *twi;
     uint32_t mr;
+    uint32_t thr;
+    bool usart_irq_level;
+    bool spi_irq_level;
+    bool twi_irq_level;
 };
+
+void at91_flexcom_set_children(AT91FlexcomState *s, AT91USARTState *usart,
+                               AT91TWIState *twi);
 
 #endif /* HW_MISC_AT91_FLEXCOM_H */

@@ -163,6 +163,7 @@ static void sam9x75_curiosity_init(MachineState *machine)
     I2CBus *power_monitor_bus;
     DriveInfo *nand_dinfo;
     DriveInfo *qspi_dinfo;
+    unsigned int i;
 
     if (machine->ram_size != SAM9X7_DDR_SIZE) {
         error_report("sam9x75-curiosity requires 256 MiB of RAM");
@@ -185,6 +186,10 @@ static void sam9x75_curiosity_init(MachineState *machine)
     object_property_set_link(OBJECT(soc), "memory", OBJECT(sysmem),
                              &error_abort);
     qdev_prop_set_chr(DEVICE(&soc->dbgu), "chardev", serial_hd(0));
+    for (i = 0; i < ARRAY_SIZE(soc->usart); i++) {
+        qdev_prop_set_chr(DEVICE(&soc->usart[i]), "chardev",
+                          serial_hd(i + 1));
+    }
     qemu_configure_nic_device(DEVICE(&soc->gmac), true, NULL);
     qdev_prop_set_bit(DEVICE(&soc->gmac), "phy-clocked",
                       board->ethernet_25mhz);

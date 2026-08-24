@@ -1,6 +1,9 @@
 config AT91_DBGU
     bool
 
+config AT91_USART
+    bool
+
 config ESCC
     bool
 

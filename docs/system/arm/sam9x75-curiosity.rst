@@ -121,21 +121,28 @@ Support matrix
        and wake causes need hardware comparison.
    * - FLEXCOM0--12
      - Initial
-     - All thirteen wrappers expose mode ownership and uniquely named I2C buses.
+     - All thirteen wrappers expose mode ownership, shared AIC routing and
+       uniquely named I2C buses.  Each USART personality has the SAM9X7
+       register masks and reset values, a 16-byte FIFO, byte/halfword/word
+       transfers, clocked character-backend transmission and reception,
+       local/automatic/remote loopback, timeout and comparison events, write
+       protection, migration and its documented XDMAC transmit/receive pair.
        The TWI host path covers polled byte transfers, internal addresses,
        repeated starts, NACK and AIC signaling, alternative-command mode,
        FIFO-width accesses, masks, write protection, reset and migration.
-       USART/SPI children, true asynchronous FIFOs, client mode, SMBus/PEC and
-       timing/arbitration fidelity remain missing.
+       SPI personalities, bit-level USART framing and synchronous/protocol
+       engines, complete flow-control endpoints, TWI client mode, SMBus/PEC
+       and timing/arbitration fidelity remain missing.
    * - XDMAC
      - Initial
      - All 16 channels expose global/channel control, clock gating, memory copy
        and memset, byte/halfword/word widths, address modes and 2D strides,
        software and external-request pacing, suspend/resume/flush/disable,
        linked-list descriptor views, completion/error interrupts and migration
-       state.  AES, SHA and TDES request lines are wired; the remaining
-       peripheral request lines, security policy, microblock/burst timing and
-       coherency effects remain missing.
+       state.  DBGU, every FLEXCOM USART, I2SMCC, Class-D, AES, SHA and TDES
+       request lines are wired; the remaining peripheral request lines,
+       security policy, microblock/burst timing and coherency effects remain
+       missing.
    * - SDMMC0 and SDMMC1
      - Initial
      - Both SAM9X7 hosts, removable-card attachment and PA23 card detect are
@@ -300,11 +307,12 @@ phase green merely by avoiding it in the device tree.
    PMIC nRSTO/NRST handoff
    now distinguishes VDDCORE resets from the retained VDDBU domain.  Next
    complete the remaining meaningful jumper/mux selections.
-#. **Complete reusable data paths.**  Add the USART and SPI personalities to
-   all applicable FLEXCOM instances, complete TWI client/SMBus/PEC/FIFO
-   behavior, and wire every documented XDMAC request.  Complete SSC, TC1,
-   external timer pins, PWM and ADC so expansion-board drivers can use normal
-   QEMU chardev, SSI, I2C and analog/digital endpoint abstractions.
+#. **Complete reusable data paths.**  Finish synchronous and protocol-specific
+   USART behavior, add the SPI personality to all applicable FLEXCOM
+   instances, complete TWI client/SMBus/PEC/FIFO behavior, and wire every
+   documented XDMAC request.  Complete SSC, TC1, external timer pins, PWM and
+   ADC so expansion-board drivers can use normal QEMU chardev, SSI, I2C and
+   analog/digital endpoint abstractions.
 #. **Close storage and memory-controller fidelity.**  Complete SDHCI command,
    error, media-change and migration behavior; implement NAND OOB, bad-block,
    PMECC generation/correction and DMA; finish SMC, matrix and MPDDRC-visible
@@ -335,6 +343,12 @@ The initial machine can be inspected with qtest or started without firmware::
 
   qemu-system-arm -M sam9x75-curiosity -nographic
 
+``serial0`` is the dedicated DBGU console.  ``serial1`` through ``serial13``
+are FLEXCOM0 through FLEXCOM12 respectively, so FLEXCOM0 can instead be used
+as the interactive character backend with::
+
+  qemu-system-arm -M sam9x75-curiosity -serial null -serial stdio
+
 An unmodified AT91Bootstrap ELF and SD image can exercise the current media
 boot path directly::
 
@@ -349,12 +363,11 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The 66-test board qtest baseline and this boot are clean of SAM9X75 model
+The 71-test board qtest baseline and this boot are clean of SAM9X75 model
 warnings with ``-d unimp,guest_errors``.  Generic SD diagnostics still report
-the expected failed MMC/SDIO probes against a memory-only SD card.  FLEXCOM
-USART children remain missing but are not the selected board console.
-RomBOOT itself is also missing; ``-kernel`` is a development entry path and
-not a substitute for ROM media selection.
+the expected failed MMC/SDIO probes against a memory-only SD card.  RomBOOT
+itself is still missing; ``-kernel`` is a development entry path and not a
+substitute for ROM media selection.
 
 By default a valid SHDWC shutdown command requests a normal QEMU guest
 shutdown.  Backup-domain wake-up experiments can leave the process running
