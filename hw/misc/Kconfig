@@ -59,6 +59,9 @@ config ARM11SCU
 config AT91_PMC
     bool
 
+config AT91_MATRIX
+    bool
+
 config AT91_PMECC
     bool
 

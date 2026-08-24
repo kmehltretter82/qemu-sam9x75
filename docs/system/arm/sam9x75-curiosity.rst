@@ -66,8 +66,19 @@ Support matrix
        unaligned-access behavior remain under audit.
    * - ROM and boot window
      - Initial
-     - 176 KiB ROM and reset alias mapped; RomBOOT image/behavior, straps,
-       remap and revision errata remain missing.
+     - The 176 KiB ROM is mapped at its physical address and through the reset
+       alias.  CPU-host MATRIX remap switches address zero to the 64 KiB
+       SRAM0 view and is covered across reset and migration.  A genuine
+       RomBOOT image/behavior, straps and revision errata remain missing.
+   * - Bus MATRIX
+     - Initial
+     - All 14 host and 12 client configuration/priority banks, remap control,
+       error interrupt mask/status/address banks, write protection, permanent
+       configuration freeze and migration state have their documented reset
+       values and masks.  Arm926 instruction/data remap bits 12/13 drive the
+       shared QEMU CPU boot view.  Per-host address spaces for the other bus
+       initiators, arbitration timing and automatic access-error capture are
+       not yet modeled.
    * - SRAM and DDR3L
      - Initial
      - 64 KiB SRAM0, 4 KiB SRAM1 and fixed 256 MiB DDR mapped.  MPDDRC
@@ -335,11 +346,13 @@ phase green merely by avoiding it in the device tree.
 #. **Close storage and memory-controller fidelity.**  Complete SDHCI command,
    error, media-change and migration behavior; implement NAND OOB, bad-block,
    PMECC generation/correction and DMA; finish SMC, matrix and MPDDRC-visible
-   behavior; and cover persistent QSPI protocol widths and errata.
+   behavior, including per-host remap and arbitration effects; and cover
+   persistent QSPI protocol widths and errata.
 #. **Boot like the board.**  Implement the mask-ROM media-selection state
-   machine, straps, reset alias/remap, authentication/error fallbacks and the
-   documented QSPI erratum.  Prove cold boot from SD, QSPI NOR and raw NAND
-   without using ``-kernel`` as a ROM substitute.
+   machine, straps, authentication/error fallbacks and the documented QSPI
+   erratum on top of the modeled reset and SRAM remap path.  Prove cold boot
+   from SD, QSPI NOR and raw NAND without using ``-kernel`` as a ROM
+   substitute.
 #. **Add major external interfaces.**  Implement OHCI/EHCI/UDPHS with board
    power and hotplug wiring, then both M_CAN instances and their shared SRAM.
    Prove host storage/input, gadget/SAM-BA and CAN-FD traffic with existing
@@ -382,7 +395,7 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The 78-test board qtest baseline and this boot are clean of SAM9X75 model
+The 81-test board qtest baseline and this boot are clean of SAM9X75 model
 warnings with ``-d unimp,guest_errors``.  Generic SD diagnostics still report
 the expected failed MMC/SDIO probes against a memory-only SD card.  RomBOOT
 itself is still missing; ``-kernel`` is a development entry path and not a

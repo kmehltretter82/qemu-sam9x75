@@ -24,6 +24,7 @@
 #include "hw/misc/at91_tdes.h"
 #include "hw/misc/at91_flexcom.h"
 #include "hw/misc/at91_gpbr.h"
+#include "hw/misc/at91_matrix.h"
 #include "hw/misc/at91_pmc.h"
 #include "hw/misc/at91_mpddrc.h"
 #include "hw/misc/at91_pmecc.h"
@@ -131,6 +132,7 @@ struct SAM9X7State {
     AT91CLASSDState classd;
     AT91I2SMCCState i2smcc;
     AT91DBGUState dbgu;
+    AT91MatrixState matrix;
     AT91PMCState pmc;
     AT91PMECCState pmecc;
     AT91MPDDRCState mpddrc;
@@ -167,6 +169,7 @@ struct SAM9X7State {
 
     MemoryRegion rom;
     MemoryRegion boot_alias;
+    MemoryRegion boot_sram_alias;
     MemoryRegion sram0;
     MemoryRegion sram1;
     MemoryRegion *memory;

@@ -48,6 +48,7 @@
 #define SAM9X7_TCB_BASE         0xf8008000
 #define SAM9X7_GMAC_BASE        0xf802c000
 #define SAM9X7_SFR_BASE         0xf8050000
+#define SAM9X7_MATRIX_BASE      0xffffde00
 #define SAM9X7_PMECC_BASE       0xffffe000
 #define SAM9X7_PMERRLOC_BASE    0xffffe600
 #define SAM9X7_MPDDRC_BASE      0xffffe800
@@ -135,6 +136,23 @@
 #define AIC_DCR                 0x6c
 #define AIC_WPMR                0xe4
 #define AIC_WPSR                0xe8
+
+#define MATRIX_MCFG(n)          ((n) * 4)
+#define MATRIX_SCFG(n)          (0x40 + (n) * 4)
+#define MATRIX_PRAS(n)          (0x80 + (n) * 8)
+#define MATRIX_PRBS(n)          (0x84 + (n) * 8)
+#define MATRIX_MRCR             0x100
+#define MATRIX_MEIER            0x150
+#define MATRIX_MEIDR            0x154
+#define MATRIX_MEIMR            0x158
+#define MATRIX_MESR             0x15c
+#define MATRIX_MEAR(n)          (0x160 + (n) * 4)
+#define MATRIX_WPMR             0x1e4
+#define MATRIX_WPSR             0x1e8
+
+#define MATRIX_WPMR_KEY         0x4d415400
+#define MATRIX_WPMR_WPEN        BIT(0)
+#define MATRIX_WPMR_CFGFRZ      BIT(7)
 
 #define AIC_SMR_LEVEL_HIGH      (2U << 5)
 #define AIC_SMR_EDGE_RISING     (3U << 5)
@@ -1256,6 +1274,181 @@ static void test_memory_and_identification(void)
                     qtest_readl(qts, SAM9X7_BOOT_BASE));
 
     qtest_quit(qts);
+}
+
+static void test_matrix_registers_and_protection(void)
+{
+    static const uint32_t pras_reset[] = {
+        0x00000777, 0x00077777, 0x00007700, 0x00070000,
+        0x00000077, 0x00077777, 0x00077000, 0x00007000,
+        0x00077000, 0x00077000, 0x00077070, 0x00000000,
+    };
+    static const uint32_t prbs_reset[] = {
+        0x00000000, 0x00110000, 0x00010000, 0x00100000,
+        0x00000000, 0x00110000, 0x00110000, 0x00000000,
+        0x00100000, 0x00100000, 0x00110000, 0x00110000,
+    };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int i;
+
+    for (i = 0; i < 14; i++) {
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE +
+                                    MATRIX_MCFG(i)), ==, 4);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE +
+                                    MATRIX_MEAR(i)), ==, 0);
+        qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_MCFG(i),
+                     UINT32_MAX);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE +
+                                    MATRIX_MCFG(i)), ==, 7);
+    }
+    for (i = 0; i < 12; i++) {
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE +
+                                    MATRIX_SCFG(i)), ==, 0x000001ff);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE +
+                                    MATRIX_PRAS(i)), ==, pras_reset[i]);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE +
+                                    MATRIX_PRBS(i)), ==, prbs_reset[i]);
+
+        qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_SCFG(i),
+                     UINT32_MAX);
+        qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_PRAS(i),
+                     UINT32_MAX);
+        qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_PRBS(i),
+                     UINT32_MAX);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE +
+                                    MATRIX_SCFG(i)), ==, 0x003f01ff);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE +
+                                    MATRIX_PRAS(i)), ==, 0x77777777);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE +
+                                    MATRIX_PRBS(i)), ==, 0x00777777);
+    }
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_MRCR),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_MEIMR),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_MESR),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_WPMR),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_WPSR),
+                    ==, 0);
+
+    qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_MEIER, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_MEIMR),
+                    ==, 0x00003fff);
+    qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_MEIDR, 0x1555);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_MEIMR),
+                    ==, 0x00002aaa);
+
+    qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_WPMR,
+                 MATRIX_WPMR_KEY | MATRIX_WPMR_WPEN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_WPMR),
+                    ==, MATRIX_WPMR_WPEN);
+    qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_WPMR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_WPMR),
+                    ==, MATRIX_WPMR_WPEN);
+    qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_SCFG(3), 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_SCFG(3)),
+                    ==, 0x003f01ff);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_WPSR),
+                    ==, (MATRIX_SCFG(3) << 8) | 1);
+
+    qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_WPMR, MATRIX_WPMR_KEY);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_WPSR),
+                    ==, 0);
+    qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_SCFG(3), 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_SCFG(3)),
+                    ==, 0);
+
+    qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_WPMR,
+                 MATRIX_WPMR_KEY | MATRIX_WPMR_CFGFRZ);
+    qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_WPMR, MATRIX_WPMR_KEY);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_WPMR),
+                    ==, MATRIX_WPMR_CFGFRZ);
+    qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_MRCR, BIT(12));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_MRCR),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_WPSR),
+                    ==, (MATRIX_MRCR << 8) | 1);
+
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_MCFG(0)),
+                    ==, 4);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_SCFG(3)),
+                    ==, 0x000001ff);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_MEIMR),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_WPMR),
+                    ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_matrix_boot_remap(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t rom_word = qtest_readl(qts, SAM9X7_ROM_BASE);
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==, rom_word);
+    qtest_writel(qts, SAM9X7_SRAM0_BASE, 0x1234abcd);
+    qtest_writel(qts, SAM9X7_SRAM0_BASE + 4, 0x5678ef90);
+
+    /* A non-CPU host remap must not alter the CPU's boot view. */
+    qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_MRCR, BIT(0));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==, rom_word);
+
+    qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_MRCR, BIT(12));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==, 0x1234abcd);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE + 4), ==,
+                    0x5678ef90);
+    qtest_writel(qts, SAM9X7_BOOT_BASE + 4, 0xa5a55a5a);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + 4), ==,
+                    0xa5a55a5a);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_ROM_BASE), ==, rom_word);
+
+    qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_MRCR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==, rom_word);
+    qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_MRCR, BIT(13));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==, 0x1234abcd);
+
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_MRCR),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==, rom_word);
+
+    qtest_quit(qts);
+}
+
+static void test_matrix_remap_migration(void)
+{
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+
+    qtest_writel(from, SAM9X7_SRAM0_BASE, 0xfeed9750);
+    qtest_writel(from, SAM9X7_MATRIX_BASE + MATRIX_MCFG(4), 2);
+    qtest_writel(from, SAM9X7_MATRIX_BASE + MATRIX_MRCR,
+                 BIT(12) | BIT(13));
+    qtest_writel(from, SAM9X7_MATRIX_BASE + MATRIX_WPMR,
+                 MATRIX_WPMR_KEY | MATRIX_WPMR_WPEN);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_BOOT_BASE), ==, 0xfeed9750);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_cmphex(qtest_readl(to, SAM9X7_MATRIX_BASE + MATRIX_MCFG(4)),
+                    ==, 2);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_MATRIX_BASE + MATRIX_MRCR),
+                    ==, BIT(12) | BIT(13));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_MATRIX_BASE + MATRIX_WPMR),
+                    ==, MATRIX_WPMR_WPEN);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SRAM0_BASE), ==, 0xfeed9750);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_BOOT_BASE), ==, 0xfeed9750);
+
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
 static void test_dbgu_registers_and_loopback(void)
@@ -8299,6 +8492,11 @@ int main(int argc, char **argv)
 
     qtest_add_func("sam9x75/memory-and-identification",
                    test_memory_and_identification);
+    qtest_add_func("sam9x75/matrix/registers-and-protection",
+                   test_matrix_registers_and_protection);
+    qtest_add_func("sam9x75/matrix/boot-remap", test_matrix_boot_remap);
+    qtest_add_func("sam9x75/matrix/remap-migration",
+                   test_matrix_remap_migration);
     qtest_add_func("sam9x75/dbgu/registers-and-loopback",
                    test_dbgu_registers_and_loopback);
     qtest_add_func("sam9x75/dbgu/chardev", test_dbgu_chardev);

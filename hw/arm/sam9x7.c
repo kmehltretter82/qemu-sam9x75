@@ -59,6 +59,14 @@ static void sam9x7_set_reset(void *opaque, int n, int level)
     }
 }
 
+static void sam9x7_set_boot_remap(void *opaque, int n, int level)
+{
+    SAM9X7State *s = SAM9X7(opaque);
+
+    memory_region_set_enabled(&s->boot_alias, !level);
+    memory_region_set_enabled(&s->boot_sram_alias, level);
+}
+
 static void sam9x7_realize(DeviceState *dev, Error **errp)
 {
     SAM9X7State *s = SAM9X7(dev);
@@ -456,6 +464,23 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     }
     memory_region_add_subregion(s->memory, SAM9X7_SRAM0_BASE, &s->sram0);
 
+    memory_region_init_alias(&s->boot_sram_alias, OBJECT(dev),
+                             "sam9x7.boot-sram0-alias", &s->sram0, 0,
+                             SAM9X7_SRAM0_SIZE);
+    memory_region_set_enabled(&s->boot_sram_alias, false);
+    memory_region_add_subregion_overlap(s->memory, SAM9X7_BOOT_BASE,
+                                        &s->boot_sram_alias, 1);
+
+    qdev_connect_gpio_out_named(DEVICE(&s->matrix), "cpu-remap", 0,
+        qdev_get_gpio_in_named(dev, "boot-remap", 0));
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->matrix), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->matrix), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_MATRIX_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->matrix), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 21));
+
     /* SRAM1 backs the OTP controller's emulation mode. */
     if (!memory_region_init_ram(&s->sram1, OBJECT(dev), "sam9x7.sram1",
                                 SAM9X7_SRAM1_SIZE, errp)) {
@@ -510,6 +535,8 @@ static void sam9x7_init(Object *obj)
 
     qdev_init_gpio_in_named(DEVICE(s), sam9x7_set_reset,
                             SAM9X7_GPIO_RESET, 2);
+    qdev_init_gpio_in_named(DEVICE(s), sam9x7_set_boot_remap,
+                            "boot-remap", 1);
 
     object_initialize_child(obj, "cpu", &s->cpu,
                             ARM_CPU_TYPE_NAME("arm926"));
@@ -533,6 +560,8 @@ static void sam9x7_init(Object *obj)
     clock_set_hz(s->slow_xtal, 32768);
 
     object_initialize_child(obj, "sysc", &s->sysc, TYPE_AT91_SYSCWP);
+
+    object_initialize_child(obj, "matrix", &s->matrix, TYPE_AT91_MATRIX);
 
     object_initialize_child(obj, "sckc", &s->sckc, TYPE_AT91_SCKC);
     qdev_connect_clock_in(DEVICE(&s->sckc), "slow-rc", s->slow_rc);

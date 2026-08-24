@@ -189,6 +189,7 @@ config SAM9X7
     select AT91_USART
     select AT91_I2SMCC
     select AT91_GPBR
+    select AT91_MATRIX
     select AT91_PIO
     select AT91_PIT
     select AT91_PIT64B
