@@ -42,13 +42,19 @@ bool sam9x7_core_reset_requested(const SAM9X7State *s)
 static void sam9x7_set_reset(void *opaque, int n, int level)
 {
     SAM9X7State *s = SAM9X7(opaque);
+    CPUState *cs = CPU(&s->cpu);
 
     switch (n) {
     case SAM9X7_RESET_POWER:
         qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&s->rstc),
                                             "power-reset", 0), level);
         if (level) {
-            cpu_interrupt(CPU(&s->cpu), CPU_INTERRUPT_HALT);
+            cpu_interrupt(cs, CPU_INTERRUPT_HALT);
+        } else {
+            /* Release a CPU held while the PMIC's nRSTO was asserted. */
+            cpu_reset_interrupt(cs, CPU_INTERRUPT_HALT);
+            cs->halted = 0;
+            qemu_cpu_kick(cs);
         }
         break;
     case SAM9X7_RESET_REQUEST:

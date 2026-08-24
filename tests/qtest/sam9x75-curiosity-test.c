@@ -16,6 +16,7 @@
 
 #define SAM9X7_BOOT_BASE        0x00000000
 #define SAM9X7_ROM_BASE         0x00100000
+#define SAM9X7_ROM_SIZE         0x0002c000
 #define SAM9X7_SRAM0_BASE       0x00300000
 #define SAM9X7_SRAM1_BASE       0x00400000
 #define SAM9X7_DDR_BASE         0x20000000
@@ -1449,6 +1450,188 @@ static void test_matrix_remap_migration(void)
 
     qtest_quit(to);
     qtest_quit(from);
+}
+
+static void test_rom_image_loading(void)
+{
+    const uint32_t first = cpu_to_le32(0xea000006);
+    const uint32_t last = cpu_to_le32(0x9750cafe);
+    g_autofree char *rom_path = NULL;
+    QTestState *qts;
+    GError *error = NULL;
+    int fd;
+    int ret;
+
+    fd = g_file_open_tmp("sam9x75-rom-XXXXXX", &rom_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = ftruncate(fd, SAM9X7_ROM_SIZE);
+    g_assert_cmpint(ret, ==, 0);
+    ret = pwrite(fd, &first, sizeof(first), 0);
+    g_assert_cmpint(ret, ==, sizeof(first));
+    ret = pwrite(fd, &last, sizeof(last), SAM9X7_ROM_SIZE - sizeof(last));
+    g_assert_cmpint(ret, ==, sizeof(last));
+    close(fd);
+
+    qts = qtest_initf(SAM9X75_MACHINE " -bios %s", rom_path);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_ROM_BASE), ==,
+                    le32_to_cpu(first));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==,
+                    le32_to_cpu(first));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_ROM_BASE +
+                                SAM9X7_ROM_SIZE - sizeof(last)), ==,
+                    le32_to_cpu(last));
+
+    qtest_writel(qts, SAM9X7_SRAM0_BASE, 0x12349750);
+    qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_MRCR,
+                 BIT(12) | BIT(13));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==, 0x12349750);
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==,
+                    le32_to_cpu(first));
+
+    qtest_quit(qts);
+    unlink(rom_path);
+}
+
+static void test_rom_cpu_entry(void)
+{
+    static const uint8_t semihost_exit[] = {
+        0x18, 0x00, 0xa0, 0xe3, /* mov r0, #SYS_EXIT */
+        0x04, 0x10, 0x9f, 0xe5, /* ldr r1, [pc, #4] */
+        0x56, 0x34, 0x12, 0xef, /* svc 0x123456 */
+        0xfe, 0xff, 0xff, 0xea, /* b . */
+        0x26, 0x00, 0x02, 0x00, /* ADP_Stopped_ApplicationExit */
+    };
+    g_autofree char *rom_path = NULL;
+    const char *qemu = qtest_qemu_binary(NULL);
+    GError *error = NULL;
+    gchar *argv[] = {
+        (gchar *)qemu,
+        (gchar *)"-machine", (gchar *)"sam9x75-curiosity",
+        (gchar *)"-bios", rom_path,
+        (gchar *)"-display", (gchar *)"none",
+        (gchar *)"-serial", (gchar *)"none",
+        (gchar *)"-monitor", (gchar *)"none",
+        (gchar *)"-nic", (gchar *)"none",
+        (gchar *)"-run-with", (gchar *)"exit-with-parent=on",
+        (gchar *)"-semihosting-config",
+        (gchar *)"enable=on,target=native",
+        NULL,
+    };
+    int wait_status;
+    int fd;
+    int ret;
+
+    if (!g_test_subprocess()) {
+        g_test_trap_subprocess(NULL, 5 * G_USEC_PER_SEC, 0);
+        g_test_trap_assert_passed();
+        return;
+    }
+
+    fd = g_file_open_tmp("sam9x75-rom-entry-XXXXXX", &rom_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = ftruncate(fd, SAM9X7_ROM_SIZE);
+    g_assert_cmpint(ret, ==, 0);
+    ret = pwrite(fd, semihost_exit, sizeof(semihost_exit), 0);
+    g_assert_cmpint(ret, ==, sizeof(semihost_exit));
+    close(fd);
+
+    argv[4] = rom_path;
+    g_assert_true(g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
+                               NULL, NULL, NULL, NULL, &wait_status,
+                               &error));
+    g_assert_no_error(error);
+    g_assert_true(WIFEXITED(wait_status));
+    g_assert_cmpint(WEXITSTATUS(wait_status), ==, 0);
+
+    unlink(rom_path);
+}
+
+static void assert_rom_image_size_rejected(off_t size)
+{
+    g_autofree char *rom_path = NULL;
+    g_autofree char *stderr_text = NULL;
+    const char *qemu = qtest_qemu_binary(NULL);
+    GError *error = NULL;
+    gchar *argv[] = {
+        (gchar *)qemu,
+        (gchar *)"-machine", (gchar *)"sam9x75-curiosity",
+        (gchar *)"-bios", rom_path,
+        (gchar *)"-display", (gchar *)"none",
+        (gchar *)"-serial", (gchar *)"none",
+        (gchar *)"-monitor", (gchar *)"none",
+        (gchar *)"-nic", (gchar *)"none",
+        NULL,
+    };
+    int wait_status;
+    int fd;
+    int ret;
+
+    fd = g_file_open_tmp("sam9x75-rom-size-XXXXXX", &rom_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = ftruncate(fd, size);
+    g_assert_cmpint(ret, ==, 0);
+    close(fd);
+
+    argv[4] = rom_path;
+    g_assert_true(g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
+                               NULL, NULL, NULL, &stderr_text,
+                               &wait_status, &error));
+    g_assert_no_error(error);
+    g_assert_true(WIFEXITED(wait_status));
+    g_assert_cmpint(WEXITSTATUS(wait_status), !=, 0);
+    g_assert_nonnull(g_strstr_len(stderr_text, -1,
+                                 "requires a complete 176 KiB ROM image"));
+
+    unlink(rom_path);
+}
+
+static void test_rom_image_size_validation(void)
+{
+    assert_rom_image_size_rejected(SAM9X7_ROM_SIZE - 1);
+    assert_rom_image_size_rejected(SAM9X7_ROM_SIZE + 1);
+}
+
+static void test_rom_boot_path_validation(void)
+{
+    g_autofree char *image_path = NULL;
+    g_autofree char *stderr_text = NULL;
+    const char *qemu = qtest_qemu_binary(NULL);
+    GError *error = NULL;
+    gchar *argv[] = {
+        (gchar *)qemu,
+        (gchar *)"-machine", (gchar *)"sam9x75-curiosity",
+        (gchar *)"-bios", image_path,
+        (gchar *)"-kernel", image_path,
+        (gchar *)"-display", (gchar *)"none",
+        (gchar *)"-serial", (gchar *)"none",
+        (gchar *)"-monitor", (gchar *)"none",
+        (gchar *)"-nic", (gchar *)"none",
+        NULL,
+    };
+    int wait_status;
+    int fd;
+
+    fd = g_file_open_tmp("sam9x75-boot-path-XXXXXX", &image_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+
+    argv[4] = image_path;
+    argv[6] = image_path;
+    g_assert_true(g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
+                               NULL, NULL, NULL, &stderr_text,
+                               &wait_status, &error));
+    g_assert_no_error(error);
+    g_assert_true(WIFEXITED(wait_status));
+    g_assert_cmpint(WEXITSTATUS(wait_status), !=, 0);
+    g_assert_nonnull(g_strstr_len(stderr_text, -1,
+                                 "-bios and -kernel select different"));
+
+    unlink(image_path);
 }
 
 static void test_dbgu_registers_and_loopback(void)
@@ -8497,6 +8680,12 @@ int main(int argc, char **argv)
     qtest_add_func("sam9x75/matrix/boot-remap", test_matrix_boot_remap);
     qtest_add_func("sam9x75/matrix/remap-migration",
                    test_matrix_remap_migration);
+    qtest_add_func("sam9x75/rom/supplied-image", test_rom_image_loading);
+    qtest_add_func("sam9x75/rom/cpu-entry", test_rom_cpu_entry);
+    qtest_add_func("sam9x75/rom/image-size-validation",
+                   test_rom_image_size_validation);
+    qtest_add_func("sam9x75/rom/boot-path-validation",
+                   test_rom_boot_path_validation);
     qtest_add_func("sam9x75/dbgu/registers-and-loopback",
                    test_dbgu_registers_and_loopback);
     qtest_add_func("sam9x75/dbgu/chardev", test_dbgu_chardev);

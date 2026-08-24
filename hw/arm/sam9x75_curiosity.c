@@ -10,6 +10,7 @@
 #include "hw/arm/machines-qom.h"
 #include "hw/arm/sam9x7.h"
 #include "hw/core/boards.h"
+#include "hw/core/loader.h"
 #include "hw/core/or-irq.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/i2c/i2c.h"
@@ -20,6 +21,7 @@
 #include "hw/sensor/pac1934.h"
 #include "hw/ssi/ssi.h"
 #include "qapi/error.h"
+#include "qemu/datadir.h"
 #include "qemu/error-report.h"
 #include "qemu/units.h"
 #include "qobject/qlist.h"
@@ -76,6 +78,38 @@ static bool sam9x75_curiosity_attach_sd(SAM9X7State *soc,
                             &error_fatal);
     qdev_realize_and_unref(card, soc->sdmmc[unit].bus, &error_fatal);
     return true;
+}
+
+static void sam9x75_curiosity_load_rom(MachineState *machine,
+                                        SAM9X7State *soc)
+{
+    g_autofree char *filename = NULL;
+    Error *err = NULL;
+    int64_t size;
+
+    filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, machine->firmware);
+    if (!filename) {
+        error_report("Could not find SAM9X7 ROM image '%s'",
+                     machine->firmware);
+        exit(EXIT_FAILURE);
+    }
+
+    size = get_image_size(filename, &err);
+    if (size < 0) {
+        error_report_err(err);
+        exit(EXIT_FAILURE);
+    }
+    if (size != SAM9X7_ROM_SIZE) {
+        error_report("-bios image '%s' is %" PRId64 " bytes; SAM9X75 "
+                     "requires a complete 176 KiB ROM image",
+                     machine->firmware, size);
+        exit(EXIT_FAILURE);
+    }
+    if (load_image_mr(filename, &soc->rom) != size) {
+        error_report("Failed to load SAM9X7 ROM image '%s'",
+                     machine->firmware);
+        exit(EXIT_FAILURE);
+    }
 }
 
 static bool sam9x75_curiosity_attach_spi_sd(SAM9X7State *soc,
@@ -196,9 +230,9 @@ static void sam9x75_curiosity_init(MachineState *machine)
         exit(EXIT_FAILURE);
     }
 
-    if (machine->firmware) {
-        error_report("-bios is not supported until the SAM9X75 RomBOOT "
-                     "path is implemented");
+    if (machine->firmware && machine->kernel_filename) {
+        error_report("-bios and -kernel select different SAM9X75 boot "
+                     "paths and cannot be combined");
         exit(EXIT_FAILURE);
     }
 
@@ -248,6 +282,10 @@ static void sam9x75_curiosity_init(MachineState *machine)
     }
 
     sysbus_realize(SYS_BUS_DEVICE(soc), &error_fatal);
+
+    if (machine->firmware) {
+        sam9x75_curiosity_load_rom(machine, soc);
+    }
 
     /* U8 is the board's MCP16502TAB-E/S8B power-management IC. */
     pmic = i2c_slave_new(TYPE_MCP16502_AB, 0x5b);
@@ -305,7 +343,7 @@ static void sam9x75_curiosity_init(MachineState *machine)
         .board_id = -1,
     };
 
-    if (!qtest_enabled()) {
+    if (!qtest_enabled() && !machine->firmware) {
         arm_load_kernel(&soc->cpu, machine, &board->boot_info);
     }
 }

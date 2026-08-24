@@ -68,8 +68,11 @@ Support matrix
      - Initial
      - The 176 KiB ROM is mapped at its physical address and through the reset
        alias.  CPU-host MATRIX remap switches address zero to the 64 KiB
-       SRAM0 view and is covered across reset and migration.  A genuine
-       RomBOOT image/behavior, straps and revision errata remain missing.
+       SRAM0 view and is covered across reset and migration.  A complete
+       user-supplied 176 KiB mask-ROM dump can be loaded with ``-bios`` and
+       executes from the reset alias; QEMU does not distribute the proprietary
+       ROM image.  Genuine-image validation, media-selection straps,
+       authentication/error fallbacks and revision errata remain incomplete.
    * - Bus MATRIX
      - Initial
      - All 14 host and 12 client configuration/priority banks, remap control,
@@ -395,11 +398,26 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The 81-test board qtest baseline and this boot are clean of SAM9X75 model
+The 85-test board qtest baseline and this boot are clean of SAM9X75 model
 warnings with ``-d unimp,guest_errors``.  Generic SD diagnostics still report
-the expected failed MMC/SDIO probes against a memory-only SD card.  RomBOOT
-itself is still missing; ``-kernel`` is a development entry path and not a
-substitute for ROM media selection.
+the expected failed MMC/SDIO probes against a memory-only SD card.  ``-kernel``
+remains a development entry path and is not a substitute for ROM media
+selection.
+
+A complete dump of the SAM9X7 mask ROM can instead enter through the real
+reset vector::
+
+  qemu-system-arm -M sam9x75-curiosity \
+    -bios sam9x7-rom.bin \
+    -drive file=sam9x75-sdcard.img,if=sd,format=raw \
+    -nic user,mac=02:00:00:09:75:01 -nographic
+
+The raw image must be exactly 176 KiB (180224 bytes), covering the entire ROM
+address range rather than only its bootloader portion.  QEMU does not include
+this proprietary image.  ``-bios`` and ``-kernel`` are mutually exclusive.
+The ROM loader makes genuine RomBOOT execution possible, but the real image
+and its SD, QSPI and NAND selection/fallback flows have not yet been
+validated.
 
 The pinned Linux ``i2c-at91`` driver probes the FLEXCOM6 FIFO and obtains its
 XDMAC channels.  Byte-width DMA, including an unaligned 13-byte transfer,
