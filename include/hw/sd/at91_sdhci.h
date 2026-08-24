@@ -19,6 +19,7 @@ struct AT91SDHCIState {
 
     MemoryRegion container;
     MemoryRegion caps_iomem;
+    MemoryRegion preset_iomem;
     MemoryRegion vendor_iomem;
     BusState *bus;
 
@@ -28,6 +29,7 @@ struct AT91SDHCIState {
 
     uint64_t capareg;
     uint64_t maxcurr;
+    uint16_t pvr[3];
     uint8_t mc1r;
     uint32_t acr;
     uint32_t cc2r;

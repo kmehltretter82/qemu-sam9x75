@@ -27,6 +27,10 @@
 #define SDMMC_MCCAR                0x048
 #define SDMMC_CAPS_SIZE            0x00c
 
+#define SDMMC_PVR0                 0x060
+#define SDMMC_PVR_LAST             0x064
+#define SDMMC_PRESET_SIZE          0x010
+
 #define SDMMC_APSR                 0x200
 #define SDMMC_MC1R                 0x204
 #define SDMMC_MC2R                 0x205
@@ -46,6 +50,7 @@
 #define SDMMC_CA0R_WRITE_MASK      0xf700ffbf
 #define SDMMC_CA1R_WRITE_MASK      0x00ff0077
 #define SDMMC_MCCAR_WRITE_MASK     0x00ffffff
+#define SDMMC_PVR_WRITE_MASK       0x07ff
 
 #define SDMMC_MC1R_MASK            0x000000bb
 #define SDMMC_MC1R_FCD             BIT(7)
@@ -164,6 +169,50 @@ static const MemoryRegionOps at91_sdhci_caps_ops = {
         .max_access_size = 4,
         .unaligned = false,
         .accepts = at91_sdhci_caps_accepts,
+    },
+};
+
+static uint64_t at91_sdhci_preset_read(void *opaque, hwaddr offset,
+                                       unsigned int size)
+{
+    AT91SDHCIState *s = opaque;
+
+    if (offset <= SDMMC_PVR_LAST - SDMMC_PVR0) {
+        return s->pvr[offset / 2];
+    }
+
+    /* SAM9X7 implements only PVR0-PVR2; the remaining slots are reserved. */
+    return 0;
+}
+
+static void at91_sdhci_preset_write(void *opaque, hwaddr offset,
+                                    uint64_t value, unsigned int size)
+{
+    AT91SDHCIState *s = opaque;
+
+    if (offset <= SDMMC_PVR_LAST - SDMMC_PVR0) {
+        s->pvr[offset / 2] = value & SDMMC_PVR_WRITE_MASK;
+    }
+    /* Reserved preset slots are read-zero/write-ignore on SAM9X7. */
+}
+
+static bool at91_sdhci_preset_accepts(void *opaque, hwaddr offset,
+                                      unsigned int size, bool is_write,
+                                      MemTxAttrs attrs)
+{
+    return size == 2 && !(offset & 1) &&
+           offset + size <= SDMMC_PRESET_SIZE;
+}
+
+static const MemoryRegionOps at91_sdhci_preset_ops = {
+    .read = at91_sdhci_preset_read,
+    .write = at91_sdhci_preset_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 2,
+        .max_access_size = 2,
+        .unaligned = false,
+        .accepts = at91_sdhci_preset_accepts,
     },
 };
 
@@ -296,6 +345,7 @@ static void at91_sdhci_reset(DeviceState *dev)
     s->capareg = ((uint64_t)SDMMC_CA1R_RESET << 32) |
                  SDMMC_CA0R_RESET;
     s->maxcurr = 0;
+    memset(s->pvr, 0, sizeof(s->pvr));
     s->mc1r = 0;
     s->acr = 0;
     s->cc2r = 0;
@@ -344,6 +394,12 @@ static void at91_sdhci_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion_overlap(&s->container, SDMMC_CA0R,
                                         &s->caps_iomem, 1);
 
+    memory_region_init_io(&s->preset_iomem, OBJECT(s),
+                          &at91_sdhci_preset_ops, s,
+                          TYPE_AT91_SDHCI ".presets", SDMMC_PRESET_SIZE);
+    memory_region_add_subregion_overlap(&s->container, SDMMC_PVR0,
+                                        &s->preset_iomem, 1);
+
     memory_region_init_io(&s->vendor_iomem, OBJECT(s),
                           &at91_sdhci_vendor_ops, s,
                           TYPE_AT91_SDHCI ".vendor", SDMMC_VENDOR_SIZE);
@@ -369,7 +425,7 @@ static int at91_sdhci_post_load(void *opaque, int version_id)
 
 static const VMStateDescription at91_sdhci_vmstate = {
     .name = TYPE_AT91_SDHCI,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = at91_sdhci_post_load,
     .fields = (const VMStateField[]) {
@@ -377,6 +433,7 @@ static const VMStateDescription at91_sdhci_vmstate = {
         VMSTATE_CLOCK(gclock, AT91SDHCIState),
         VMSTATE_UINT64(capareg, AT91SDHCIState),
         VMSTATE_UINT64(maxcurr, AT91SDHCIState),
+        VMSTATE_UINT16_ARRAY_V(pvr, AT91SDHCIState, 3, 2),
         VMSTATE_UINT8(mc1r, AT91SDHCIState),
         VMSTATE_UINT32(acr, AT91SDHCIState),
         VMSTATE_UINT32(cc2r, AT91SDHCIState),

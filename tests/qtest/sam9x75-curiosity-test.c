@@ -71,6 +71,11 @@
 #define SDHCI_ERRINTSTSEN       0x36
 #define SDHCI_ADMAERR           0x54
 #define SDHCI_ADMASYSADDR       0x58
+#define SDHCI_PRESET_INIT       0x60
+#define SDHCI_PRESET_DEFAULT    0x62
+#define SDHCI_PRESET_HIGH_SPEED 0x64
+#define SDHCI_PRESET_SDR12      0x66
+#define SDHCI_PRESET_DDR50      0x6e
 
 #define SDHCI_TRNS_DMA          BIT(0)
 #define SDHCI_TRNS_BLK_CNT_EN   BIT(1)
@@ -5384,6 +5389,47 @@ static void test_sdhci_adma2_linux_nop_terminator(void)
     unlink(sd_path);
 }
 
+static void test_sdhci_preset_registers(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE +
+                                SDHCI_PRESET_INIT), ==, 0);
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE +
+                                SDHCI_PRESET_DEFAULT), ==, 0);
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE +
+                                SDHCI_PRESET_HIGH_SPEED), ==, 0);
+
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_PRESET_INIT, UINT16_MAX);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_PRESET_DEFAULT, 0x0404);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_PRESET_HIGH_SPEED, 0x0201);
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE +
+                                SDHCI_PRESET_INIT), ==, 0x07ff);
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE +
+                                SDHCI_PRESET_DEFAULT), ==, 0x0404);
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE +
+                                SDHCI_PRESET_HIGH_SPEED), ==, 0x0201);
+
+    /* Linux's SAM9X60 fallback writes these reserved SAM9X7 slots. */
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_PRESET_SDR12, 0x0404);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_PRESET_DDR50, 0x0401);
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE +
+                                SDHCI_PRESET_SDR12), ==, 0);
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE +
+                                SDHCI_PRESET_DDR50), ==, 0);
+
+    qtest_writeb(qts, SAM9X7_SDMMC0_BASE + SDHCI_SWRST,
+                 SDHCI_RESET_ALL);
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE +
+                                SDHCI_PRESET_DEFAULT), ==, 0x0404);
+
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE +
+                                SDHCI_PRESET_DEFAULT), ==, 0);
+
+    qtest_quit(qts);
+}
+
 static void nand_command(QTestState *qts, uint8_t command)
 {
     qtest_writeb(qts, NAND_CLE, command);
@@ -5782,6 +5828,8 @@ int main(int argc, char **argv)
                    test_wdt_events_and_system_irq);
     qtest_add_func("sam9x75/sdhci/adma2-linux-nop-terminator",
                    test_sdhci_adma2_linux_nop_terminator);
+    qtest_add_func("sam9x75/sdhci/preset-registers",
+                   test_sdhci_preset_registers);
     qtest_add_func("sam9x75/nand/identification-program-and-erase",
                    test_nand_identification_program_and_erase);
     qtest_add_func("sam9x75/smc-pmecc/registers",
