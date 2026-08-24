@@ -75,9 +75,11 @@ Support matrix
        protection have an initial register model; DDR timing/training and OTP
        emulation control remain missing.
    * - DBGU and chip identification
-     - Initial
-     - Polling TX/RX, masks, local loopback, CIDR and EXID implemented;
-       identification metadata, break/error injection and timing remain.
+     - Functional
+     - Full SAM9X7 aperture, byte and word data accesses, masks, timeout,
+       write protection, loopback, CIDR/EXID, clock gating and XDMAC requests
+       are implemented.  Bit-level line timing, break/error injection and DCC
+       transport remain.
    * - AIC and system IRQ aggregation
      - Initial
      - 128-source AIC5 register bank with SAM9X7 wiring, priority/nesting,
@@ -243,11 +245,13 @@ the RTC, RTT, reset, shutdown-controller and watchdog probes.  The AES driver
 probes version 0x700 and acquires two XDMAC channels, the SHA driver probes
 version 0x700 and acquires a third channel, the TDES driver probes version
 0x700 and acquires two more channels, and the TRNG driver completes its
-clocked random-data path.  The next fatal access is the Linux console driver's
-DBGU FIFO write at ``0xfffff324``; polling DBGU works, but its extended FIFO
-registers are not modeled yet.  FLEXCOM USART children remain missing but are
-not the selected board console.  RomBOOT itself is also missing; ``-kernel``
-is a development entry path and not a substitute for ROM media selection.
+clocked random-data path.  Linux now registers ``ttyS0`` and switches to the
+DBGU console.  The next fatal access is an I2S/MCC version read at
+``0xf001c0fc``; that controller is not modeled yet.  SD initialization also
+reaches an ADMA descriptor failure before the root filesystem can mount.
+FLEXCOM USART children remain missing but are not the selected board console.
+RomBOOT itself is also missing; ``-kernel`` is a development entry path and
+not a substitute for ROM media selection.
 
 By default a valid SHDWC shutdown command requests a normal QEMU guest
 shutdown.  Backup-domain wake-up experiments can leave the process running

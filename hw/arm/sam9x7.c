@@ -370,6 +370,10 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(s->memory, SAM9X7_DBGU_BASE, mr);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->dbgu), 0,
                        qdev_get_gpio_in(DEVICE(&s->aic), 47));
+    qdev_connect_gpio_out_named(DEVICE(&s->dbgu), "tx-request", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 28));
+    qdev_connect_gpio_out_named(DEVICE(&s->dbgu), "rx-request", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 29));
 }
 
 static void sam9x7_init(Object *obj)
@@ -438,6 +442,10 @@ static void sam9x7_init(Object *obj)
                           qdev_get_clock_out(DEVICE(&s->sckc), "td-slck"));
     qdev_connect_clock_in(DEVICE(&s->pmc), "md-slck",
                           qdev_get_clock_out(DEVICE(&s->sckc), "md-slck"));
+    qdev_connect_clock_in(DEVICE(&s->dbgu), "pclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "pclk[47]"));
+    qdev_connect_clock_in(DEVICE(&s->dbgu), "gclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "gclk[47]"));
 
     object_initialize_child(obj, "rstc", &s->rstc, TYPE_AT91_RSTC);
     qdev_connect_clock_in(DEVICE(&s->rstc), "slck",

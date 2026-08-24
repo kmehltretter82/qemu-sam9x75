@@ -176,15 +176,27 @@
 #define DBGU_RHR                0x18
 #define DBGU_THR                0x1c
 #define DBGU_BRGR               0x20
+#define DBGU_RTOR               0x28
 #define DBGU_CIDR               0x40
 #define DBGU_EXID               0x44
+#define DBGU_FNTR               0x48
+#define DBGU_WPMR               0xe4
+#define DBGU_PDC_PTCR           0x120
+#define DBGU_PDC_PTSR           0x124
 
 #define DBGU_CR_RXEN            BIT(4)
 #define DBGU_CR_TXEN            BIT(6)
+#define DBGU_CR_RETTO           BIT(10)
+#define DBGU_CR_STTTO           BIT(11)
+#define DBGU_MR_MASK            (BIT(4) | (7U << 9) | BIT(12) | \
+                                 (3U << 14))
 #define DBGU_MR_LOCAL_LOOPBACK  (2U << 14)
 #define DBGU_INT_RXRDY          BIT(0)
 #define DBGU_INT_TXRDY          BIT(1)
+#define DBGU_INT_TIMEOUT        BIT(8)
 #define DBGU_INT_TXEMPTY        BIT(9)
+#define DBGU_WPMR_WPEN          BIT(0)
+#define DBGU_WPMR_KEY           0x55415200
 
 #define RTC_CR                  0x00
 #define RTC_MR                  0x04
@@ -804,6 +816,9 @@ static uint64_t get_clock_period(QTestState *qts, const char *path)
     return period;
 }
 
+static void pmc_write_pcr(QTestState *qts, unsigned int id,
+                          uint32_t config);
+
 static uint32_t dbgu_wait_status(QTestState *qts, uint32_t mask)
 {
     int64_t deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
@@ -848,32 +863,84 @@ static void test_memory_and_identification(void)
 static void test_dbgu_registers_and_loopback(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint64_t duration;
+    uint64_t period;
 
     g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_CSR), ==,
                     DBGU_INT_TXRDY | DBGU_INT_TXEMPTY);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_WPMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_PDC_PTSR),
+                    ==, 0);
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_PDC_PTCR, BIT(9));
+
+    pmc_write_pcr(qts, 47, PMC_PCR_EN);
 
     qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_BRGR, 217);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_BRGR), ==, 217);
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_RTOR, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_RTOR), ==,
+                    0xff);
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_FNTR, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_FNTR), ==, 1);
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_MR, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_MR), ==,
+                    DBGU_MR_MASK);
+
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_WPMR,
+                 DBGU_WPMR_KEY | DBGU_WPMR_WPEN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_WPMR), ==,
+                    DBGU_WPMR_WPEN);
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_BRGR, 42);
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_RTOR, 42);
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_FNTR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_BRGR), ==, 217);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_RTOR), ==,
+                    0xff);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_FNTR), ==, 1);
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_WPMR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_WPMR), ==,
+                    DBGU_WPMR_WPEN);
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_WPMR, DBGU_WPMR_KEY);
 
     qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_IER,
-                 DBGU_INT_RXRDY | DBGU_INT_TXRDY);
+                 DBGU_INT_RXRDY | DBGU_INT_TXRDY | DBGU_INT_TIMEOUT);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_IMR), ==,
-                    DBGU_INT_RXRDY | DBGU_INT_TXRDY);
+                    DBGU_INT_RXRDY | DBGU_INT_TXRDY | DBGU_INT_TIMEOUT);
     qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_IDR, DBGU_INT_TXRDY);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_IMR), ==,
-                    DBGU_INT_RXRDY);
+                    DBGU_INT_RXRDY | DBGU_INT_TIMEOUT);
 
     qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_MR,
                  DBGU_MR_LOCAL_LOOPBACK);
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_RTOR, 3);
     qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_CR,
                  DBGU_CR_RXEN | DBGU_CR_TXEN);
-    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_THR, 0x5a);
+    qtest_writeb(qts, SAM9X7_DBGU_BASE + DBGU_THR, 0x5a);
     g_assert_true(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_CSR) &
                   DBGU_INT_RXRDY);
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_RHR), ==, 0x5a);
+    g_assert_cmphex(qtest_readb(qts, SAM9X7_DBGU_BASE + DBGU_RHR), ==, 0x5a);
     g_assert_false(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_CSR) &
                    DBGU_INT_RXRDY);
+
+    period = get_clock_period(qts, "/machine/soc/pmc/pclk[47]");
+    duration = (period * 16 * 217 * 3) >> 32;
+    g_assert_cmpuint(duration, >, 1);
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_CR, DBGU_CR_RETTO);
+    qtest_clock_step(qts, duration - 1);
+    g_assert_false(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_CSR) &
+                   DBGU_INT_TIMEOUT);
+    qtest_clock_step(qts, 1);
+    g_assert_true(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_CSR) &
+                  DBGU_INT_TIMEOUT);
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_CR, DBGU_CR_STTTO);
+    qtest_clock_step(qts, duration);
+    g_assert_false(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_CSR) &
+                   DBGU_INT_TIMEOUT);
+    qtest_writeb(qts, SAM9X7_DBGU_BASE + DBGU_THR, 0xa6);
+    qtest_clock_step(qts, duration);
+    g_assert_true(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_CSR) &
+                  DBGU_INT_TIMEOUT);
 
     qtest_quit(qts);
 }
@@ -884,15 +951,17 @@ static void test_dbgu_chardev(void)
     uint8_t value;
     QTestState *qts = qtest_init_with_serial(SAM9X75_MACHINE, &sock_fd);
 
+    pmc_write_pcr(qts, 47, PMC_PCR_EN);
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_BRGR, 217);
     qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_CR,
                  DBGU_CR_RXEN | DBGU_CR_TXEN);
 
     value = 0xa5;
     g_assert_cmpint(send(sock_fd, &value, 1, 0), ==, 1);
     dbgu_wait_status(qts, DBGU_INT_RXRDY);
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_RHR), ==, value);
+    g_assert_cmphex(qtest_readb(qts, SAM9X7_DBGU_BASE + DBGU_RHR), ==, value);
 
-    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_THR, 0x3c);
+    qtest_writeb(qts, SAM9X7_DBGU_BASE + DBGU_THR, 0x3c);
     g_assert_cmpint(recv(sock_fd, &value, 1, 0), ==, 1);
     g_assert_cmphex(value, ==, 0x3c);
 
@@ -1814,6 +1883,62 @@ static uint32_t xdmac_waitl(QTestState *qts, uint64_t offset,
     g_error("timed out waiting for XDMAC offset 0x%04" PRIx64
             " mask 0x%08x to become 0x%08x (value 0x%08x)",
             offset, mask, expected, value);
+}
+
+static void test_dbgu_xdmac_requests(void)
+{
+    const uint32_t tx_source = SAM9X7_DDR_BASE + 0xf000;
+    const uint32_t rx_target = SAM9X7_DDR_BASE + 0xf100;
+    const uint64_t tx_channel = XDMAC_CHANNEL(0);
+    const uint64_t rx_channel = XDMAC_CHANNEL(1);
+    QTestState *qts;
+    int sock_fd;
+    uint8_t value;
+
+    qts = qtest_init_with_serial(SAM9X75_MACHINE, &sock_fd);
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    pmc_write_pcr(qts, 47, PMC_PCR_EN);
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_BRGR, 217);
+    qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_CR,
+                 DBGU_CR_RXEN | DBGU_CR_TXEN);
+
+    value = 0x6d;
+    qtest_memwrite(qts, tx_source, &value, sizeof(value));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CSA,
+                 tx_source);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CDA,
+                 SAM9X7_DBGU_BASE + DBGU_THR);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CUBC, 1);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_DSYNC_MEM2PER |
+                 XDMAC_CC_PERID(28) | XDMAC_CC_SAM_INC);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
+    xdmac_waitl(qts, XDMAC_GS, BIT(0), 0);
+    g_assert_cmpint(recv(sock_fd, &value, 1, 0), ==, 1);
+    g_assert_cmphex(value, ==, 0x6d);
+
+    value = 0xb2;
+    g_assert_cmpint(send(sock_fd, &value, 1, 0), ==, 1);
+    dbgu_wait_status(qts, DBGU_INT_RXRDY);
+    value = 0;
+    qtest_memwrite(qts, rx_target, &value, sizeof(value));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CSA,
+                 SAM9X7_DBGU_BASE + DBGU_RHR);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CDA,
+                 rx_target);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CUBC, 1);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_PERID(29) |
+                 XDMAC_CC_DAM_INC);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(1));
+    xdmac_waitl(qts, XDMAC_GS, BIT(1), 0);
+    qtest_memread(qts, rx_target, &value, sizeof(value));
+    g_assert_cmphex(value, ==, 0xb2);
+    g_assert_false(qtest_readl(qts, SAM9X7_DBGU_BASE + DBGU_CSR) &
+                   DBGU_INT_RXRDY);
+
+    close(sock_fd);
+    qtest_quit(qts);
 }
 
 static void test_xdmac_registers_memcpy_and_descriptors(void)
@@ -4829,6 +4954,8 @@ int main(int argc, char **argv)
     qtest_add_func("sam9x75/dbgu/registers-and-loopback",
                    test_dbgu_registers_and_loopback);
     qtest_add_func("sam9x75/dbgu/chardev", test_dbgu_chardev);
+    qtest_add_func("sam9x75/dbgu/xdmac-requests",
+                   test_dbgu_xdmac_requests);
     qtest_add_func("sam9x75/aic/dbgu-integration",
                    test_aic_dbgu_integration);
     qtest_add_func("sam9x75/aic/priority-and-nesting",
