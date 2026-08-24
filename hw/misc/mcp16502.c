@@ -7,19 +7,35 @@
 #include "qemu/osdep.h"
 
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/i2c/i2c.h"
 #include "hw/misc/mcp16502.h"
 #include "migration/vmstate.h"
 #include "qemu/bitops.h"
+#include "qemu/timer.h"
 #include "qom/object.h"
+#include "system/runstate.h"
 
 #define MCP16502_NUM_REGS       0x66
 
+#define MCP16502_SYS_TMG        0x02
+#define MCP16502_SYS_CFG        0x03
 #define MCP16502_SYS_STATUS     0x04
 #define MCP16502_BUCK1_STATUS   0x05
 #define MCP16502_BUCK4_STATUS   0x08
 #define MCP16502_LDO1_STATUS    0x09
 #define MCP16502_LDO2_STATUS    0x0a
+
+#define MCP16502_SYS_TMG_PBTO_SHIFT      6
+#define MCP16502_SYS_TMG_PBINTTO_SHIFT   4
+
+#define MCP16502_SYS_CFG_TSDMSK          BIT(7)
+#define MCP16502_SYS_CFG_TWRMSK          BIT(6)
+#define MCP16502_SYS_CFG_FSD_SHIFT       2
+
+#define MCP16502_SYS_STATUS_TSD          BIT(7)
+#define MCP16502_SYS_STATUS_TWR          BIT(6)
+#define MCP16502_SYS_STATUS_PBINT        BIT(5)
 
 #define MCP16502_REGULATOR_EN   BIT(7)
 #define MCP16502_STATUS_FAULT   BIT(7)
@@ -27,20 +43,32 @@
 #define MCP16502_STATUS_POK     BIT(1)
 #define MCP16502_STATUS_ENS     BIT(0)
 
+typedef enum MCP16502PushTimerPhase {
+    MCP16502_PUSH_TIMER_IDLE,
+    MCP16502_PUSH_TIMER_LONG_PRESS,
+    MCP16502_PUSH_TIMER_INTERRUPT,
+} MCP16502PushTimerPhase;
+
 OBJECT_DECLARE_SIMPLE_TYPE(MCP16502State, MCP16502_AB)
 
 struct MCP16502State {
     I2CSlave parent_obj;
 
     qemu_irq nstrto;
+    qemu_irq ninto;
+    qemu_irq nrsto;
+    QEMUTimer *push_timer;
 
     uint8_t regs[MCP16502_NUM_REGS];
     uint8_t pointer;
     uint8_t count;
+    uint8_t push_timer_phase;
     bool nstart_level;
     bool pwrhld_level;
     bool lpm_level;
     bool hpm_level;
+    bool forced_off;
+    bool request_system_shutdown;
 };
 
 /*
@@ -98,6 +126,9 @@ static uint8_t mcp16502_write_mask(uint8_t reg)
 
 static int mcp16502_power_mode(MCP16502State *s)
 {
+    if (s->forced_off) {
+        return -1;
+    }
     if (!s->pwrhld_level) {
         return s->lpm_level ? 2 : -1;
     }
@@ -108,6 +139,107 @@ static int mcp16502_power_mode(MCP16502State *s)
         return 3;
     }
     return 0;
+}
+
+static void mcp16502_update_outputs(MCP16502State *s)
+{
+    uint8_t status = s->regs[MCP16502_SYS_STATUS];
+    uint8_t config = s->regs[MCP16502_SYS_CFG];
+    bool interrupt;
+
+    interrupt = (status & MCP16502_SYS_STATUS_PBINT) ||
+        ((status & MCP16502_SYS_STATUS_TSD) &&
+         !(config & MCP16502_SYS_CFG_TSDMSK)) ||
+        ((status & MCP16502_SYS_STATUS_TWR) &&
+         !(config & MCP16502_SYS_CFG_TWRMSK));
+
+    /* Active-low open-drain pins are exposed as logical assertions. */
+    qemu_set_irq(s->nstrto, !s->nstart_level);
+    qemu_set_irq(s->ninto, interrupt);
+    qemu_set_irq(s->nrsto, s->forced_off || !s->pwrhld_level);
+}
+
+static int64_t mcp16502_scale_timing(MCP16502State *s, int64_t ns)
+{
+    unsigned int fsd = extract32(s->regs[MCP16502_SYS_CFG],
+                                 MCP16502_SYS_CFG_FSD_SHIFT, 2);
+
+    /* FSD=10 lowers the oscillator by 16.5%; FSD=11 raises it by 16.5%. */
+    if (fsd == 2) {
+        return muldiv64(ns, 10000, 8350);
+    }
+    if (fsd == 3) {
+        return muldiv64(ns, 10000, 11650);
+    }
+    return ns;
+}
+
+static int64_t mcp16502_push_timeout(MCP16502State *s)
+{
+    unsigned int selector = extract32(s->regs[MCP16502_SYS_TMG],
+                                      MCP16502_SYS_TMG_PBTO_SHIFT, 2);
+
+    return mcp16502_scale_timing(s,
+        (2LL << selector) * NANOSECONDS_PER_SECOND);
+}
+
+static int64_t mcp16502_interrupt_timeout(MCP16502State *s)
+{
+    static const int64_t delays[] = {
+        100 * SCALE_MS,
+        500 * SCALE_MS,
+        NANOSECONDS_PER_SECOND,
+        2 * NANOSECONDS_PER_SECOND,
+    };
+    unsigned int selector = extract32(s->regs[MCP16502_SYS_TMG],
+                                      MCP16502_SYS_TMG_PBINTTO_SHIFT, 2);
+
+    return mcp16502_scale_timing(s, delays[selector]);
+}
+
+static void mcp16502_start_push_timer(MCP16502State *s)
+{
+    s->push_timer_phase = MCP16502_PUSH_TIMER_LONG_PRESS;
+    timer_mod_ns(s->push_timer,
+        qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + mcp16502_push_timeout(s));
+}
+
+static void mcp16502_cancel_push_timer(MCP16502State *s)
+{
+    s->push_timer_phase = MCP16502_PUSH_TIMER_IDLE;
+    timer_del(s->push_timer);
+}
+
+static void mcp16502_push_timer_tick(void *opaque)
+{
+    MCP16502State *s = opaque;
+
+    switch (s->push_timer_phase) {
+    case MCP16502_PUSH_TIMER_LONG_PRESS:
+        if (s->nstart_level || !s->pwrhld_level || s->forced_off) {
+            mcp16502_cancel_push_timer(s);
+            return;
+        }
+        s->regs[MCP16502_SYS_STATUS] |= MCP16502_SYS_STATUS_PBINT;
+        s->push_timer_phase = MCP16502_PUSH_TIMER_INTERRUPT;
+        timer_mod_ns(s->push_timer,
+            qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+            mcp16502_interrupt_timeout(s));
+        mcp16502_update_outputs(s);
+        break;
+    case MCP16502_PUSH_TIMER_INTERRUPT:
+        s->forced_off = true;
+        s->push_timer_phase = MCP16502_PUSH_TIMER_IDLE;
+        mcp16502_update_outputs(s);
+        if (s->request_system_shutdown) {
+            qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+        }
+        break;
+    case MCP16502_PUSH_TIMER_IDLE:
+        break;
+    default:
+        g_assert_not_reached();
+    }
 }
 
 static uint8_t mcp16502_status(MCP16502State *s, uint8_t reg)
@@ -137,6 +269,16 @@ static uint8_t mcp16502_status(MCP16502State *s, uint8_t reg)
     }
     s->regs[reg] &= ~clear_mask;
 
+    if (reg == MCP16502_SYS_STATUS) {
+        if (value & MCP16502_SYS_STATUS_PBINT) {
+            mcp16502_cancel_push_timer(s);
+            if (!s->nstart_level && s->pwrhld_level && !s->forced_off) {
+                mcp16502_start_push_timer(s);
+            }
+        }
+        mcp16502_update_outputs(s);
+    }
+
     return value;
 }
 
@@ -156,10 +298,16 @@ static uint8_t mcp16502_read(MCP16502State *s, uint8_t reg)
 static void mcp16502_set_nstart(void *opaque, int line, int level)
 {
     MCP16502State *s = opaque;
+    bool old_level = s->nstart_level;
 
     s->nstart_level = level < 0 || level;
-    /* nSTRTO is active-low electrically; expose logical assertion. */
-    qemu_set_irq(s->nstrto, !s->nstart_level);
+    if (old_level && !s->nstart_level && s->pwrhld_level && !s->forced_off) {
+        mcp16502_start_push_timer(s);
+    } else if (!old_level && s->nstart_level &&
+               s->push_timer_phase == MCP16502_PUSH_TIMER_LONG_PRESS) {
+        mcp16502_cancel_push_timer(s);
+    }
+    mcp16502_update_outputs(s);
 }
 
 static void mcp16502_set_pwrhld(void *opaque, int line, int level)
@@ -167,6 +315,12 @@ static void mcp16502_set_pwrhld(void *opaque, int line, int level)
     MCP16502State *s = opaque;
 
     s->pwrhld_level = level > 0;
+    if (!s->pwrhld_level) {
+        mcp16502_cancel_push_timer(s);
+    } else if (!s->nstart_level && !s->forced_off) {
+        mcp16502_start_push_timer(s);
+    }
+    mcp16502_update_outputs(s);
 }
 
 static void mcp16502_set_lpm(void *opaque, int line, int level)
@@ -174,6 +328,7 @@ static void mcp16502_set_lpm(void *opaque, int line, int level)
     MCP16502State *s = opaque;
 
     s->lpm_level = level > 0;
+    mcp16502_update_outputs(s);
 }
 
 static void mcp16502_set_hpm(void *opaque, int line, int level)
@@ -214,6 +369,9 @@ static int mcp16502_send(I2CSlave *i2c, uint8_t data)
     mask = mcp16502_write_mask(s->pointer);
     if (s->pointer < MCP16502_NUM_REGS && mask) {
         s->regs[s->pointer] = (s->regs[s->pointer] & ~mask) | (data & mask);
+        if (s->pointer == MCP16502_SYS_CFG) {
+            mcp16502_update_outputs(s);
+        }
     }
     s->pointer++;
 
@@ -231,7 +389,9 @@ static void mcp16502_reset_enter(Object *obj, ResetType type)
     s->pwrhld_level = true;
     s->lpm_level = false;
     s->hpm_level = false;
-    qemu_set_irq(s->nstrto, 0);
+    s->forced_off = false;
+    mcp16502_cancel_push_timer(s);
+    mcp16502_update_outputs(s);
 }
 
 static int mcp16502_post_load(void *opaque, int version_id)
@@ -244,13 +404,18 @@ static int mcp16502_post_load(void *opaque, int version_id)
         s->lpm_level = false;
         s->hpm_level = false;
     }
-    qemu_set_irq(s->nstrto, !s->nstart_level);
+    if (version_id < 3) {
+        s->push_timer_phase = MCP16502_PUSH_TIMER_IDLE;
+        s->forced_off = false;
+        timer_del(s->push_timer);
+    }
+    mcp16502_update_outputs(s);
     return 0;
 }
 
 static const VMStateDescription vmstate_mcp16502 = {
     .name = TYPE_MCP16502_AB,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = mcp16502_post_load,
     .fields = (const VMStateField[]) {
@@ -262,6 +427,9 @@ static const VMStateDescription vmstate_mcp16502 = {
         VMSTATE_BOOL_V(pwrhld_level, MCP16502State, 2),
         VMSTATE_BOOL_V(lpm_level, MCP16502State, 2),
         VMSTATE_BOOL_V(hpm_level, MCP16502State, 2),
+        VMSTATE_UINT8_V(push_timer_phase, MCP16502State, 3),
+        VMSTATE_BOOL_V(forced_off, MCP16502State, 3),
+        VMSTATE_TIMER_PTR_V(push_timer, MCP16502State, 3),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -276,7 +444,23 @@ static void mcp16502_init(Object *obj)
     qdev_init_gpio_in_named(dev, mcp16502_set_lpm, "lpm", 1);
     qdev_init_gpio_in_named(dev, mcp16502_set_hpm, "hpm", 1);
     qdev_init_gpio_out_named(dev, &s->nstrto, "nstrto", 1);
+    qdev_init_gpio_out_named(dev, &s->ninto, "ninto", 1);
+    qdev_init_gpio_out_named(dev, &s->nrsto, "nrsto", 1);
+    s->push_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                  mcp16502_push_timer_tick, s);
 }
+
+static void mcp16502_finalize(Object *obj)
+{
+    MCP16502State *s = MCP16502_AB(obj);
+
+    timer_free(s->push_timer);
+}
+
+static const Property mcp16502_properties[] = {
+    DEFINE_PROP_BOOL("request-system-shutdown", MCP16502State,
+                     request_system_shutdown, true),
+};
 
 static void mcp16502_class_init(ObjectClass *oc, const void *data)
 {
@@ -286,6 +470,7 @@ static void mcp16502_class_init(ObjectClass *oc, const void *data)
 
     dc->desc = "Microchip MCP16502AB PMIC";
     dc->vmsd = &vmstate_mcp16502;
+    device_class_set_props(dc, mcp16502_properties);
     isc->event = mcp16502_event;
     isc->recv = mcp16502_recv;
     isc->send = mcp16502_send;
@@ -297,6 +482,7 @@ static const TypeInfo mcp16502_info = {
     .parent = TYPE_I2C_SLAVE,
     .instance_size = sizeof(MCP16502State),
     .instance_init = mcp16502_init,
+    .instance_finalize = mcp16502_finalize,
     .class_init = mcp16502_class_init,
 };
 

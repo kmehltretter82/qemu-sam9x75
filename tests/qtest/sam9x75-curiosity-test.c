@@ -1411,6 +1411,99 @@ static void test_board_wakeup_start_reset_and_pmic_modes(void)
     qtest_quit(qts);
 }
 
+static void test_mcp16502_push_button_timeouts(void)
+{
+    const int64_t short_push_timeout = 2 * RTC_SECOND_NS;
+    const int64_t short_interrupt_timeout = RTC_SECOND_NS / 10;
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -global mcp16502-ab.request-system-shutdown=off");
+    int64_t displaced_timeout;
+
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PCR,
+                 PMC_PCR_CMD | PMC_PCR_EN | 2);
+    twi6_enable_master(qts);
+    qtest_irq_intercept_out_named(qts, "/machine/mcp16502", "nrsto");
+
+    g_assert_false(qtest_get_irq(qts, 0));
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_PDSR) & BIT(12));
+
+    /* PBTO=00 is 2 seconds; PBINTTO=00 is 100 milliseconds. */
+    twi6_write_reg(qts, 0x5b, 0x02, 0x04);
+    send_input_key(qts, "s", true);
+    qtest_clock_step(qts, short_push_timeout - 1);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x04), ==, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_PDSR) & BIT(12));
+
+    qtest_clock_step(qts, 1);
+    g_assert_false(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_PDSR) & BIT(12));
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    /* Reading PBINT deasserts nINTO, cancels t9 and restarts t8. */
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x04), ==, BIT(5));
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_PDSR) & BIT(12));
+    send_input_key(qts, "s", false);
+    qtest_clock_step(qts, short_push_timeout + short_interrupt_timeout);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x04), ==, 0);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0x07);
+
+    /* If PBINT is not serviced within t9, all rails enter OFF state. */
+    send_input_key(qts, "s", true);
+    qtest_clock_step(qts, short_push_timeout);
+    g_assert_false(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_PDSR) & BIT(12));
+    qtest_clock_step(qts, short_interrupt_timeout - 1);
+    g_assert_false(qtest_get_irq(qts, 0));
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0x07);
+    qtest_clock_step(qts, 1);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x04), ==, BIT(5));
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_PDSR) & BIT(12));
+    send_input_key(qts, "s", false);
+
+    /* FSD=10 slows the timing oscillator by 16.5 percent. */
+    qtest_system_reset(qts);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PCR,
+                 PMC_PCR_CMD | PMC_PCR_EN | 2);
+    twi6_enable_master(qts);
+    twi6_write_reg(qts, 0x5b, 0x02, 0x04);
+    twi6_write_reg(qts, 0x5b, 0x03, 0xc8);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x03), ==, 0xc8);
+    displaced_timeout = short_push_timeout * 10000 / 8350;
+    send_input_key(qts, "s", true);
+    qtest_clock_step(qts, displaced_timeout - 1);
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_PDSR) & BIT(12));
+    qtest_clock_step(qts, 1);
+    g_assert_false(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_PDSR) & BIT(12));
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x04), ==, BIT(5));
+    send_input_key(qts, "s", false);
+
+    qtest_quit(qts);
+}
+
+static void test_mcp16502_push_button_shutdown_request(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    QDict *event;
+    QDict *data;
+
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    twi6_enable_master(qts);
+    twi6_write_reg(qts, 0x5b, 0x02, 0x04);
+    send_input_key(qts, "s", true);
+    qtest_clock_step(qts, 2 * RTC_SECOND_NS + RTC_SECOND_NS / 10);
+
+    event = qtest_qmp_eventwait_ref(qts, "SHUTDOWN");
+    data = qdict_get_qdict(event, "data");
+    g_assert_nonnull(data);
+    g_assert_true(qdict_get_bool(data, "guest"));
+    g_assert_cmpstr(qdict_get_str(data, "reason"), ==, "guest-shutdown");
+    qobject_unref(event);
+
+    qtest_quit(qts);
+}
+
 #define PAC1934_I2C_ADDRESS         0x10
 #define PAC1934_REFRESH_DELAY_NS    1000000
 
@@ -6320,6 +6413,10 @@ int main(int argc, char **argv)
                    test_board_rgb_led_and_user_button);
     qtest_add_func("sam9x75/board/wakeup-start-reset-and-pmic-modes",
                    test_board_wakeup_start_reset_and_pmic_modes);
+    qtest_add_func("sam9x75/board/mcp16502-push-button-timeouts",
+                   test_mcp16502_push_button_timeouts);
+    qtest_add_func("sam9x75/board/mcp16502-push-button-shutdown-request",
+                   test_mcp16502_push_button_shutdown_request);
     qtest_add_func("sam9x75/board/pac1934-register-protocol-and-wiring",
                    test_pac1934_register_protocol_and_board_wiring);
     qtest_add_func("sam9x75/board/pac1934-measurements-and-modes",

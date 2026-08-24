@@ -117,6 +117,11 @@ static void sam9x75_curiosity_create_controls(MachineState *machine,
     /* The dedicated SHDN output is the PMIC's PWRHLD input. */
     qdev_connect_gpio_out_named(DEVICE(&soc->shdwc), "shdn", 0,
         qdev_get_gpio_in_named(DEVICE(pmic), "pwrhld", 0));
+
+    /* U8's active-low open-drain interrupt output is pulled up on PA12. */
+    qemu_set_irq(qdev_get_gpio_in(DEVICE(&soc->pio[0]), 12), 1);
+    qdev_connect_gpio_out_named(DEVICE(pmic), "ninto", 0,
+        qemu_irq_invert(qdev_get_gpio_in(DEVICE(&soc->pio[0]), 12)));
 }
 
 static void sam9x75_curiosity_init(MachineState *machine)
