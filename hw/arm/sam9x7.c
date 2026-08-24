@@ -138,6 +138,16 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->tcb), 0,
                        qdev_get_gpio_in(DEVICE(&s->aic), 17));
 
+    object_property_set_link(OBJECT(&s->xdmac), "dma-memory",
+                             OBJECT(s->memory), &error_abort);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->xdmac), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->xdmac), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_XDMAC_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->xdmac), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 20));
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->pit), errp)) {
         return;
     }
@@ -384,6 +394,10 @@ static void sam9x7_init(Object *obj)
                           qdev_get_clock_out(DEVICE(&s->pmc), "gclk[17]"));
     qdev_connect_clock_in(DEVICE(&s->tcb), "slck",
                           qdev_get_clock_out(DEVICE(&s->sckc), "md-slck"));
+
+    object_initialize_child(obj, "xdmac", &s->xdmac, TYPE_AT91_XDMAC);
+    qdev_connect_clock_in(DEVICE(&s->xdmac), "pclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "pclk[20]"));
 
     object_initialize_child(obj, "sfr", &s->sfr, TYPE_AT91_SFR);
 

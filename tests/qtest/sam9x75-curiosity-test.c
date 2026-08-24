@@ -19,6 +19,7 @@
 #define SAM9X7_DDR_BASE         0x20000000
 #define SAM9X7_NAND_BASE        0x30000000
 #define SAM9X7_QSPI_MEM_BASE    0x60000000
+#define SAM9X7_XDMAC_BASE       0xf0008000
 #define SAM9X7_QSPI_BASE        0xf0014000
 #define SAM9X7_FLEXCOM6_BASE    0xf8010000
 #define SAM9X7_TWI6_BASE        (SAM9X7_FLEXCOM6_BASE + 0x600)
@@ -334,6 +335,68 @@
 #define TCB_WPMR_WPITEN         BIT(1)
 #define TCB_WPMR_WPCREN         BIT(2)
 #define TCB_WPMR_KEY            0x54494d00
+
+#define XDMAC_GTYPE             0x00
+#define XDMAC_GCFG              0x04
+#define XDMAC_GWAC              0x08
+#define XDMAC_GIE               0x0c
+#define XDMAC_GID               0x10
+#define XDMAC_GIM               0x14
+#define XDMAC_GIS               0x18
+#define XDMAC_GE                0x1c
+#define XDMAC_GD                0x20
+#define XDMAC_GS                0x24
+#define XDMAC_GRS               0x28
+#define XDMAC_GWS               0x2c
+#define XDMAC_GRWS              0x30
+#define XDMAC_GRWR              0x34
+#define XDMAC_GSWR              0x38
+#define XDMAC_GSWS              0x3c
+#define XDMAC_GSWF              0x40
+#define XDMAC_CHANNEL(n)        (0x50 + (n) * 0x40)
+#define XDMAC_CIE               0x00
+#define XDMAC_CID               0x04
+#define XDMAC_CIM               0x08
+#define XDMAC_CIS               0x0c
+#define XDMAC_CSA               0x10
+#define XDMAC_CDA               0x14
+#define XDMAC_CNDA              0x18
+#define XDMAC_CNDC              0x1c
+#define XDMAC_CUBC              0x20
+#define XDMAC_CBC               0x24
+#define XDMAC_CC                0x28
+#define XDMAC_CDS_MSP           0x2c
+#define XDMAC_CSUS              0x30
+#define XDMAC_CDUS              0x34
+
+#define XDMAC_INT_BIS           BIT(0)
+#define XDMAC_INT_LIS           BIT(1)
+#define XDMAC_INT_DIS           BIT(2)
+#define XDMAC_INT_FIS           BIT(3)
+#define XDMAC_INT_RBEIS         BIT(4)
+#define XDMAC_INT_WBEIS         BIT(5)
+#define XDMAC_INT_ROIS          BIT(6)
+#define XDMAC_CNDC_NDE          BIT(0)
+#define XDMAC_CNDC_NDSUP        BIT(1)
+#define XDMAC_CNDC_NDDUP        BIT(2)
+#define XDMAC_CNDC_NDVIEW2      (2U << 3)
+#define XDMAC_MBR_UBC_NDE       BIT(24)
+#define XDMAC_MBR_UBC_NSEN      BIT(25)
+#define XDMAC_MBR_UBC_NDEN      BIT(26)
+#define XDMAC_MBR_UBC_NDV1      (1U << 27)
+#define XDMAC_MBR_UBC_NDV2      (2U << 27)
+#define XDMAC_MBR_UBC_NDV3      (3U << 27)
+#define XDMAC_CC_TYPE_PER       BIT(0)
+#define XDMAC_CC_DSYNC_MEM2PER  BIT(4)
+#define XDMAC_CC_SWREQ          BIT(6)
+#define XDMAC_CC_MEMSET         BIT(7)
+#define XDMAC_CC_DWIDTH_HALFWORD (1U << 11)
+#define XDMAC_CC_DWIDTH_WORD    (2U << 11)
+#define XDMAC_CC_SAM_INC        (1U << 16)
+#define XDMAC_CC_DAM_INC        (1U << 18)
+#define XDMAC_CC_DAM_UBS        (2U << 18)
+#define XDMAC_CC_INITD          BIT(21)
+#define XDMAC_CC_PERID(id)      ((id) << 24)
 
 #define PIO_PER                 0x000
 #define PIO_PDR                 0x004
@@ -1490,6 +1553,342 @@ static void test_tcb_clocksource_clockevent_and_protection(void)
     qtest_quit(qts);
 }
 
+static uint32_t xdmac_waitl(QTestState *qts, uint64_t offset,
+                            uint32_t mask, uint32_t expected)
+{
+    int64_t deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+    uint32_t value;
+
+    do {
+        value = qtest_readl(qts, SAM9X7_XDMAC_BASE + offset);
+        if ((value & mask) == expected) {
+            return value;
+        }
+        qtest_clock_step(qts, 1);
+        g_usleep(1000);
+    } while (g_get_monotonic_time() < deadline);
+
+    g_error("timed out waiting for XDMAC offset 0x%04" PRIx64
+            " mask 0x%08x to become 0x%08x (value 0x%08x)",
+            offset, mask, expected, value);
+}
+
+static void test_xdmac_registers_memcpy_and_descriptors(void)
+{
+    const uint32_t src0 = SAM9X7_DDR_BASE + 0x10000;
+    const uint32_t dst0 = SAM9X7_DDR_BASE + 0x10100;
+    const uint32_t desc0 = SAM9X7_DDR_BASE + 0x10200;
+    const uint32_t desc1 = SAM9X7_DDR_BASE + 0x10220;
+    const uint32_t desc2 = SAM9X7_DDR_BASE + 0x10260;
+    const uint32_t desc3 = SAM9X7_DDR_BASE + 0x10280;
+    const uint32_t src1 = SAM9X7_DDR_BASE + 0x10300;
+    const uint32_t dst1 = SAM9X7_DDR_BASE + 0x10400;
+    uint32_t descriptor[9];
+    uint8_t source[16];
+    uint8_t result[16];
+    uint64_t ch0 = XDMAC_CHANNEL(0);
+    uint64_t ch1 = XDMAC_CHANNEL(1);
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+    unsigned int i;
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GTYPE),
+                    ==, 0x0032200f);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GCFG),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GWAC),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GIM),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GIS),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS),
+                    ==, 0);
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GCFG, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GCFG),
+                    ==, 0x0000010f);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GWAC, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GWAC),
+                    ==, 0x0000ffff);
+
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    aic_configure(qts, 20, AIC_SMR_LEVEL_HIGH | 3, 0x20202020);
+
+    for (i = 0; i < sizeof(source); i++) {
+        source[i] = 0x80 + i;
+    }
+    memset(result, 0, sizeof(result));
+    qtest_memwrite(qts, src0, source, sizeof(source));
+    qtest_memwrite(qts, dst0, result, sizeof(result));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch0 + XDMAC_CSA, src0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch0 + XDMAC_CDA, dst0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch0 + XDMAC_CUBC,
+                 sizeof(source) / sizeof(uint32_t));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch0 + XDMAC_CC,
+                 XDMAC_CC_PERID(0x7f) | XDMAC_CC_SAM_INC |
+                 XDMAC_CC_DAM_INC | XDMAC_CC_DWIDTH_WORD);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch0 + XDMAC_CIE,
+                 XDMAC_INT_BIS);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GIE, BIT(0));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
+    xdmac_waitl(qts, XDMAC_GS, BIT(0), 0);
+
+    qtest_memread(qts, dst0, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), source, sizeof(source));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GIS) &
+                  BIT(0));
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(20));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + ch0 + XDMAC_CIS),
+                    ==, XDMAC_INT_BIS);
+    g_assert_false(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GIS) &
+                   BIT(0));
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(20));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + ch0 + XDMAC_CC),
+                    ==, XDMAC_CC_PERID(0x7f) | XDMAC_CC_SAM_INC |
+                        XDMAC_CC_DAM_INC | XDMAC_CC_DWIDTH_WORD |
+                        XDMAC_CC_INITD);
+
+    for (i = 0; i < sizeof(source); i++) {
+        source[i] = 0x30 + i;
+    }
+    memset(result, 0, sizeof(result));
+    qtest_memwrite(qts, src1, source, sizeof(source));
+    qtest_memwrite(qts, dst1, result, sizeof(result));
+
+    memset(descriptor, 0, sizeof(descriptor));
+    descriptor[0] = cpu_to_le32(desc1);
+    descriptor[1] = cpu_to_le32(XDMAC_MBR_UBC_NDE |
+                                XDMAC_MBR_UBC_NSEN |
+                                XDMAC_MBR_UBC_NDEN |
+                                XDMAC_MBR_UBC_NDV3 | 1);
+    descriptor[2] = cpu_to_le32(src1);
+    descriptor[3] = cpu_to_le32(dst1);
+    descriptor[4] = cpu_to_le32(XDMAC_CC_PERID(0x7f) |
+                                XDMAC_CC_SAM_INC | XDMAC_CC_DAM_INC |
+                                XDMAC_CC_DWIDTH_WORD);
+    qtest_memwrite(qts, desc0, descriptor, 5 * sizeof(descriptor[0]));
+
+    memset(descriptor, 0, sizeof(descriptor));
+    descriptor[0] = cpu_to_le32(desc2);
+    descriptor[1] = cpu_to_le32(XDMAC_MBR_UBC_NSEN |
+                                XDMAC_MBR_UBC_NDEN |
+                                XDMAC_MBR_UBC_NDE |
+                                XDMAC_MBR_UBC_NDV1 | 1);
+    descriptor[2] = cpu_to_le32(src1 + 4);
+    descriptor[3] = cpu_to_le32(dst1 + 4);
+    descriptor[4] = cpu_to_le32(XDMAC_CC_PERID(0x7f) |
+                                XDMAC_CC_SAM_INC | XDMAC_CC_DAM_INC |
+                                XDMAC_CC_DWIDTH_WORD);
+    qtest_memwrite(qts, desc1, descriptor, sizeof(descriptor));
+
+    memset(descriptor, 0, sizeof(descriptor));
+    descriptor[0] = cpu_to_le32(desc3);
+    descriptor[1] = cpu_to_le32(XDMAC_MBR_UBC_NDE |
+                                XDMAC_MBR_UBC_NSEN | 1);
+    descriptor[2] = cpu_to_le32(src1 + 8);
+    descriptor[3] = cpu_to_le32(dst1 + 8);
+    qtest_memwrite(qts, desc2, descriptor, 4 * sizeof(descriptor[0]));
+
+    memset(descriptor, 0, sizeof(descriptor));
+    descriptor[1] = cpu_to_le32(XDMAC_MBR_UBC_NSEN | 1);
+    descriptor[2] = cpu_to_le32(src1 + 12);
+    qtest_memwrite(qts, desc3, descriptor, 3 * sizeof(descriptor[0]));
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CNDA, desc0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CNDC,
+                 XDMAC_CNDC_NDE | XDMAC_CNDC_NDSUP |
+                 XDMAC_CNDC_NDDUP | XDMAC_CNDC_NDVIEW2);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CIE,
+                 XDMAC_INT_LIS);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GIE, BIT(1));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(1));
+    xdmac_waitl(qts, XDMAC_GS, BIT(1), 0);
+
+    qtest_memread(qts, dst1, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), source, sizeof(source));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GIS) &
+                  BIT(1));
+    value = qtest_readl(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CIS);
+    g_assert_cmphex(value & (XDMAC_INT_BIS | XDMAC_INT_LIS), ==,
+                    XDMAC_INT_BIS | XDMAC_INT_LIS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CNDA),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CUBC),
+                    ==, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CC) &
+                  XDMAC_CC_INITD);
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GID, BIT(0) | BIT(1));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GIM), ==,
+                    0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CID,
+                 XDMAC_INT_LIS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CIM),
+                    ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_xdmac_pacing_striding_and_errors(void)
+{
+    const uint32_t memset_dst = SAM9X7_DDR_BASE + 0x11000;
+    const uint32_t sw_src = SAM9X7_DDR_BASE + 0x11100;
+    const uint32_t sw_dst = SAM9X7_DDR_BASE + 0x11200;
+    const uint32_t error_dst = SAM9X7_DDR_BASE + 0x11300;
+    const uint32_t hw_src = SAM9X7_DDR_BASE + 0x11400;
+    const uint32_t hw_dst = SAM9X7_DDR_BASE + 0x11500;
+    uint8_t source[] = { 0xde, 0xad, 0xbe, 0xef };
+    uint8_t result[20];
+    uint8_t expected[20];
+    uint64_t ch2 = XDMAC_CHANNEL(2);
+    uint64_t ch3 = XDMAC_CHANNEL(3);
+    uint64_t ch4 = XDMAC_CHANNEL(4);
+    uint64_t ch5 = XDMAC_CHANNEL(5);
+    uint64_t ch6 = XDMAC_CHANNEL(6);
+    uint64_t ch7 = XDMAC_CHANNEL(7);
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+    unsigned int i;
+
+    memset(result, 0xa5, sizeof(result));
+    memcpy(expected, result, sizeof(expected));
+    memset(&expected[0], 0x5a, 4);
+    memset(&expected[6], 0x5a, 4);
+    memset(&expected[12], 0x5a, 4);
+    qtest_memwrite(qts, memset_dst, result, sizeof(result));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CDA, memset_dst);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CUBC, 4);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CBC, 2);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CDS_MSP,
+                 0x5a5a5a5a);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CDUS, 2);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CC,
+                 XDMAC_CC_PERID(0x7f) | XDMAC_CC_MEMSET |
+                 XDMAC_CC_DAM_UBS);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(2));
+
+    /* The reset-gated peripheral clock leaves an enabled channel idle. */
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(2));
+    qtest_memread(qts, memset_dst, result, sizeof(result));
+    for (i = 0; i < sizeof(result); i++) {
+        g_assert_cmphex(result[i], ==, 0xa5);
+    }
+
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    xdmac_waitl(qts, XDMAC_GS, BIT(2), 0);
+    qtest_memread(qts, memset_dst, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), expected, sizeof(expected));
+    value = qtest_readl(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CIS);
+    g_assert_true(value & XDMAC_INT_BIS);
+
+    qtest_memwrite(qts, sw_src, source, sizeof(source));
+    memset(result, 0, sizeof(source));
+    qtest_memwrite(qts, sw_dst, result, sizeof(source));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch3 + XDMAC_CSA, sw_src);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch3 + XDMAC_CDA, sw_dst);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch3 + XDMAC_CUBC,
+                 sizeof(source));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch3 + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_DSYNC_MEM2PER |
+                 XDMAC_CC_SWREQ | XDMAC_CC_SAM_INC |
+                 XDMAC_CC_DAM_INC);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(3));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(3));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + ch3 + XDMAC_CUBC),
+                    ==, sizeof(source));
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GRWS, BIT(3));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GRS) & BIT(3));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GWS) & BIT(3));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWR, BIT(3));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWS) & BIT(3));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWR, BIT(3));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + ch3 + XDMAC_CIS) &
+                  XDMAC_INT_ROIS);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GRWR, BIT(3));
+    xdmac_waitl(qts, ch3 + XDMAC_CUBC, UINT32_MAX, 3);
+
+    for (i = 2; i > 0; i--) {
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWR, BIT(3));
+        xdmac_waitl(qts, ch3 + XDMAC_CUBC, UINT32_MAX, i);
+    }
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWR, BIT(3));
+    xdmac_waitl(qts, XDMAC_GS, BIT(3), 0);
+    qtest_memread(qts, sw_dst, result, sizeof(source));
+    g_assert_cmpmem(result, sizeof(source), source, sizeof(source));
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch4 + XDMAC_CUBC, 2);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch4 + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_SWREQ);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch4 + XDMAC_CIE,
+                 XDMAC_INT_FIS | XDMAC_INT_DIS);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(4));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWF, BIT(4));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + ch4 + XDMAC_CIS) &
+                  XDMAC_INT_FIS);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(4));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, BIT(4));
+    g_assert_false(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(4));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + ch4 + XDMAC_CIS) &
+                  XDMAC_INT_DIS);
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch5 + XDMAC_CSA, 0xdeadbeec);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch5 + XDMAC_CDA, error_dst);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch5 + XDMAC_CUBC, 1);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch5 + XDMAC_CC,
+                 XDMAC_CC_PERID(0x7f) | XDMAC_CC_SAM_INC |
+                 XDMAC_CC_DAM_INC | XDMAC_CC_DWIDTH_WORD);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch5 + XDMAC_CIE,
+                 XDMAC_INT_RBEIS | XDMAC_INT_WBEIS);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GIE, BIT(5));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(5));
+    xdmac_waitl(qts, XDMAC_GIS, BIT(5), BIT(5));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(5));
+    value = qtest_readl(qts, SAM9X7_XDMAC_BASE + ch5 + XDMAC_CIS);
+    g_assert_true(value & XDMAC_INT_RBEIS);
+    g_assert_false(value & XDMAC_INT_WBEIS);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, BIT(5));
+    g_assert_false(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(5));
+
+    qtest_memwrite(qts, hw_src, source, sizeof(source));
+    memset(result, 0, sizeof(source));
+    qtest_memwrite(qts, hw_dst, result, sizeof(source));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch6 + XDMAC_CSA, hw_src);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch6 + XDMAC_CDA, hw_dst);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch6 + XDMAC_CUBC, 2);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch6 + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_PERID(7) |
+                 XDMAC_CC_SAM_INC | XDMAC_CC_DAM_INC |
+                 XDMAC_CC_DWIDTH_HALFWORD);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(6));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(6));
+    qtest_set_irq_in(qts, "/machine/soc/xdmac", "request", 7, 1);
+    xdmac_waitl(qts, XDMAC_GS, BIT(6), 0);
+    qtest_set_irq_in(qts, "/machine/soc/xdmac", "request", 7, 0);
+    qtest_memread(qts, hw_dst, result, sizeof(source));
+    g_assert_cmpmem(result, sizeof(source), source, sizeof(source));
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch7 + XDMAC_CSA, hw_src);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch7 + XDMAC_CDA, 0xdeadbee0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch7 + XDMAC_CUBC, 1);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch7 + XDMAC_CC,
+                 XDMAC_CC_PERID(0x7f) | XDMAC_CC_SAM_INC |
+                 XDMAC_CC_DAM_INC | XDMAC_CC_DWIDTH_WORD);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch7 + XDMAC_CIE,
+                 XDMAC_INT_RBEIS | XDMAC_INT_WBEIS);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GIE, BIT(7));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(7));
+    xdmac_waitl(qts, XDMAC_GIS, BIT(7), BIT(7));
+    value = qtest_readl(qts, SAM9X7_XDMAC_BASE + ch7 + XDMAC_CIS);
+    g_assert_true(value & XDMAC_INT_WBEIS);
+    g_assert_false(value & XDMAC_INT_RBEIS);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, BIT(7));
+    g_assert_false(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(7));
+
+    qtest_quit(qts);
+}
+
 static void test_system_slowclock_pit_reset_and_protection(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -2198,6 +2597,10 @@ int main(int argc, char **argv)
                    test_pit64b_timing_gating_and_irq);
     qtest_add_func("sam9x75/tcb/clocksource-clockevent-and-protection",
                    test_tcb_clocksource_clockevent_and_protection);
+    qtest_add_func("sam9x75/xdmac/registers-memcpy-and-descriptors",
+                   test_xdmac_registers_memcpy_and_descriptors);
+    qtest_add_func("sam9x75/xdmac/pacing-striding-and-errors",
+                   test_xdmac_pacing_striding_and_errors);
     qtest_add_func("sam9x75/system/slowclock-pit-reset-and-protection",
                    test_system_slowclock_pit_reset_and_protection);
     qtest_add_func("sam9x75/rtt/count-alarm-modulo-and-protection",

@@ -176,6 +176,7 @@ config SAM9X7
     bool
     default y
     depends on TCG && ARM
+    select AT91_XDMAC
     select AT91_AIC
     select AT91_DBGU
     select AT91_FLEXCOM
