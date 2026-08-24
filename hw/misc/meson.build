@@ -169,6 +169,7 @@ system_ss.add(when: 'CONFIG_NRF51_SOC', if_true: files('nrf51_rng.c'))
 system_ss.add(when: 'CONFIG_GRLIB', if_true: files('grlib_ahb_apb_pnp.c'))
 
 system_ss.add(when: 'CONFIG_I2C_ECHO', if_true: files('i2c-echo.c'))
+system_ss.add(when: 'CONFIG_MCP16502', if_true: files('mcp16502.c'))
 
 system_ss.add(when: 'CONFIG_AVR_POWER', if_true: files('avr_power.c'))
 

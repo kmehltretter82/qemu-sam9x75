@@ -1066,7 +1066,9 @@ S: Maintained
 F: hw/arm/sam9x7.c
 F: hw/arm/sam9x75_curiosity.c
 F: hw/*/at91_*.c
+F: hw/misc/mcp16502.c
 F: include/hw/*/at91_*.h
+F: include/hw/misc/mcp16502.h
 F: docs/system/arm/sam9x75-curiosity.rst
 F: tests/qtest/sam9x75-curiosity-test.c
 

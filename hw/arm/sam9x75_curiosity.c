@@ -11,6 +11,8 @@
 #include "hw/arm/sam9x7.h"
 #include "hw/core/boards.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/i2c/i2c.h"
+#include "hw/misc/mcp16502.h"
 #include "hw/sd/sd.h"
 #include "hw/ssi/ssi.h"
 #include "qapi/error.h"
@@ -94,6 +96,9 @@ static void sam9x75_curiosity_init(MachineState *machine)
         qdev_get_gpio_in_named(qspi_flash, SSI_GPIO_CS, 0));
 
     sysbus_realize(SYS_BUS_DEVICE(soc), &error_fatal);
+
+    /* U8 is the board's MCP16502TAB-E/S8B power-management IC. */
+    i2c_slave_create_simple(soc->twi[6].bus, TYPE_MCP16502_AB, 0x5b);
 
     if (sam9x75_curiosity_attach_sd(soc, 0)) {
         /* The Curiosity card-detect switch drives PA23 low when inserted. */

@@ -1136,6 +1136,94 @@ static void twi6_enable_master(QTestState *qts)
                  TWI_CR_MSEN | TWI_CR_SVDIS);
 }
 
+static uint8_t twi6_read_reg(QTestState *qts, uint8_t address, uint8_t reg)
+{
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_MMR,
+                 TWI_MMR_DADR(address) | TWI_MMR_MREAD |
+                 TWI_MMR_IADRSZ_1);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IADR, reg);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR,
+                 TWI_CR_START | TWI_CR_STOP);
+
+    return qtest_readb(qts, SAM9X7_TWI6_BASE + TWI_RHR);
+}
+
+static void twi6_write_reg(QTestState *qts, uint8_t address, uint8_t reg,
+                           uint8_t value)
+{
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_MMR,
+                 TWI_MMR_DADR(address) | TWI_MMR_IADRSZ_1);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IADR, reg);
+    qtest_writeb(qts, SAM9X7_TWI6_BASE + TWI_THR, value);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR, TWI_CR_STOP);
+}
+
+static void test_mcp16502_registers_and_regulators(void)
+{
+    static const struct {
+        uint8_t reg;
+        uint8_t value;
+    } reset_values[] = {
+        { 0x00, 0xdb }, { 0x01, 0x20 }, { 0x02, 0x54 }, { 0x03, 0xc0 },
+        { 0x10, 0xf7 }, { 0x11, 0xb7 }, { 0x12, 0x37 }, { 0x13, 0xf7 },
+        { 0x14, 0x09 }, { 0x15, 0xb0 },
+        { 0x20, 0xeb }, { 0x21, 0xab }, { 0x22, 0xab }, { 0x23, 0xeb },
+        { 0x24, 0x1d }, { 0x25, 0xa0 },
+        { 0x30, 0xe3 }, { 0x31, 0xa3 }, { 0x32, 0x23 }, { 0x33, 0xe3 },
+        { 0x34, 0x2c }, { 0x35, 0xb0 },
+        { 0x40, 0xe3 }, { 0x41, 0xa3 }, { 0x42, 0x23 }, { 0x43, 0xe3 },
+        { 0x44, 0x2c }, { 0x45, 0xa0 },
+        { 0x50, 0xb7 }, { 0x51, 0xb7 }, { 0x52, 0x37 }, { 0x53, 0xb7 },
+        { 0x54, 0x09 }, { 0x55, 0xa0 },
+        { 0x60, 0x37 }, { 0x61, 0x37 }, { 0x62, 0x37 }, { 0x63, 0x37 },
+        { 0x64, 0x01 }, { 0x65, 0xa0 },
+    };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int i;
+
+    twi6_enable_master(qts);
+
+    for (i = 0; i < ARRAY_SIZE(reset_values); i++) {
+        g_assert_cmphex(twi6_read_reg(qts, 0x5b, reset_values[i].reg), ==,
+                        reset_values[i].value);
+    }
+
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x04), ==, 0);
+    for (i = 0x05; i <= 0x09; i++) {
+        g_assert_cmphex(twi6_read_reg(qts, 0x5b, i), ==, 0x07);
+    }
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x0a), ==, 0);
+
+    twi6_write_reg(qts, 0x5b, 0x00, 0);
+    twi6_write_reg(qts, 0x5b, 0x01, 0xff);
+    twi6_write_reg(qts, 0x5b, 0x05, 0xff);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x00), ==, 0xdb);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x01), ==, 0x20);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0x07);
+
+    twi6_write_reg(qts, 0x5b, 0x02, 0xff);
+    twi6_write_reg(qts, 0x5b, 0x50, 0xff);
+    twi6_write_reg(qts, 0x5b, 0x55, 0xff);
+    twi6_write_reg(qts, 0x5b, 0x0b, 0xff);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x02), ==, 0xf7);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x50), ==, 0xbf);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x55), ==, 0xaf);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x0b), ==, 0);
+
+    twi6_write_reg(qts, 0x5b, 0x40, 0x63);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x40), ==, 0x63);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x08), ==, 0);
+    twi6_write_reg(qts, 0x5b, 0x40, 0xff);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x08), ==, 0x07);
+
+    qtest_system_reset(qts);
+    twi6_enable_master(qts);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x02), ==, 0x54);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x40), ==, 0xe3);
+
+    qtest_quit(qts);
+}
+
 static void test_flexcom_twi_registers_nack_and_protection(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -5812,6 +5900,8 @@ int main(int argc, char **argv)
                    test_flexcom_twi_registers_nack_and_protection);
     qtest_add_func("sam9x75/flexcom-twi/eeprom-fifo-and-access-width",
                    test_twi_eeprom_transfers_fifo_and_access_width);
+    qtest_add_func("sam9x75/board/mcp16502-registers-and-regulators",
+                   test_mcp16502_registers_and_regulators);
     qtest_add_func("sam9x75/pmc/clock-tree-and-protection",
                    test_pmc_clock_tree_and_protection);
     qtest_add_func("sam9x75/pio/reset-gpio-mux-and-protection",
