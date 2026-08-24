@@ -182,7 +182,10 @@ Support matrix
        virtual-time power accumulation, overflow signaling, migration state
        and the shared PB18 SLOW/ALERT connection.  The current-sense inputs
        default to zero and can be driven through QOM properties for workload
-       or hardware-trace replay.  Conversion-complete alert pulses, SMBus
+       or hardware-trace replay.  The exact upstream board DT probes both
+       Linux drivers.  All six regulator states and voltages and the PAC1934
+       labels, sampling rate and four voltage channels are verified before and
+       after ULP0 suspend/resume.  Conversion-complete alert pulses, SMBus
        timeout/electrical details and hardware-calibrated telemetry remain.
        No EEPROM is populated on the Curiosity base board; unlike the
        SAM9X75-EB configurations, the Curiosity AT91Bootstrap configurations
@@ -280,12 +283,12 @@ phase green merely by avoiding it in the device tree.
    gates after every slice.
 #. **Finish the populated base board.**  The MCP16502 regulators, PAC1934
    power monitor, RGB LED and four push buttons are modeled with their board
-   wiring.  The two boot-memory chip-select jumpers are modeled, and the board
-   has been verified not to contain an EEPROM.  The PMIC nRSTO/NRST handoff
+   wiring.  The exact upstream board DT now exercises regulator and IIO sysfs
+   state across ULP0 suspend/resume.  The two boot-memory chip-select jumpers
+   are modeled, and the board has been verified not to contain an EEPROM.  The
+   PMIC nRSTO/NRST handoff
    now distinguishes VDDCORE resets from the retained VDDBU domain.  Next
-   complete the remaining meaningful jumper/mux selections and exercise the
-   exact upstream board DT without QEMU-only changes, including regulator
-   state, IIO telemetry and suspend/resume.
+   complete the remaining meaningful jumper/mux selections.
 #. **Complete reusable data paths.**  Add the USART and SPI personalities to
    all applicable FLEXCOM instances, complete TWI client/SMBus/PEC/FIFO
    behavior, and wire every documented XDMAC request.  Complete SSC, TC1,
@@ -335,7 +338,7 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The 62-test board qtest baseline and this boot are clean of SAM9X75 model
+The 63-test board qtest baseline and this boot are clean of SAM9X75 model
 warnings with ``-d unimp,guest_errors``.  Generic SD diagnostics still report
 the expected failed MMC/SDIO probes against a memory-only SD card.  FLEXCOM
 USART children remain missing but are not the selected board console.

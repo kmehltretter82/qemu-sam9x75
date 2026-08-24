@@ -268,14 +268,19 @@ static void at91_classd_write(void *opaque, hwaddr offset, uint64_t value,
     case CLASSD_INTSR:
     case CLASSD_IMR:
     case CLASSD_ISR:
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      TYPE_AT91_CLASSD ": write to read-only offset 0x%"
-                      HWADDR_PRIx "\n", offset);
+        /* Linux's flat regcache restores zero across the whole aperture. */
+        if (val) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          TYPE_AT91_CLASSD ": write to read-only offset 0x%"
+                          HWADDR_PRIx "\n", offset);
+        }
         break;
     default:
-        qemu_log_mask(LOG_GUEST_ERROR,
-                      TYPE_AT91_CLASSD ": write to reserved offset 0x%"
-                      HWADDR_PRIx "\n", offset);
+        if (val) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          TYPE_AT91_CLASSD ": write to reserved offset 0x%"
+                          HWADDR_PRIx "\n", offset);
+        }
         break;
     }
 }

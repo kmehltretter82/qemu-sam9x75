@@ -3392,6 +3392,33 @@ static void test_classd_registers_and_protection(void)
     qtest_quit(qts);
 }
 
+static void test_classd_linux_regcache_resume(void)
+{
+    g_autofree char *log_path = NULL;
+    g_autofree char *log = NULL;
+    QTestState *qts;
+    GError *error = NULL;
+    unsigned int offset;
+    int fd;
+
+    fd = g_file_open_tmp("sam9x75-classd-log-XXXXXX", &log_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+
+    qts = qtest_initf(SAM9X75_MACHINE " -d guest_errors -D %s",
+                      log_path);
+    for (offset = 0; offset <= CLASSD_WPMR; offset += sizeof(uint32_t)) {
+        qtest_writel(qts, SAM9X7_CLASSD_BASE + offset, 0);
+    }
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(log_path, &log, NULL, &error));
+    g_assert_no_error(error);
+    g_assert_null(strstr(log, "at91-classd"));
+    g_assert_cmpint(g_unlink(log_path), ==, 0);
+}
+
 static void test_classd_timing_irq_and_xdmac(void)
 {
     const uint32_t tx_source = SAM9X7_DDR_BASE + 0xf400;
@@ -6680,6 +6707,8 @@ int main(int argc, char **argv)
                    test_i2smcc_tdm_compact_and_mono);
     qtest_add_func("sam9x75/classd/registers-and-protection",
                    test_classd_registers_and_protection);
+    qtest_add_func("sam9x75/classd/linux-regcache-resume",
+                   test_classd_linux_regcache_resume);
     qtest_add_func("sam9x75/classd/timing-irq-and-xdmac",
                    test_classd_timing_irq_and_xdmac);
     qtest_add_func("sam9x75/aic/dbgu-integration",
