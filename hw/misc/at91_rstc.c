@@ -50,6 +50,11 @@
 #define RSTC_TYPE_SOFTWARE      3
 #define RSTC_TYPE_USER          4
 
+bool at91_rstc_gpbr_clear_enabled(const AT91RSTCState *s)
+{
+    return s && (s->mode & RSTC_MR_ENGCLR);
+}
+
 static void at91_rstc_update_irq(AT91RSTCState *s)
 {
     bool asserted = s->ursts && !(s->mode & RSTC_MR_URSTEN) &&

@@ -734,6 +734,7 @@ static void at91_rtc_rearm_tamper_inputs(AT91RTCState *s)
         }
     }
     at91_rtc_update_tamper_timer(s);
+    qemu_set_irq(s->tamper_out, !!s->tamper_latched);
 }
 
 static void at91_rtc_capture_tamper(AT91RTCState *s, uint32_t sources)
@@ -758,7 +759,7 @@ static void at91_rtc_capture_tamper(AT91RTCState *s, uint32_t sources)
     s->timestamp_date[1] = date;
     s->timestamp_source[1] = sources;
     s->tamper_count = MIN(s->tamper_count + 1, 15U);
-    qemu_irq_pulse(s->tamper_out);
+    qemu_set_irq(s->tamper_out, 1);
 }
 
 static void at91_rtc_tamper_tick(void *opaque)
@@ -1174,6 +1175,7 @@ static void at91_rtc_reset(DeviceState *dev)
         s->tamper_deadline[i] = -1;
     }
     timer_del(s->tamper_timer);
+    qemu_set_irq(s->tamper_out, 0);
     s->tick_deadline = qemu_clock_get_ns(rtc_clock) +
                        NANOSECONDS_PER_SECOND;
     timer_mod_ns(s->tick_timer, s->tick_deadline);
@@ -1264,6 +1266,7 @@ static int at91_rtc_post_load(void *opaque, int version_id)
     }
     at91_rtc_update_tamper_timer(s);
     at91_rtc_update_irq(s);
+    qemu_set_irq(s->tamper_out, !!s->tamper_latched);
     return 0;
 }
 

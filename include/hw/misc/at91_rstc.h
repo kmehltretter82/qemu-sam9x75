@@ -37,4 +37,6 @@ struct AT91RSTCState {
     bool nrst_out_level;
 };
 
+bool at91_rstc_gpbr_clear_enabled(const AT91RSTCState *s);
+
 #endif /* HW_MISC_AT91_RSTC_H */

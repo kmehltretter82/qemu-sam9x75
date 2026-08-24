@@ -36,6 +36,7 @@
 #define SAM9X7_RTT_BASE         0xfffffe20
 #define SAM9X7_PIT_BASE         0xfffffe40
 #define SAM9X7_SCKC_BASE        0xfffffe50
+#define SAM9X7_GPBR_BASE        0xfffffe60
 #define SAM9X7_RTC_BASE         0xfffffea8
 #define SAM9X7_SYSCWP_BASE      0xfffffedc
 #define SAM9X7_AIC_BASE         0xfffff100
@@ -220,6 +221,13 @@
 #define RTC_TMR_LOCK            BIT(31)
 #define RTC_SECOND_NS           1000000000LL
 
+#define GPBR_MR                 0x00
+#define GPBR_FCLR               0x04
+#define GPBR_REG(index)         (0x08 + (index) * 4)
+#define GPBR_FCLR_ENABLE        BIT(0)
+#define GPBR_MR_WP(index)       BIT(index)
+#define GPBR_MR_RP(index)       BIT((index) + 16)
+
 #define PMC_PLL_CTRL0           0x0c
 #define PMC_PLL_CTRL1           0x10
 #define PMC_PLL_ACR             0x18
@@ -265,6 +273,7 @@
 #define RSTC_SR_NRSTL           BIT(16)
 #define RSTC_MR_URSTEN          BIT(0)
 #define RSTC_MR_URSTIEN         BIT(4)
+#define RSTC_MR_ENGCLR          BIT(20)
 #define RSTC_KEY                0xa5000000
 
 #define RTT_MR                  0x00
@@ -2123,6 +2132,163 @@ static void rtc_begin_update(QTestState *qts)
     qtest_writel(qts, SAM9X7_RTC_BASE + RTC_SCCR, RTC_SR_ACKUPD);
 }
 
+static void test_gpbr_protection_and_retention(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t mode = GPBR_MR_WP(0) | GPBR_MR_RP(1);
+    unsigned int i;
+
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_MR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_FCLR), ==,
+                    0);
+    for (i = 0; i < 8; i++) {
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(i)),
+                        ==, 0);
+        qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_REG(i),
+                     0x11110000 + i);
+    }
+    qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_FCLR, GPBR_FCLR_ENABLE);
+
+    /* The VDDBU-backed state survives an ordinary system reset. */
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_FCLR), ==,
+                    GPBR_FCLR_ENABLE);
+    for (i = 0; i < 8; i++) {
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(i)),
+                        ==, 0x11110000 + i);
+    }
+
+    qtest_writel(qts, SAM9X7_SYSCWP_BASE + SYSC_WPMR,
+                 SYSC_WPMR_KEY | SYSC_WPMR_WPEN);
+    qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_FCLR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_FCLR), ==,
+                    GPBR_FCLR_ENABLE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SYSCWP_BASE + SYSC_WPSR), ==,
+                    0x00006401);
+    qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_REG(0), 0xaaaaaaaa);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(0)), ==,
+                    0x11110000);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SYSCWP_BASE + SYSC_WPSR), ==,
+                    0x00006801);
+    qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_MR, mode);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_MR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SYSCWP_BASE + SYSC_WPSR), ==,
+                    0x00006001);
+
+    qtest_writel(qts, SAM9X7_SYSCWP_BASE + SYSC_WPMR, SYSC_WPMR_KEY);
+    qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_MR, mode);
+    qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_MR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_MR), ==,
+                    mode);
+    qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_REG(0), 0xaaaaaaaa);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(0)), ==,
+                    0x11110000);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(1)), ==,
+                    0);
+    qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_REG(2), 0xaaaaaaaa);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(2)), ==,
+                    0xaaaaaaaa);
+
+    qtest_set_irq_in(qts, "/machine/soc/gpbr", "vddbu-reset", 0, 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_MR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_FCLR), ==,
+                    0);
+    for (i = 0; i < 8; i++) {
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(i)),
+                        ==, 0);
+    }
+    qtest_set_irq_in(qts, "/machine/soc/gpbr", "vddbu-reset", 0, 0);
+    qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_MR, GPBR_MR_WP(7));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_MR), ==,
+                    GPBR_MR_WP(7));
+
+    qtest_quit(qts);
+}
+
+static void gpbr_trigger_tamper(QTestState *qts)
+{
+    qtest_set_irq_in(qts, "/machine/soc/rtc", "tamper", 0, 0);
+    qtest_clock_step(qts, 61036);
+}
+
+static void gpbr_clear_tamper(QTestState *qts)
+{
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TSSR0), ==,
+                    BIT(0));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TSSR1), ==,
+                    BIT(0));
+    qtest_set_irq_in(qts, "/machine/soc/rtc", "tamper", 0, 1);
+}
+
+static void test_gpbr_tamper_clear(void)
+{
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -rtc base=2024-02-28T23:59:58,clock=vm");
+    unsigned int i;
+
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_writel(qts, SAM9X7_RSTC_BASE + RSTC_MR,
+                 RSTC_KEY | RSTC_MR_URSTEN | RSTC_MR_ENGCLR);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_MR), ==,
+                    RSTC_MR_URSTEN | RSTC_MR_ENGCLR);
+    qtest_set_irq_in(qts, "/machine/soc/rtc", "tamper", 0, 1);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_TDPR, 0);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_TMR, BIT(0));
+
+    for (i = 0; i < 8; i++) {
+        qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_REG(i),
+                     0x22220000 + i);
+    }
+    gpbr_trigger_tamper(qts);
+    g_assert_cmphex((qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TSTR0) >> 24) &
+                    0xf, ==, 1);
+    for (i = 0; i < 4; i++) {
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(i)),
+                        ==, 0);
+    }
+    for (i = 4; i < 8; i++) {
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(i)),
+                        ==, 0x22220000 + i);
+    }
+
+    /* Writes remain blocked until the debounced tamper root cause clears. */
+    qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_REG(4), 0xaaaaaaaa);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(4)), ==,
+                    0x22220004);
+    gpbr_clear_tamper(qts);
+    qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_REG(4), 0xaaaaaaaa);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(4)), ==,
+                    0xaaaaaaaa);
+
+    qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_FCLR, GPBR_FCLR_ENABLE);
+    for (i = 0; i < 8; i++) {
+        qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_REG(i),
+                     0x33330000 + i);
+    }
+    gpbr_trigger_tamper(qts);
+    for (i = 0; i < 8; i++) {
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(i)),
+                        ==, 0);
+    }
+
+    gpbr_clear_tamper(qts);
+    qtest_writel(qts, SAM9X7_RSTC_BASE + RSTC_MR,
+                 RSTC_KEY | RSTC_MR_URSTEN);
+    for (i = 0; i < 8; i++) {
+        qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_REG(i),
+                     0x44440000 + i);
+    }
+    gpbr_trigger_tamper(qts);
+    for (i = 0; i < 8; i++) {
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(i)),
+                        ==, 0x44440000 + i);
+    }
+
+    qtest_quit(qts);
+}
+
 static void test_rtc_calendar_alarm_irq_and_protection(void)
 {
     QTestState *qts = qtest_init(
@@ -2819,6 +2985,10 @@ int main(int argc, char **argv)
                    test_system_slowclock_pit_reset_and_protection);
     qtest_add_func("sam9x75/rtt/count-alarm-modulo-and-protection",
                    test_rtt_count_alarm_modulo_and_protection);
+    qtest_add_func("sam9x75/gpbr/protection-and-retention",
+                   test_gpbr_protection_and_retention);
+    qtest_add_func("sam9x75/gpbr/tamper-clear",
+                   test_gpbr_tamper_clear);
     qtest_add_func("sam9x75/rtc/calendar-alarm-irq-and-protection",
                    test_rtc_calendar_alarm_irq_and_protection);
     qtest_add_func("sam9x75/rtc/utc-tamper-and-lock",

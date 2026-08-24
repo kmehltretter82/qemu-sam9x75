@@ -64,6 +64,11 @@ config AT91_SMC
 config AT91_SYSC
     bool
 
+config AT91_GPBR
+    bool
+    select AT91_RSTC
+    select AT91_SYSC
+
 config AT91_SFR
     bool
 

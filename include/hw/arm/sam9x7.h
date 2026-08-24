@@ -17,6 +17,7 @@
 #include "hw/i2c/at91_twi.h"
 #include "hw/intc/at91_aic.h"
 #include "hw/misc/at91_flexcom.h"
+#include "hw/misc/at91_gpbr.h"
 #include "hw/misc/at91_pmc.h"
 #include "hw/misc/at91_mpddrc.h"
 #include "hw/misc/at91_pmecc.h"
@@ -108,6 +109,7 @@ struct SAM9X7State {
     AT91PMCState pmc;
     AT91PMECCState pmecc;
     AT91MPDDRCState mpddrc;
+    AT91GPBRState gpbr;
     AT91SYSCWPState sysc;
     AT91RSTCState rstc;
     AT91SCKCState sckc;

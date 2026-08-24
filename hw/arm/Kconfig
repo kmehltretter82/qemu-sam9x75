@@ -180,6 +180,7 @@ config SAM9X7
     select AT91_AIC
     select AT91_DBGU
     select AT91_FLEXCOM
+    select AT91_GPBR
     select AT91_PIO
     select AT91_PIT
     select AT91_PIT64B

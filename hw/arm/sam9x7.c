@@ -112,6 +112,12 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->rstc), 0,
                        qdev_get_gpio_in(DEVICE(&s->sys_irq), 1));
 
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->gpbr), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->gpbr), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_GPBR_BASE, mr);
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->wdt), errp)) {
         return;
     }
@@ -141,6 +147,8 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion_overlap(s->memory, SAM9X7_RTC_BASE, mr, -1);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->rtc), 0,
                        qdev_get_gpio_in(DEVICE(&s->sys_irq), 6));
+    qdev_connect_gpio_out_named(DEVICE(&s->rtc), "tamper-event", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->gpbr), "tamper-event", 0));
 
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->tcb), errp)) {
         return;
@@ -383,6 +391,10 @@ static void sam9x7_init(Object *obj)
     qdev_connect_clock_in(DEVICE(&s->rstc), "slck",
                           qdev_get_clock_out(DEVICE(&s->sckc), "md-slck"));
     s->rstc.sysc = &s->sysc;
+
+    object_initialize_child(obj, "gpbr", &s->gpbr, TYPE_AT91_GPBR);
+    s->gpbr.sysc = &s->sysc;
+    s->gpbr.rstc = &s->rstc;
 
     object_initialize_child(obj, "wdt", &s->wdt, TYPE_AT91_WDT);
     qdev_connect_clock_in(DEVICE(&s->wdt), "slck",
