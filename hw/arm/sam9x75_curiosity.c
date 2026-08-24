@@ -54,6 +54,7 @@ struct SAM9X75CuriosityMachineState {
 
     bool nand_cs;
     bool qspi_cs;
+    bool ethernet_25mhz;
     SAM9X75PAC1934Route pac1934_route;
     SAM9X75M2Interface m2_interface;
     SAM9X7State *soc;
@@ -185,6 +186,8 @@ static void sam9x75_curiosity_init(MachineState *machine)
                              &error_abort);
     qdev_prop_set_chr(DEVICE(&soc->dbgu), "chardev", serial_hd(0));
     qemu_configure_nic_device(DEVICE(&soc->gmac), true, NULL);
+    qdev_prop_set_bit(DEVICE(&soc->gmac), "phy-clocked",
+                      board->ethernet_25mhz);
     qemu_macaddr_default_if_unset(&soc->gmac.conf.macaddr);
     nand_dinfo = drive_get(IF_MTD, 0, 0);
     if (nand_dinfo) {
@@ -301,6 +304,17 @@ static void sam9x75_curiosity_set_qspi_cs(Object *obj, bool value,
     SAM9X75_CURIOSITY_MACHINE(obj)->qspi_cs = value;
 }
 
+static bool sam9x75_curiosity_get_ethernet_25mhz(Object *obj, Error **errp)
+{
+    return SAM9X75_CURIOSITY_MACHINE(obj)->ethernet_25mhz;
+}
+
+static void sam9x75_curiosity_set_ethernet_25mhz(Object *obj, bool value,
+                                                 Error **errp)
+{
+    SAM9X75_CURIOSITY_MACHINE(obj)->ethernet_25mhz = value;
+}
+
 static char *sam9x75_curiosity_get_pac1934_route(Object *obj, Error **errp)
 {
     SAM9X75CuriosityMachineState *board =
@@ -376,6 +390,7 @@ static void sam9x75_curiosity_machine_instance_init(Object *obj)
 
     board->nand_cs = true;
     board->qspi_cs = true;
+    board->ethernet_25mhz = true;
     board->pac1934_route = SAM9X75_PAC1934_ROUTE_SOC;
     board->m2_interface = SAM9X75_M2_INTERFACE_SDIO;
 }
@@ -421,6 +436,11 @@ static void sam9x75_curiosity_machine_class_init(ObjectClass *oc,
                                    sam9x75_curiosity_set_qspi_cs);
     object_class_property_set_description(oc, "qspi-cs",
                                           "Connect the J10 QSPI CS jumper");
+    object_class_property_add_bool(oc, "ethernet-25mhz",
+                                   sam9x75_curiosity_get_ethernet_25mhz,
+                                   sam9x75_curiosity_set_ethernet_25mhz);
+    object_class_property_set_description(oc, "ethernet-25mhz",
+        "Connect the J12 25 MHz Ethernet reference-clock jumper");
     object_class_property_add_str(oc, "pac1934-route",
                                   sam9x75_curiosity_get_pac1934_route,
                                   sam9x75_curiosity_set_pac1934_route);

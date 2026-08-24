@@ -163,9 +163,12 @@ Support matrix
      - GEM0 has six priority queues, DMA transmit/receive, AIC sources 24 and
        60--64, a Clause 22 PHY at address 1 with the LAN8840 identifier, and a
        station address provisioned through the SST26VF064BEUI.  Unmodified
-       U-Boot obtains a DHCP lease and exchanges packets.  LAN8840 MMD/RGMII
-       delay registers, PHY reset-value fidelity, checksum corner cases,
-       filtering, PTP/TSN and hardware comparison remain.
+       U-Boot obtains a DHCP lease and exchanges packets.  J12 defaults closed
+       and supplies the LAN8840's required 25 MHz reference clock;
+       opening it makes MDIO inaccessible and prevents external RGMII
+       traffic.  LAN8840 MMD/RGMII delay registers, PHY reset-value fidelity,
+       checksum corner cases, filtering, PTP/TSN and hardware comparison
+       remain.
    * - USB host and device
      - Missing
      - OHCI, EHCI, UDPHS, port power, hotplug, gadget mode and SAM-BA path.
@@ -271,9 +274,11 @@ Support matrix
        PAC1934 to FLEXCOM7; its SoC, USB-bridge and disconnected jumper routes
        have a machine option and functional SoC-side NACK behavior.  J24
        defaults to the M.2 SDIO route; its SPI position disconnects SDMMC1
-       pending FLEXCOM4 SPI support.  The remaining power, clock and
-       interface-selection jumpers, mikroBUS, Raspberry Pi header, M.2
-       peripherals and official Microchip overlay attachments remain.
+       pending FLEXCOM4 SPI support.  J12 controls the LAN8840 daughterboard's
+       required 25 MHz clock, with functional MDIO and traffic loss when
+       open.  The remaining power, clock and interface-selection jumpers,
+       mikroBUS, Raspberry Pi header, M.2 peripherals and official Microchip
+       overlay attachments remain.
 
 Execution roadmap
 -----------------
@@ -344,7 +349,7 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The 65-test board qtest baseline and this boot are clean of SAM9X75 model
+The 66-test board qtest baseline and this boot are clean of SAM9X75 model
 warnings with ``-d unimp,guest_errors``.  Generic SD diagnostics still report
 the expected failed MMC/SDIO probes against a memory-only SD card.  FLEXCOM
 USART children remain missing but are not the selected board console.
@@ -400,6 +405,15 @@ deselected by opening its jumper at machine creation::
 An open J9 makes NAND bus reads return the deselected value and ignores writes.
 An open J10 holds the serial flash chip select inactive while leaving the QSPI
 controller available.
+
+J12 is closed by default and supplies the 25 MHz reference clock required by
+the LAN8840 on the Ethernet daughterboard.  Open it with::
+
+  -M sam9x75-curiosity,ethernet-25mhz=off
+
+Without that clock the LAN8840 management interface is inaccessible, MDIO
+reads return ``0xffff``, link remains down and external RGMII traffic is
+blocked.  The GEM controller itself remains available.
 
 J38 and J39 both default to pins 2--3, routing PAC1934 I2C to FLEXCOM7.  The
 only other valid hardware settings route both jumpers to the external

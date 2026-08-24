@@ -639,10 +639,13 @@ static void gem_init_register_masks(CadenceGEMState *s)
  */
 static void phy_update_link(CadenceGEMState *s)
 {
-    DB_PRINT("down %d\n", qemu_get_queue(s->nic)->link_down);
+    bool link_down = !s->phy_clocked ||
+                     qemu_get_queue(s->nic)->link_down;
+
+    DB_PRINT("down %d\n", link_down);
 
     /* Autonegotiation status mirrors link status.  */
-    if (qemu_get_queue(s->nic)->link_down) {
+    if (link_down) {
         s->phy_regs[PHY_REG_STATUS] &= ~(PHY_REG_STATUS_ANEGCMPL |
                                          PHY_REG_STATUS_LINK);
         s->phy_regs[PHY_REG_INT_ST] |= PHY_REG_INT_ST_LINKC;
@@ -661,6 +664,11 @@ static bool gem_can_receive(NetClientState *nc)
     int i;
 
     s = qemu_get_nic_opaque(nc);
+
+    /* A PHY without its reference clock cannot deliver RGMII traffic. */
+    if (!s->phy_clocked) {
+        return false;
+    }
 
     /* Do nothing if receive is not enabled. */
     if (!FIELD_EX32(s->regs[R_NWCTRL], NWCTRL, ENABLE_RECEIVE)) {
@@ -1394,7 +1402,7 @@ static void gem_transmit(CadenceGEMState *s)
                                               LOOPBACK_LOCAL)) {
                     qemu_receive_packet(qemu_get_queue(s->nic), s->tx_packet,
                                         total_bytes);
-                } else {
+                } else if (s->phy_clocked) {
                     qemu_send_packet(qemu_get_queue(s->nic), s->tx_packet,
                                      total_bytes);
                 }
@@ -1557,7 +1565,7 @@ static void gem_handle_phy_access(CadenceGEMState *s)
         ps = s->phy_consumer;
     }
 
-    if (!s->phy_connected || phy_addr != ps->phy_addr) {
+    if (!s->phy_clocked || !s->phy_connected || phy_addr != ps->phy_addr) {
         /* phy not connected or no phy at this address */
         if (op == MDIO_OP_READ) {
             s->regs[R_PHYMNTNC] = FIELD_DP32(val, PHYMNTNC, DATA, 0xffff);
@@ -1788,6 +1796,9 @@ static void gem_realize(DeviceState *dev, Error **errp)
     s->nic = qemu_new_nic(&net_gem_info, &s->conf,
                           object_get_typename(OBJECT(dev)), dev->id,
                           &dev->mem_reentrancy_guard, s);
+    if (!s->phy_clocked) {
+        qemu_get_queue(s->nic)->link_down = true;
+    }
 
     if (s->jumbo_max_len > MAX_FRAME_SIZE) {
         error_setg(errp, "jumbo-max-len is greater than %d",
@@ -1842,6 +1853,7 @@ static const Property gem_properties[] = {
                        jumbo_max_len, 10240),
     DEFINE_PROP_BOOL("pcs-enabled", CadenceGEMState,
                        pcs_enabled, false),
+    DEFINE_PROP_BOOL("phy-clocked", CadenceGEMState, phy_clocked, true),
     DEFINE_PROP_BOOL("phy-connected", CadenceGEMState, phy_connected, true),
     DEFINE_PROP_LINK("phy-consumer", CadenceGEMState, phy_consumer,
                      TYPE_CADENCE_GEM, CadenceGEMState *),

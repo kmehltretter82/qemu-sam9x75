@@ -2276,6 +2276,9 @@ static void test_gem_registers_mdio_dma_and_irqs(void)
         SAM9X75_MACHINE " -nic user,mac=02:00:00:09:75:01");
     unsigned int q;
 
+    g_assert_true(qtest_qom_get_bool(qts, "/machine", "ethernet-25mhz"));
+    g_assert_true(qtest_qom_get_bool(qts, "/machine/soc/gmac",
+                                     "phy-clocked"));
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_MODID), ==,
                     0x00020118);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_DESCONF6) &
@@ -2339,6 +2342,58 @@ static void test_gem_registers_mdio_dma_and_irqs(void)
     g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR2) & BIT(0));
 
     qtest_quit(qts);
+}
+
+static void test_board_ethernet_clock_jumper(void)
+{
+    const uint32_t descriptor = SAM9X7_DDR_BASE + 0x1000;
+    const uint32_t packet = SAM9X7_DDR_BASE + 0x2000;
+    QTestState *qts;
+#ifndef _WIN32
+    uint8_t received[68];
+    int sockets[2];
+    int ret;
+
+    ret = socketpair(PF_UNIX, SOCK_STREAM, 0, sockets);
+    g_assert_cmpint(ret, !=, -1);
+    qts = qtest_initf(
+        SAM9X75_MACHINE ",ethernet-25mhz=off"
+        " -nic socket,fd=%d,mac=02:00:00:09:75:01", sockets[1]);
+#else
+    qts = qtest_init(SAM9X75_MACHINE ",ethernet-25mhz=off"
+                     " -nic user,mac=02:00:00:09:75:01");
+#endif
+
+    g_assert_false(qtest_qom_get_bool(qts, "/machine",
+                                      "ethernet-25mhz"));
+    g_assert_false(qtest_qom_get_bool(qts, "/machine/soc/gmac",
+                                      "phy-clocked"));
+
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL, GEM_NWCTRL_MPE);
+    g_assert_cmphex(gem_mdio_read(qts, 1, 2), ==, 0xffff);
+    g_assert_cmphex(gem_mdio_read(qts, 1, 3), ==, 0xffff);
+
+    /* The MAC completes DMA, but the unclocked PHY emits no frame. */
+    qtest_memset(qts, packet, 0xff, 64);
+    qtest_writel(qts, descriptor, packet);
+    qtest_writel(qts, descriptor + 4,
+                 GEM_TX_DESC_WRAP | GEM_TX_DESC_LAST | 64);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TXQBASE, descriptor);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL,
+                 GEM_NWCTRL_MPE | GEM_NWCTRL_TXEN | GEM_NWCTRL_TSTART);
+    g_assert_true(qtest_readl(qts, descriptor + 4) & GEM_TX_DESC_USED);
+#ifndef _WIN32
+    errno = 0;
+    ret = recv(sockets[0], received, sizeof(received), MSG_DONTWAIT);
+    g_assert_cmpint(ret, ==, -1);
+    g_assert_true(errno == EAGAIN || errno == EWOULDBLOCK);
+#endif
+
+    qtest_quit(qts);
+#ifndef _WIN32
+    close(sockets[0]);
+    close(sockets[1]);
+#endif
 }
 
 static void pmc_configure_pll(QTestState *qts, unsigned int id)
@@ -6790,6 +6845,8 @@ int main(int argc, char **argv)
                    test_aic_fiq_mask_and_write_protection);
     qtest_add_func("sam9x75/gem/registers-mdio-dma-and-irqs",
                    test_gem_registers_mdio_dma_and_irqs);
+    qtest_add_func("sam9x75/board/ethernet-clock-jumper",
+                   test_board_ethernet_clock_jumper);
     qtest_add_func("sam9x75/flexcom-twi/registers-nack-and-protection",
                    test_flexcom_twi_registers_nack_and_protection);
     qtest_add_func("sam9x75/flexcom-twi/eeprom-fifo-and-access-width",
