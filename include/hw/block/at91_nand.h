@@ -13,6 +13,8 @@
 #define TYPE_AT91_NAND "at91-nand"
 OBJECT_DECLARE_SIMPLE_TYPE(AT91NANDState, AT91_NAND)
 
+#define AT91_NAND_GPIO_NCE "nce"
+
 #define AT91_NAND_PAGE_SIZE          4096
 #define AT91_NAND_OOB_SIZE           256
 #define AT91_NAND_PAGE_TOTAL_SIZE    (AT91_NAND_PAGE_SIZE + \
@@ -33,6 +35,7 @@ struct AT91NANDState {
     BlockBackend *blk;
     uint8_t **sparse_pages;
     bool raw_backend;
+    bool selected;
 
     uint8_t command;
     uint8_t previous_command;

@@ -32,7 +32,18 @@
 #include "system/system.h"
 #include "target/arm/cpu-qom.h"
 
-static struct arm_boot_info sam9x75_curiosity_boot_info;
+#define TYPE_SAM9X75_CURIOSITY_MACHINE \
+    MACHINE_TYPE_NAME("sam9x75-curiosity")
+OBJECT_DECLARE_SIMPLE_TYPE(SAM9X75CuriosityMachineState,
+                           SAM9X75_CURIOSITY_MACHINE)
+
+struct SAM9X75CuriosityMachineState {
+    MachineState parent_obj;
+
+    bool nand_cs;
+    bool qspi_cs;
+    struct arm_boot_info boot_info;
+};
 
 static bool sam9x75_curiosity_attach_sd(SAM9X7State *soc,
                                         unsigned int unit)
@@ -126,6 +137,8 @@ static void sam9x75_curiosity_create_controls(MachineState *machine,
 
 static void sam9x75_curiosity_init(MachineState *machine)
 {
+    SAM9X75CuriosityMachineState *board =
+        SAM9X75_CURIOSITY_MACHINE(machine);
     MemoryRegion *sysmem = get_system_memory();
     SAM9X7State *soc;
     DeviceState *qspi_flash;
@@ -162,6 +175,9 @@ static void sam9x75_curiosity_init(MachineState *machine)
                                 blk_by_legacy_dinfo(nand_dinfo),
                                 &error_fatal);
     }
+    qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&soc->nand),
+                                        AT91_NAND_GPIO_NCE, 0),
+                 !board->nand_cs);
 
     /* U6 is a Microchip SST26VF064BEUI 64-Mbit SQI NOR flash. */
     qspi_flash = qdev_new("sst26vf064beui");
@@ -173,8 +189,12 @@ static void sam9x75_curiosity_init(MachineState *machine)
                                 &error_fatal);
     }
     qdev_realize_and_unref(qspi_flash, BUS(soc->qspi.spi), &error_fatal);
-    qdev_connect_gpio_out_named(DEVICE(&soc->qspi), "cs", 0,
-        qdev_get_gpio_in_named(qspi_flash, SSI_GPIO_CS, 0));
+    if (board->qspi_cs) {
+        qdev_connect_gpio_out_named(DEVICE(&soc->qspi), "cs", 0,
+            qdev_get_gpio_in_named(qspi_flash, SSI_GPIO_CS, 0));
+    } else {
+        qemu_set_irq(qdev_get_gpio_in_named(qspi_flash, SSI_GPIO_CS, 0), 1);
+    }
 
     sysbus_realize(SYS_BUS_DEVICE(soc), &error_fatal);
 
@@ -215,19 +235,52 @@ static void sam9x75_curiosity_init(MachineState *machine)
     /* The populated NAND drives its active-high ready signal onto PD14. */
     qemu_set_irq(qdev_get_gpio_in(DEVICE(&soc->pio[3]), 14), 1);
 
-    sam9x75_curiosity_boot_info = (struct arm_boot_info) {
+    board->boot_info = (struct arm_boot_info) {
         .loader_start = SAM9X7_DDR_BASE,
         .ram_size = machine->ram_size,
         .board_id = -1,
     };
 
     if (!qtest_enabled()) {
-        arm_load_kernel(&soc->cpu, machine, &sam9x75_curiosity_boot_info);
+        arm_load_kernel(&soc->cpu, machine, &board->boot_info);
     }
 }
 
-static void sam9x75_curiosity_machine_init(MachineClass *mc)
+static bool sam9x75_curiosity_get_nand_cs(Object *obj, Error **errp)
 {
+    return SAM9X75_CURIOSITY_MACHINE(obj)->nand_cs;
+}
+
+static void sam9x75_curiosity_set_nand_cs(Object *obj, bool value,
+                                          Error **errp)
+{
+    SAM9X75_CURIOSITY_MACHINE(obj)->nand_cs = value;
+}
+
+static bool sam9x75_curiosity_get_qspi_cs(Object *obj, Error **errp)
+{
+    return SAM9X75_CURIOSITY_MACHINE(obj)->qspi_cs;
+}
+
+static void sam9x75_curiosity_set_qspi_cs(Object *obj, bool value,
+                                          Error **errp)
+{
+    SAM9X75_CURIOSITY_MACHINE(obj)->qspi_cs = value;
+}
+
+static void sam9x75_curiosity_machine_instance_init(Object *obj)
+{
+    SAM9X75CuriosityMachineState *board =
+        SAM9X75_CURIOSITY_MACHINE(obj);
+
+    board->nand_cs = true;
+    board->qspi_cs = true;
+}
+
+static void sam9x75_curiosity_machine_class_init(ObjectClass *oc,
+                                                  const void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
     static const char * const valid_cpu_types[] = {
         ARM_CPU_TYPE_NAME("arm926"),
         NULL,
@@ -241,6 +294,28 @@ static void sam9x75_curiosity_machine_init(MachineClass *mc)
     mc->default_ram_id = "sam9x75-curiosity.ddr";
     mc->max_cpus = 1;
     mc->default_cpus = 1;
+
+    object_class_property_add_bool(oc, "nand-cs",
+                                   sam9x75_curiosity_get_nand_cs,
+                                   sam9x75_curiosity_set_nand_cs);
+    object_class_property_set_description(oc, "nand-cs",
+                                          "Connect the J9 NAND CS jumper");
+    object_class_property_add_bool(oc, "qspi-cs",
+                                   sam9x75_curiosity_get_qspi_cs,
+                                   sam9x75_curiosity_set_qspi_cs);
+    object_class_property_set_description(oc, "qspi-cs",
+                                          "Connect the J10 QSPI CS jumper");
 }
 
-DEFINE_MACHINE_ARM("sam9x75-curiosity", sam9x75_curiosity_machine_init)
+static const TypeInfo sam9x75_curiosity_machine_types[] = {
+    {
+        .name = TYPE_SAM9X75_CURIOSITY_MACHINE,
+        .parent = TYPE_MACHINE,
+        .class_init = sam9x75_curiosity_machine_class_init,
+        .instance_init = sam9x75_curiosity_machine_instance_init,
+        .instance_size = sizeof(SAM9X75CuriosityMachineState),
+        .interfaces = arm_machine_interfaces,
+    },
+};
+
+DEFINE_TYPES(sam9x75_curiosity_machine_types)

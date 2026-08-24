@@ -6221,6 +6221,9 @@ static void test_nand_identification_program_and_erase(void)
     uint8_t parameter_page[256];
     unsigned int i;
 
+    g_assert_true(qtest_qom_get_bool(qts, "/machine", "nand-cs"));
+    g_assert_true(qtest_qom_get_bool(qts, "/machine", "qspi-cs"));
+
     nand_command(qts, NAND_CMD_READ_ID);
     nand_address(qts, 0x00);
     for (i = 0; i < G_N_ELEMENTS(expected_id); i++) {
@@ -6288,6 +6291,29 @@ static void test_nand_identification_program_and_erase(void)
     for (i = 0; i < G_N_ELEMENTS(payload); i++) {
         g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0xff);
     }
+
+    qtest_quit(qts);
+}
+
+static void qspi_configure_read(QTestState *qts, uint8_t opcode,
+                                uint32_t ifr);
+
+static void test_board_memory_cs_jumpers(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE
+                                 ",nand-cs=off,qspi-cs=off");
+
+    g_assert_false(qtest_qom_get_bool(qts, "/machine", "nand-cs"));
+    g_assert_false(qtest_qom_get_bool(qts, "/machine", "qspi-cs"));
+
+    nand_command(qts, NAND_CMD_READ_ID);
+    nand_address(qts, 0x00);
+    g_assert_cmphex(qtest_readl(qts, NAND_DATA), ==, UINT32_MAX);
+
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_MR, QSPI_MR_SMM);
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_CR, QSPI_CR_QSPIEN);
+    qspi_configure_read(qts, 0x9f, QSPI_IFR_INSTEN | QSPI_IFR_DATAEN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_QSPI_MEM_BASE), ==, 0);
 
     qtest_quit(qts);
 }
@@ -6608,6 +6634,8 @@ int main(int argc, char **argv)
                    test_sdhci_preset_registers);
     qtest_add_func("sam9x75/nand/identification-program-and-erase",
                    test_nand_identification_program_and_erase);
+    qtest_add_func("sam9x75/board/memory-cs-jumpers",
+                   test_board_memory_cs_jumpers);
     qtest_add_func("sam9x75/smc-pmecc/registers",
                    test_smc_and_pmecc_registers);
     qtest_add_func("sam9x75/qspi/flash-read-program-and-erase",

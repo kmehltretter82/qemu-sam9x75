@@ -433,6 +433,9 @@ static uint64_t at91_nand_read(void *opaque, hwaddr offset,
 {
     AT91NANDState *s = AT91_NAND(opaque);
 
+    if (!s->selected) {
+        return UINT64_MAX;
+    }
     if (offset & (AT91_NAND_ALE | AT91_NAND_CLE)) {
         return 0xff;
     }
@@ -444,6 +447,9 @@ static void at91_nand_write(void *opaque, hwaddr offset, uint64_t value,
 {
     AT91NANDState *s = AT91_NAND(opaque);
 
+    if (!s->selected) {
+        return;
+    }
     if (offset & AT91_NAND_CLE) {
         at91_nand_command(s, value);
     } else if (offset & AT91_NAND_ALE) {
@@ -466,6 +472,14 @@ static const MemoryRegionOps at91_nand_ops = {
         .max_access_size = 1,
     },
 };
+
+static void at91_nand_nce(void *opaque, int n, int level)
+{
+    AT91NANDState *s = AT91_NAND(opaque);
+
+    assert(n == 0);
+    s->selected = !level;
+}
 
 static void at91_nand_reset(DeviceState *dev)
 {
@@ -530,10 +544,11 @@ static void at91_nand_finalize(Object *obj)
 /* Flash contents are storage state; the in-flight NAND protocol is migrated. */
 static const VMStateDescription at91_nand_vmstate = {
     .name = TYPE_AT91_NAND,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8(command, AT91NANDState),
+        VMSTATE_BOOL_V(selected, AT91NANDState, 2),
         VMSTATE_UINT8(previous_command, AT91NANDState),
         VMSTATE_UINT8(status, AT91NANDState),
         VMSTATE_UINT8_ARRAY(address, AT91NANDState, 5),
@@ -559,9 +574,12 @@ static void at91_nand_init(Object *obj)
 {
     AT91NANDState *s = AT91_NAND(obj);
 
+    s->selected = true;
     memory_region_init_io(&s->mmio, obj, &at91_nand_ops, s,
                           TYPE_AT91_NAND, AT91_NAND_MMIO_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
+    qdev_init_gpio_in_named(DEVICE(obj), at91_nand_nce,
+                            AT91_NAND_GPIO_NCE, 1);
 }
 
 static void at91_nand_class_init(ObjectClass *klass, const void *data)
