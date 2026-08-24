@@ -19,6 +19,7 @@
 #define PMECC_SAREA        0x04
 #define PMECC_SADDR        0x08
 #define PMECC_EADDR        0x0c
+#define PMECC_RESERVED_CLK 0x10
 #define PMECC_CTRL         0x14
 #define PMECC_SR           0x18
 #define PMECC_IER          0x1c
@@ -76,6 +77,9 @@ static uint64_t at91_pmecc_read(void *opaque, hwaddr offset,
         return s->saddr;
     case PMECC_EADDR:
         return s->eaddr;
+    case PMECC_RESERVED_CLK:
+        /* SAM9X7 controls the PMECC clock in the PMC, not this register. */
+        return 0;
     case PMECC_CTRL:
         return 0;
     case PMECC_SR:
@@ -119,6 +123,9 @@ static void at91_pmecc_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case PMECC_EADDR:
         s->eaddr = value & 0x1ff;
+        break;
+    case PMECC_RESERVED_CLK:
+        /* Kept for compatibility with the inherited Atmel PMECC driver. */
         break;
     case PMECC_CTRL:
         if (value & PMECC_CTRL_RST) {

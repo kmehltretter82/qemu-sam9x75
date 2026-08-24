@@ -370,6 +370,7 @@
 #define PMC_MOR                 0x20
 #define PMC_MCFR                0x24
 #define PMC_MCKR                0x28
+#define PMC_RESERVED_LEGACY_MCKR 0x30
 #define PMC_IER                 0x60
 #define PMC_IDR                 0x64
 #define PMC_SR                  0x68
@@ -379,6 +380,7 @@
 #define PMC_CSR1                0xa4
 #define PMC_GCSR1               0xc4
 #define PMC_PLL_ISR0            0xec
+#define PMC_RESERVED_LEGACY_PCR 0x10c
 
 #define PMC_PLL_CTRL0_ENPLL     BIT(28)
 #define PMC_PLL_CTRL0_ENPLLCK   BIT(29)
@@ -867,6 +869,7 @@
 #define PMECC_SAREA             0x04
 #define PMECC_SADDR             0x08
 #define PMECC_EADDR             0x0c
+#define PMECC_RESERVED_CLK      0x10
 #define PMECC_CTRL              0x14
 #define PMECC_SR                0x18
 #define PMECC_IER               0x1c
@@ -1524,6 +1527,15 @@ static void test_pmc_clock_tree_and_protection(void)
     g_assert_false(value & PMC_MCFR_RCMEAS);
     g_assert_cmphex(value & 0xffff, ==,
                     (12000000ULL * 16 / 32000) & 0xffff);
+
+    /* Vendor U-Boot probes legacy locations that SAM9X7 reserves. */
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_RESERVED_LEGACY_PCR, 47);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE +
+                                PMC_RESERVED_LEGACY_PCR), ==, 0);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_RESERVED_LEGACY_MCKR,
+                 UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE +
+                                PMC_RESERVED_LEGACY_MCKR), ==, 0);
 
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MOR,
                  PMC_MOR_KEY | PMC_MOR_MOSCRCEN | PMC_MOR_MOSCXTEN);
@@ -5583,6 +5595,9 @@ static void test_smc_and_pmecc_registers(void)
                     0x1a5);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_EADDR), ==,
                     0x1e7);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_RESERVED_CLK, 2);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE +
+                                PMECC_RESERVED_CLK), ==, 0);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_ECC0), ==,
                     UINT32_MAX);
 

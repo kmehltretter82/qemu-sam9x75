@@ -31,6 +31,7 @@
 #define PMC_MOR        0x20
 #define PMC_MCFR       0x24
 #define PMC_MCKR       0x28
+#define PMC_RESERVED_LEGACY_MCKR 0x30
 #define PMC_USB        0x38
 #define PMC_PCK0       0x40
 #define PMC_PCK1       0x44
@@ -54,6 +55,7 @@
 #define PMC_PLL_IMR    0xe8
 #define PMC_PLL_ISR0   0xec
 #define PMC_PLL_ISR1   0xf0
+#define PMC_RESERVED_LEGACY_PCR  0x10c
 
 #define PMC_MMIO_SIZE  0x200
 
@@ -497,6 +499,10 @@ static uint64_t at91_pmc_read(void *opaque, hwaddr offset, unsigned int size)
         return at91_pmc_get_mcfr(s);
     case PMC_MCKR:
         return s->mckr;
+    case PMC_RESERVED_LEGACY_MCKR:
+    case PMC_RESERVED_LEGACY_PCR:
+        /* Vendor U-Boot uses legacy PMC offsets that SAM9X7 reserves. */
+        return 0;
     case PMC_USB:
         return s->usb;
     case PMC_PCK0:
@@ -628,6 +634,10 @@ static void at91_pmc_write(void *opaque, hwaddr offset, uint64_t value,
     case PMC_MCKR:
         s->mckr = value & PMC_MCKR_MASK;
         at91_pmc_update_clocks(s);
+        break;
+    case PMC_RESERVED_LEGACY_MCKR:
+    case PMC_RESERVED_LEGACY_PCR:
+        /* Reserved locations are read-zero/write-ignore on SAM9X7. */
         break;
     case PMC_USB:
         s->usb = value & 0x00000f01;
