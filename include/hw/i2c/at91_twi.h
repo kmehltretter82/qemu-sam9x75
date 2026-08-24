@@ -10,18 +10,25 @@
 #include "hw/core/clock.h"
 #include "hw/core/sysbus.h"
 #include "hw/i2c/i2c.h"
+#include "qemu/timer.h"
 #include "qom/object.h"
 
 #define TYPE_AT91_TWI "at91-twi"
 OBJECT_DECLARE_SIMPLE_TYPE(AT91TWIState, AT91_TWI)
+
+#define AT91_TWI_FIFO_SIZE 16
 
 struct AT91TWIState {
     SysBusDevice parent_obj;
 
     MemoryRegion mmio;
     qemu_irq irq;
+    qemu_irq tx_request;
+    qemu_irq rx_request;
     I2CBus *bus;
     Clock *pclk;
+    Clock *gclk;
+    QEMUTimer *transfer_timer;
     char *bus_name;
 
     uint32_t mmr;
@@ -42,6 +49,14 @@ struct AT91TWIState {
     uint32_t wpmr;
     uint32_t wpsr;
 
+    uint8_t rx_fifo[AT91_TWI_FIFO_SIZE];
+    uint8_t tx_fifo[AT91_TWI_FIFO_SIZE];
+    uint8_t tx_shift;
+    uint8_t rx_head;
+    uint8_t rx_count;
+    uint8_t tx_head;
+    uint8_t tx_count;
+
     uint16_t remaining;
     bool flexcom_enabled;
     bool master_enabled;
@@ -54,6 +69,10 @@ struct AT91TWIState {
     bool bus_active;
     bool read_transfer;
     bool stop_pending;
+    bool tx_shift_valid;
+    bool rx_shift_pending;
+    bool tx_request_level;
+    bool rx_request_level;
 };
 
 I2CBus *at91_twi_get_bus(AT91TWIState *s);

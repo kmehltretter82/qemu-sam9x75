@@ -135,14 +135,18 @@ Support matrix
        transfer delays, local loopback, comparison, interrupts, migration and
        its documented XDMAC pair.  The host data path uses a normal QEMU SSI
        bus, and FLEXCOM4 NPCS1 reaches the M.2 socket through J24.
-       The TWI host path covers polled byte transfers, internal addresses,
-       repeated starts, NACK and AIC signaling, alternative-command mode,
-       FIFO-width accesses, masks, write protection, reset and migration.
+       The TWI host path covers PCLK/GCLK-paced byte transfers, internal
+       addresses, repeated starts, NACK and AIC signaling,
+       alternative-command mode, 16-byte transmit/receive FIFOs, byte,
+       halfword and word accesses, ready modes, level and threshold flags,
+       overflow/underflow errors, clock gating, migration and each wrapper's
+       documented XDMAC transmit/receive pair.
        SPI client mode and pin-level mode-fault/framing input, CRC and two-pin
        engines, bit-level USART framing and synchronous/protocol engines,
-       complete flow-control endpoints, TWI client mode, SMBus/PEC and
-       timing/arbitration fidelity remain missing.  SAM9X7 documentation and
-       its device pack do not define the legacy SPI version word at offset
+       complete flow-control endpoints, TWI client mode, SMBus/PEC,
+       high-speed timing, separately timed address/START/STOP phases and
+       arbitration fidelity remain missing.  SAM9X7 documentation and its
+       device pack do not define the legacy SPI version word at offset
        ``0xfc``; the model conservatively returns zero until the reserved read
        and Linux capability-detection behavior can be measured on hardware.
    * - XDMAC
@@ -151,10 +155,10 @@ Support matrix
        and memset, byte/halfword/word widths, address modes and 2D strides,
        software and external-request pacing, suspend/resume/flush/disable,
        linked-list descriptor views, completion/error interrupts and migration
-       state.  DBGU, every FLEXCOM USART and SPI personality, I2SMCC, Class-D,
-       AES, SHA and TDES request lines are wired; the remaining peripheral
-       request lines, security policy, microblock/burst timing and coherency
-       effects remain missing.
+       state.  DBGU, every FLEXCOM USART, SPI and TWI personality, I2SMCC,
+       Class-D, AES, SHA and TDES request lines are wired; the remaining
+       peripheral request lines, security policy, microblock/burst timing and
+       coherency effects remain missing.
    * - SDMMC0 and SDMMC1
      - Initial
      - Both SAM9X7 hosts, removable-card attachment and PA23 card detect are
@@ -324,10 +328,10 @@ phase green merely by avoiding it in the device tree.
 #. **Complete reusable data paths.**  The SPI personality and SSI host path now
    exist on all FLEXCOM instances.  Finish its client, CRC and two-pin modes;
    finish synchronous and protocol-specific USART behavior; complete TWI
-   client/SMBus/PEC/FIFO behavior; and wire every remaining documented XDMAC
-   request.  Complete SSC, TC1, external timer pins, PWM and ADC so expansion-
-   board drivers can use normal QEMU chardev, SSI, I2C and analog/digital
-   endpoint abstractions.
+   client/SMBus/PEC and high-speed/arbitration behavior; and wire every
+   remaining documented XDMAC request.  Complete SSC, TC1, external timer
+   pins, PWM and ADC so expansion-board drivers can use normal QEMU chardev,
+   SSI, I2C and analog/digital endpoint abstractions.
 #. **Close storage and memory-controller fidelity.**  Complete SDHCI command,
    error, media-change and migration behavior; implement NAND OOB, bad-block,
    PMECC generation/correction and DMA; finish SMC, matrix and MPDDRC-visible
@@ -378,11 +382,23 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The 75-test board qtest baseline and this boot are clean of SAM9X75 model
+The 78-test board qtest baseline and this boot are clean of SAM9X75 model
 warnings with ``-d unimp,guest_errors``.  Generic SD diagnostics still report
 the expected failed MMC/SDIO probes against a memory-only SD card.  RomBOOT
 itself is still missing; ``-kernel`` is a development entry path and not a
 substitute for ROM media selection.
+
+The pinned Linux ``i2c-at91`` driver probes the FLEXCOM6 FIFO and obtains its
+XDMAC channels.  Byte-width DMA, including an unaligned 13-byte transfer,
+works.  Word-aligned receive DMA currently exposes a guest-driver ordering
+bug: ``at91_twi_configure_dma()`` runs before the driver reads
+``atmel,fifo-size``, so XDMAC remains byte-wide while the TWI is later set to
+``RXRDYM=FOUR_DATA``.  A 12-byte read therefore correctly stops with three
+bytes remaining below the four-byte request threshold.  Reading the FIFO
+size before configuring DMA makes the channel word-wide as required by the
+data sheet.  Qtests cover the working 32-bit linked-descriptor path and the
+mismatched mode's three-byte stall; the Linux ordering fix remains a separate
+guest change to validate on the physical board.
 
 By default a valid SHDWC shutdown command requests a normal QEMU guest
 shutdown.  Backup-domain wake-up experiments can leave the process running

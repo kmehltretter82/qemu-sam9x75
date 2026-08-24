@@ -2,8 +2,8 @@
  * Microchip AT91 two-wire interface controller
  *
  * This is the TWI implementation integrated in the SAM9X7 FLEXCOM block.
- * It models immediate I2C transfers, the PIO-facing holding registers,
- * alternative-command byte counts, FIFO-width accesses, interrupts, and
+ * It models clocked I2C host transfers, the holding registers and 16-byte
+ * FIFOs, alternative-command byte counts, interrupts, XDMAC requests, and
  * the three hardware write-protection domains.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -86,6 +86,8 @@
 #define TWI_SMR_MASK            0x007f7ffd
 #define TWI_IADR_MASK           0x00ffffff
 #define TWI_CWGR_MASK           0x7f17ffff
+#define TWI_CWGR_CKDIV_SHIFT    16
+#define TWI_CWGR_BRSRCCLK       BIT(20)
 
 #define TWI_SR_TXCOMP           BIT(0)
 #define TWI_SR_RXRDY            BIT(1)
@@ -131,6 +133,10 @@
 #define TWI_FILTR_MASK          0x00000703
 #define TWI_HSCWGR_MASK         0x0007ffff
 #define TWI_FMR_MASK            0x3f3f0033
+#define TWI_FMR_TXRDYM_MASK     0x3
+#define TWI_FMR_RXRDYM_SHIFT    4
+#define TWI_FMR_TXFTHRES_SHIFT  16
+#define TWI_FMR_RXFTHRES_SHIFT  24
 #define TWI_FIFO_INT_MASK       0x000000ff
 #define TWI_FSR_TXFEF           BIT(0)
 #define TWI_FSR_TXFFF           BIT(1)
@@ -151,17 +157,145 @@
 #define TWI_WPMR_KEY_MASK      0xffffff00
 #define TWI_WPMR_KEY           0x54574900
 
-static void at91_twi_update_irq(AT91TWIState *s)
-{
-    bool level = s->flexcom_enabled &&
-                 ((s->status & s->imr) ||
-                  (s->fifo_enabled && (s->fsr & s->fimr)));
+static void at91_twi_start_next(AT91TWIState *s);
+static void at91_twi_schedule_receive(AT91TWIState *s);
 
+static unsigned int at91_twi_ready_count(unsigned int mode)
+{
+    switch (mode & 3) {
+    case 1:
+        return 2;
+    case 2:
+        return 4;
+    default:
+        return 1;
+    }
+}
+
+static Clock *at91_twi_baud_clock(AT91TWIState *s)
+{
+    return s->cwgr & TWI_CWGR_BRSRCCLK ? s->gclk : s->pclk;
+}
+
+static bool at91_twi_clocked(AT91TWIState *s)
+{
+    return s->flexcom_enabled && clock_get_hz(s->pclk) &&
+           clock_get_hz(at91_twi_baud_clock(s));
+}
+
+static uint64_t at91_twi_byte_ns(AT91TWIState *s)
+{
+    uint64_t cldiv = extract32(s->cwgr, 0, 8);
+    uint64_t chdiv = extract32(s->cwgr, 8, 8);
+    unsigned int ckdiv = extract32(s->cwgr, TWI_CWGR_CKDIV_SHIFT, 3);
+    uint64_t bit_cycles;
+
+    if (s->cwgr & TWI_CWGR_BRSRCCLK) {
+        bit_cycles = (cldiv + chdiv) << ckdiv;
+    } else {
+        bit_cycles = ((cldiv + chdiv) << ckdiv) + 6;
+    }
+
+    /* Eight data bits and the ACK/NACK clock. */
+    return MAX(clock_ticks_to_ns(at91_twi_baud_clock(s),
+                                 9 * MAX(bit_cycles, 1)), 1);
+}
+
+static void at91_twi_set_request(qemu_irq irq, bool *old_level,
+                                 bool new_level)
+{
+    if (*old_level != new_level) {
+        *old_level = new_level;
+        qemu_set_irq(irq, new_level);
+    }
+}
+
+static void at91_twi_refresh_status(AT91TWIState *s)
+{
+    unsigned int tx_ready = s->fifo_enabled ?
+        at91_twi_ready_count(s->fmr & TWI_FMR_TXRDYM_MASK) : 1;
+    unsigned int rx_ready = s->fifo_enabled ?
+        at91_twi_ready_count(s->fmr >> TWI_FMR_RXRDYM_SHIFT) : 1;
+    bool enabled = s->master_enabled || s->slave_enabled;
+
+    s->status &= ~(TWI_SR_TXRDY | TWI_SR_RXRDY);
+    if (enabled && !(s->status & TWI_SR_LOCK)) {
+        if (s->fifo_enabled) {
+            if (AT91_TWI_FIFO_SIZE - s->tx_count >= tx_ready) {
+                s->status |= TWI_SR_TXRDY;
+            }
+        } else if (!s->tx_count && !s->tx_shift_valid) {
+            s->status |= TWI_SR_TXRDY;
+        }
+    }
+    if (enabled && s->rx_count >= rx_ready) {
+        s->status |= TWI_SR_RXRDY;
+    }
+}
+
+static void at91_twi_update(AT91TWIState *s)
+{
+    bool active;
+    bool level;
+
+    at91_twi_refresh_status(s);
+    active = at91_twi_clocked(s) &&
+             (s->master_enabled || s->slave_enabled);
+    at91_twi_set_request(s->tx_request, &s->tx_request_level,
+                         active && (s->status & TWI_SR_TXRDY));
+    at91_twi_set_request(s->rx_request, &s->rx_request_level,
+                         active && (s->status & TWI_SR_RXRDY));
+    level = s->flexcom_enabled &&
+            ((s->status & s->imr) ||
+             (s->fifo_enabled && (s->fsr & s->fimr)));
     qemu_set_irq(s->irq, level);
+}
+
+static void at91_twi_update_tx_events(AT91TWIState *s,
+                                      unsigned int old_count)
+{
+    unsigned int threshold = extract32(s->fmr,
+                                       TWI_FMR_TXFTHRES_SHIFT, 6);
+
+    if (!s->fifo_enabled) {
+        return;
+    }
+    if (s->tx_count == AT91_TWI_FIFO_SIZE &&
+        old_count != AT91_TWI_FIFO_SIZE) {
+        s->fsr |= TWI_FSR_TXFFF;
+    }
+    if (!s->tx_count && old_count) {
+        s->fsr |= TWI_FSR_TXFEF;
+    }
+    if (old_count > threshold && s->tx_count <= threshold) {
+        s->fsr |= TWI_FSR_TXFTHF;
+    }
+}
+
+static void at91_twi_update_rx_events(AT91TWIState *s,
+                                      unsigned int old_count)
+{
+    unsigned int threshold = extract32(s->fmr,
+                                       TWI_FMR_RXFTHRES_SHIFT, 6);
+
+    if (!s->fifo_enabled) {
+        return;
+    }
+    if (s->rx_count == AT91_TWI_FIFO_SIZE &&
+        old_count != AT91_TWI_FIFO_SIZE) {
+        s->fsr |= TWI_FSR_RXFFF;
+    }
+    if (!s->rx_count && old_count) {
+        s->fsr |= TWI_FSR_RXFEF;
+    }
+    if (old_count < threshold && s->rx_count >= threshold) {
+        s->fsr |= TWI_FSR_RXFTHF;
+    }
 }
 
 static void at91_twi_end_bus(AT91TWIState *s, bool nack)
 {
+    timer_del(s->transfer_timer);
     if (s->bus_active && i2c_bus_busy(s->bus)) {
         if (nack && s->read_transfer) {
             i2c_nack(s->bus);
@@ -173,8 +307,9 @@ static void at91_twi_end_bus(AT91TWIState *s, bool nack)
     s->read_transfer = false;
     s->stop_pending = false;
     s->remaining = 0;
-    s->status &= ~TWI_SR_RXRDY;
-    s->status |= TWI_SR_TXCOMP | TWI_SR_TXRDY;
+    s->tx_shift_valid = false;
+    s->rx_shift_pending = false;
+    s->status |= TWI_SR_TXCOMP;
 }
 
 static void at91_twi_nack(AT91TWIState *s)
@@ -188,7 +323,7 @@ static void at91_twi_nack(AT91TWIState *s)
     if (s->alt_enabled || s->fifo_enabled) {
         s->status |= TWI_SR_LOCK;
     }
-    at91_twi_update_irq(s);
+    at91_twi_update(s);
 }
 
 static uint8_t at91_twi_address(AT91TWIState *s)
@@ -230,16 +365,17 @@ static bool at91_twi_send_internal_address(AT91TWIState *s)
     return true;
 }
 
-static void at91_twi_preload_receive(AT91TWIState *s)
+static void at91_twi_schedule_transfer(AT91TWIState *s)
 {
-    if (!s->bus_active || !s->read_transfer) {
+    timer_del(s->transfer_timer);
+    if (!at91_twi_clocked(s) ||
+        (!s->tx_shift_valid && !s->rx_shift_pending)) {
         return;
     }
 
-    s->rhr = i2c_recv(s->bus);
-    s->status |= TWI_SR_RXRDY;
-    trace_at91_twi_byte(DEVICE(s)->canonical_path, "receive", s->rhr);
-    at91_twi_update_irq(s);
+    timer_mod_ns(s->transfer_timer,
+                 qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                 at91_twi_byte_ns(s));
 }
 
 static void at91_twi_start_read(AT91TWIState *s, bool stop)
@@ -279,11 +415,11 @@ static void at91_twi_start_read(AT91TWIState *s, bool stop)
 
     if (s->alt_enabled && !s->remaining) {
         at91_twi_end_bus(s, true);
-        at91_twi_update_irq(s);
+        at91_twi_update(s);
         return;
     }
 
-    at91_twi_preload_receive(s);
+    at91_twi_schedule_receive(s);
 }
 
 static void at91_twi_start_write(AT91TWIState *s)
@@ -295,7 +431,6 @@ static void at91_twi_start_write(AT91TWIState *s)
     }
 
     s->status &= ~(TWI_SR_TXCOMP | TWI_SR_NACK | TWI_SR_LOCK);
-    s->status |= TWI_SR_TXRDY;
     s->read_transfer = false;
     s->stop_pending = false;
     s->remaining = s->alt_enabled ? s->acr & TWI_ACR_DATAL_MASK : 0;
@@ -335,43 +470,82 @@ static void at91_twi_quick(AT91TWIState *s)
     s->bus_active = true;
     s->read_transfer = read;
     at91_twi_end_bus(s, false);
-    at91_twi_update_irq(s);
+    at91_twi_update(s);
+}
+
+static void at91_twi_push_receive(AT91TWIState *s, uint8_t value)
+{
+    unsigned int limit = s->fifo_enabled ? AT91_TWI_FIFO_SIZE : 1;
+    unsigned int old_count = s->rx_count;
+    unsigned int index;
+
+    s->rhr = value;
+    if (s->rx_count == limit) {
+        if (s->fifo_enabled) {
+            s->fsr |= TWI_FSR_RXFPTEF;
+        } else {
+            s->status |= TWI_SR_OVRE;
+            s->rx_fifo[s->rx_head] = value;
+        }
+    } else {
+        index = (s->rx_head + s->rx_count) % AT91_TWI_FIFO_SIZE;
+        s->rx_fifo[index] = value;
+        s->rx_count++;
+        at91_twi_update_rx_events(s, old_count);
+    }
+    trace_at91_twi_byte(DEVICE(s)->canonical_path, "receive", value);
+}
+
+static void at91_twi_schedule_receive(AT91TWIState *s)
+{
+    unsigned int limit = s->fifo_enabled ? AT91_TWI_FIFO_SIZE : 1;
+
+    if (s->rx_shift_pending || !s->bus_active || !s->read_transfer ||
+        s->rx_count == limit || !at91_twi_clocked(s)) {
+        at91_twi_update(s);
+        return;
+    }
+
+    s->rx_shift_pending = true;
+    at91_twi_schedule_transfer(s);
+    at91_twi_update(s);
 }
 
 static uint8_t at91_twi_read_byte(AT91TWIState *s)
 {
+    unsigned int old_count = s->rx_count;
     uint8_t value = s->rhr;
 
-    if (!(s->status & TWI_SR_RXRDY)) {
+    if (!s->rx_count) {
         if (s->fifo_enabled) {
             s->fsr |= TWI_FSR_RXFPTEF;
         }
-        at91_twi_update_irq(s);
+        at91_twi_update(s);
         return value;
     }
 
-    s->status &= ~TWI_SR_RXRDY;
-
-    if (s->bus_active && s->read_transfer) {
-        if (s->alt_enabled && s->remaining) {
-            s->remaining--;
-        }
-
-        if (s->stop_pending || (s->alt_enabled && !s->remaining)) {
-            at91_twi_end_bus(s, true);
-        } else {
-            at91_twi_preload_receive(s);
-        }
-    }
-
-    at91_twi_update_irq(s);
+    value = s->rx_fifo[s->rx_head];
+    s->rhr = value;
+    s->rx_head = (s->rx_head + 1) % AT91_TWI_FIFO_SIZE;
+    s->rx_count--;
+    at91_twi_update_rx_events(s, old_count);
+    at91_twi_schedule_receive(s);
+    at91_twi_update(s);
     return value;
 }
 
-static void at91_twi_write_byte(AT91TWIState *s, uint8_t value)
+static void at91_twi_start_next(AT91TWIState *s)
 {
+    unsigned int old_count;
+
+    if (s->tx_shift_valid || !s->tx_count || !at91_twi_clocked(s) ||
+        (s->status & TWI_SR_LOCK)) {
+        at91_twi_update(s);
+        return;
+    }
     if (!s->master_enabled ||
         (s->alt_enabled && (s->acr & TWI_ACR_DIR))) {
+        at91_twi_update(s);
         return;
     }
 
@@ -382,26 +556,112 @@ static void at91_twi_write_byte(AT91TWIState *s, uint8_t value)
         }
     }
 
-    s->status &= ~(TWI_SR_TXCOMP | TWI_SR_TXRDY);
-    trace_at91_twi_byte(DEVICE(s)->canonical_path, "transmit", value);
+    old_count = s->tx_count;
+    s->tx_shift = s->tx_fifo[s->tx_head];
+    s->tx_head = (s->tx_head + 1) % AT91_TWI_FIFO_SIZE;
+    s->tx_count--;
+    s->tx_shift_valid = true;
+    s->status &= ~TWI_SR_TXCOMP;
+    at91_twi_update_tx_events(s, old_count);
+    at91_twi_schedule_transfer(s);
+    at91_twi_update(s);
+}
 
-    if (i2c_send(s->bus, value)) {
+static void at91_twi_write_thr(AT91TWIState *s, uint64_t value,
+                               unsigned int size)
+{
+    unsigned int count = s->fifo_enabled ? size : 1;
+    unsigned int limit = s->fifo_enabled ? AT91_TWI_FIFO_SIZE : 1;
+    unsigned int occupied = s->tx_count +
+                            (!s->fifo_enabled && s->tx_shift_valid);
+    unsigned int free = limit - occupied;
+    unsigned int old_count = s->tx_count;
+    unsigned int index;
+    unsigned int i;
+
+    if (!s->master_enabled ||
+        (s->alt_enabled && (s->acr & TWI_ACR_DIR)) ||
+        (s->status & TWI_SR_LOCK)) {
+        return;
+    }
+
+    if (count > free) {
+        if (s->fifo_enabled) {
+            s->fsr |= TWI_FSR_TXFPTEF;
+        }
+        at91_twi_update(s);
+        return;
+    }
+
+    for (i = 0; i < count; i++) {
+        index = (s->tx_head + s->tx_count) % AT91_TWI_FIFO_SIZE;
+        s->tx_fifo[index] = value >> (i * 8);
+        s->tx_count++;
+    }
+    s->status &= ~TWI_SR_TXCOMP;
+    at91_twi_update_tx_events(s, old_count);
+    at91_twi_start_next(s);
+}
+
+static void at91_twi_transfer_complete(AT91TWIState *s)
+{
+    if (s->read_transfer) {
+        uint8_t value;
+
+        s->rx_shift_pending = false;
+        value = i2c_recv(s->bus);
+        at91_twi_push_receive(s, value);
+
+        if (s->alt_enabled && s->remaining) {
+            s->remaining--;
+        }
+        if (s->stop_pending || (s->alt_enabled && !s->remaining)) {
+            at91_twi_end_bus(s, true);
+        } else {
+            at91_twi_schedule_receive(s);
+        }
+        at91_twi_update(s);
+        return;
+    }
+
+    trace_at91_twi_byte(DEVICE(s)->canonical_path, "transmit", s->tx_shift);
+
+    if (i2c_send(s->bus, s->tx_shift)) {
+        s->tx_shift_valid = false;
         at91_twi_nack(s);
         return;
     }
 
-    s->status |= TWI_SR_TXRDY;
+    s->tx_shift_valid = false;
     if (s->alt_enabled && s->remaining) {
         s->remaining--;
         if (!s->remaining) {
             at91_twi_end_bus(s, false);
+            at91_twi_update(s);
+            return;
         }
+    } else if (s->stop_pending && !s->tx_count) {
+        at91_twi_end_bus(s, false);
     }
-    at91_twi_update_irq(s);
+    at91_twi_start_next(s);
+    at91_twi_update(s);
+}
+
+static void at91_twi_timer(void *opaque)
+{
+    AT91TWIState *s = opaque;
+
+    if ((!s->tx_shift_valid && !s->rx_shift_pending) ||
+        !at91_twi_clocked(s)) {
+        at91_twi_update(s);
+        return;
+    }
+    at91_twi_transfer_complete(s);
 }
 
 static void at91_twi_reset_registers(AT91TWIState *s)
 {
+    timer_del(s->transfer_timer);
     if (s->bus && i2c_bus_busy(s->bus)) {
         i2c_end_transfer(s->bus);
     }
@@ -423,6 +683,13 @@ static void at91_twi_reset_registers(AT91TWIState *s)
     s->fimr = 0;
     s->wpmr = 0;
     s->wpsr = 0;
+    memset(s->rx_fifo, 0, sizeof(s->rx_fifo));
+    memset(s->tx_fifo, 0, sizeof(s->tx_fifo));
+    s->tx_shift = 0;
+    s->rx_head = 0;
+    s->rx_count = 0;
+    s->tx_head = 0;
+    s->tx_count = 0;
     s->remaining = 0;
     s->master_enabled = false;
     s->slave_enabled = false;
@@ -434,7 +701,13 @@ static void at91_twi_reset_registers(AT91TWIState *s)
     s->bus_active = false;
     s->read_transfer = false;
     s->stop_pending = false;
-    at91_twi_update_irq(s);
+    s->tx_shift_valid = false;
+    s->rx_shift_pending = false;
+    s->tx_request_level = false;
+    s->rx_request_level = false;
+    qemu_set_irq(s->tx_request, 0);
+    qemu_set_irq(s->rx_request, 0);
+    at91_twi_update(s);
 }
 
 static void at91_twi_protection_violation(AT91TWIState *s, hwaddr reg)
@@ -502,9 +775,10 @@ static uint32_t at91_twi_raw_read(AT91TWIState *s, hwaddr reg)
     case TWI_CWGR:
         return s->cwgr;
     case TWI_SR:
+        at91_twi_refresh_status(s);
         value = s->status;
         s->status &= ~TWI_SR_CLEAR_ON_READ;
-        at91_twi_update_irq(s);
+        at91_twi_update(s);
         return value;
     case TWI_IMR:
         return s->imr;
@@ -521,14 +795,14 @@ static uint32_t at91_twi_raw_read(AT91TWIState *s, hwaddr reg)
     case TWI_FMR:
         return s->fifo_enabled ? s->fmr : 0;
     case TWI_FLR:
-        return s->fifo_enabled && (s->status & TWI_SR_RXRDY) ? BIT(16) : 0;
+        return s->fifo_enabled ? s->tx_count | (s->rx_count << 16) : 0;
     case TWI_FSR:
         if (!s->fifo_enabled) {
             return 0;
         }
         value = s->fsr;
         s->fsr &= ~TWI_FSR_CLEAR_ON_READ;
-        at91_twi_update_irq(s);
+        at91_twi_update(s);
         return value;
     case TWI_FIMR:
         return s->fifo_enabled ? s->fimr : 0;
@@ -577,6 +851,24 @@ static uint64_t at91_twi_read(void *opaque, hwaddr offset,
     return value >> ((offset & 3) * 8);
 }
 
+static void at91_twi_clear_tx_fifo(AT91TWIState *s)
+{
+    unsigned int old_count = s->tx_count;
+
+    s->tx_head = 0;
+    s->tx_count = 0;
+    at91_twi_update_tx_events(s, old_count);
+}
+
+static void at91_twi_clear_rx_fifo(AT91TWIState *s)
+{
+    unsigned int old_count = s->rx_count;
+
+    s->rx_head = 0;
+    s->rx_count = 0;
+    at91_twi_update_rx_events(s, old_count);
+}
+
 static void at91_twi_write_control(AT91TWIState *s, uint32_t value)
 {
     if (value & TWI_CR_SWRST) {
@@ -584,11 +876,17 @@ static void at91_twi_write_control(AT91TWIState *s, uint32_t value)
         return;
     }
 
-    if (value & TWI_CR_FIFOEN) {
+    if (!s->master_enabled && !s->slave_enabled &&
+        (value & TWI_CR_FIFOEN)) {
         s->fifo_enabled = true;
+        at91_twi_clear_tx_fifo(s);
+        at91_twi_clear_rx_fifo(s);
     }
-    if (value & TWI_CR_FIFODIS) {
+    if (!s->master_enabled && !s->slave_enabled &&
+        (value & TWI_CR_FIFODIS)) {
         s->fifo_enabled = false;
+        at91_twi_clear_tx_fifo(s);
+        at91_twi_clear_rx_fifo(s);
         s->fsr = 0;
         s->fimr = 0;
     }
@@ -618,7 +916,6 @@ static void at91_twi_write_control(AT91TWIState *s, uint32_t value)
     }
     if (value & TWI_CR_MSEN) {
         s->master_enabled = true;
-        s->status |= TWI_SR_TXRDY;
     }
     if (value & TWI_CR_MSDIS) {
         at91_twi_end_bus(s, false);
@@ -635,10 +932,13 @@ static void at91_twi_write_control(AT91TWIState *s, uint32_t value)
         s->status &= ~TWI_SR_LOCK;
     }
     if (value & TWI_CR_THRCLR) {
-        s->status |= TWI_SR_TXRDY | TWI_SR_TXCOMP;
+        at91_twi_clear_tx_fifo(s);
+        if (!s->tx_shift_valid) {
+            s->status |= TWI_SR_TXCOMP;
+        }
     }
     if (value & TWI_CR_RXFCLR) {
-        s->status &= ~TWI_SR_RXRDY;
+        at91_twi_clear_rx_fifo(s);
     }
     if (value & TWI_CR_CLEAR) {
         at91_twi_end_bus(s, false);
@@ -656,6 +956,14 @@ static void at91_twi_write_control(AT91TWIState *s, uint32_t value)
     } else if (value & TWI_CR_STOP) {
         if (s->bus_active && s->read_transfer) {
             s->stop_pending = true;
+            if (!s->rx_shift_pending) {
+                at91_twi_end_bus(s, true);
+            }
+        } else if (s->bus_active) {
+            s->stop_pending = true;
+            if (!s->tx_shift_valid && !s->tx_count) {
+                at91_twi_end_bus(s, false);
+            }
         } else {
             at91_twi_end_bus(s, false);
         }
@@ -667,7 +975,9 @@ static void at91_twi_write_control(AT91TWIState *s, uint32_t value)
     if (value & (TWI_CR_SCLRBE | TWI_CR_SCLRBD)) {
         /* Pad rise-boost timing has no externally observable QEMU state. */
     }
-    at91_twi_update_irq(s);
+    at91_twi_start_next(s);
+    at91_twi_schedule_receive(s);
+    at91_twi_update(s);
 }
 
 static void at91_twi_write(void *opaque, hwaddr offset, uint64_t value,
@@ -677,7 +987,6 @@ static void at91_twi_write(void *opaque, hwaddr offset, uint64_t value,
     hwaddr reg = offset & ~3;
     uint32_t bits = at91_twi_expand_write(offset, value, size);
     uint32_t merged;
-    unsigned int i;
 
     if (!s->flexcom_enabled) {
         return;
@@ -707,23 +1016,21 @@ static void at91_twi_write(void *opaque, hwaddr offset, uint64_t value,
     case TWI_CWGR:
         merged = at91_twi_merge_write(s->cwgr, offset, value, size);
         s->cwgr = merged & TWI_CWGR_MASK;
+        if (s->tx_shift_valid || s->rx_shift_pending) {
+            at91_twi_schedule_transfer(s);
+        }
+        at91_twi_update(s);
         break;
     case TWI_IER:
         s->imr |= bits & TWI_INT_MASK;
-        at91_twi_update_irq(s);
+        at91_twi_update(s);
         break;
     case TWI_IDR:
         s->imr &= ~(bits & TWI_INT_MASK);
-        at91_twi_update_irq(s);
+        at91_twi_update(s);
         break;
     case TWI_THR:
-        if (!s->fifo_enabled) {
-            at91_twi_write_byte(s, value);
-            break;
-        }
-        for (i = 0; i < size; i++) {
-            at91_twi_write_byte(s, value >> (i * 8));
-        }
+        at91_twi_write_thr(s, value, size);
         break;
     case TWI_SMBTR:
         merged = at91_twi_merge_write(s->smbtr, offset, value, size);
@@ -748,14 +1055,15 @@ static void at91_twi_write(void *opaque, hwaddr offset, uint64_t value,
     case TWI_FMR:
         merged = at91_twi_merge_write(s->fmr, offset, value, size);
         s->fmr = merged & TWI_FMR_MASK;
+        at91_twi_update(s);
         break;
     case TWI_FIER:
         s->fimr |= bits & TWI_FIFO_INT_MASK;
-        at91_twi_update_irq(s);
+        at91_twi_update(s);
         break;
     case TWI_FIDR:
         s->fimr &= ~(bits & TWI_FIFO_INT_MASK);
-        at91_twi_update_irq(s);
+        at91_twi_update(s);
         break;
     case TWI_WPMR:
         merged = at91_twi_merge_write(s->wpmr, offset, value, size);
@@ -806,7 +1114,26 @@ static void at91_twi_set_flexcom_enabled(void *opaque, int n, int level)
         at91_twi_end_bus(s, false);
     }
     s->flexcom_enabled = level;
-    at91_twi_update_irq(s);
+    if (level) {
+        at91_twi_start_next(s);
+        at91_twi_schedule_receive(s);
+    }
+    at91_twi_update(s);
+}
+
+static void at91_twi_clock_changed(void *opaque, ClockEvent event)
+{
+    AT91TWIState *s = opaque;
+
+    if (!at91_twi_clocked(s)) {
+        timer_del(s->transfer_timer);
+    } else if (s->tx_shift_valid || s->rx_shift_pending) {
+        at91_twi_schedule_transfer(s);
+    } else {
+        at91_twi_start_next(s);
+        at91_twi_schedule_receive(s);
+    }
+    at91_twi_update(s);
 }
 
 static void at91_twi_reset(DeviceState *dev)
@@ -816,13 +1143,69 @@ static void at91_twi_reset(DeviceState *dev)
 
 static int at91_twi_post_load(void *opaque, int version_id)
 {
-    at91_twi_update_irq(AT91_TWI(opaque));
+    AT91TWIState *s = opaque;
+
+    s->mmr &= TWI_MMR_MASK;
+    s->smr &= TWI_SMR_MASK;
+    s->iadr &= TWI_IADR_MASK;
+    s->cwgr &= TWI_CWGR_MASK;
+    s->imr &= TWI_INT_MASK;
+    s->smbtr &= TWI_SMBTR_MASK;
+    s->hsr &= TWI_HSR_MASK;
+    s->acr &= TWI_ACR_MASK;
+    s->filtr &= TWI_FILTR_MASK;
+    s->hscwgr &= TWI_HSCWGR_MASK;
+    s->fmr &= TWI_FMR_MASK;
+    s->fsr &= TWI_FIFO_INT_MASK;
+    s->fimr &= TWI_FIFO_INT_MASK;
+    s->wpmr &= TWI_WPMR_MASK;
+
+    if (version_id < 2) {
+        memset(s->rx_fifo, 0, sizeof(s->rx_fifo));
+        memset(s->tx_fifo, 0, sizeof(s->tx_fifo));
+        s->rx_head = 0;
+        s->rx_count = 0;
+        s->tx_head = 0;
+        s->tx_count = 0;
+        s->tx_shift = 0;
+        s->tx_shift_valid = false;
+        s->rx_shift_pending = false;
+        timer_del(s->transfer_timer);
+        if (s->status & TWI_SR_RXRDY) {
+            s->rx_fifo[0] = s->rhr;
+            s->rx_count = 1;
+        }
+    } else {
+        s->rx_head %= AT91_TWI_FIFO_SIZE;
+        s->tx_head %= AT91_TWI_FIFO_SIZE;
+        s->rx_count = MIN(s->rx_count, AT91_TWI_FIFO_SIZE);
+        s->tx_count = MIN(s->tx_count, AT91_TWI_FIFO_SIZE);
+        if (!s->fifo_enabled) {
+            s->rx_count = MIN(s->rx_count, 1);
+            s->tx_count = MIN(s->tx_count, 1);
+        }
+        if ((s->rx_shift_pending && !s->read_transfer) ||
+            (s->tx_shift_valid && s->read_transfer)) {
+            return -EINVAL;
+        }
+    }
+
+    s->tx_request_level = false;
+    s->rx_request_level = false;
+    at91_twi_update(s);
+    if ((s->tx_shift_valid || s->rx_shift_pending) &&
+        !timer_pending(s->transfer_timer) && at91_twi_clocked(s)) {
+        at91_twi_schedule_transfer(s);
+    } else if (!s->tx_shift_valid && !s->rx_shift_pending) {
+        at91_twi_start_next(s);
+        at91_twi_schedule_receive(s);
+    }
     return 0;
 }
 
 static const VMStateDescription at91_twi_vmstate = {
     .name = TYPE_AT91_TWI,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = at91_twi_post_load,
     .fields = (const VMStateField[]) {
@@ -855,6 +1238,18 @@ static const VMStateDescription at91_twi_vmstate = {
         VMSTATE_BOOL(bus_active, AT91TWIState),
         VMSTATE_BOOL(read_transfer, AT91TWIState),
         VMSTATE_BOOL(stop_pending, AT91TWIState),
+        VMSTATE_UINT8_ARRAY_V(rx_fifo, AT91TWIState, AT91_TWI_FIFO_SIZE, 2),
+        VMSTATE_UINT8_ARRAY_V(tx_fifo, AT91TWIState, AT91_TWI_FIFO_SIZE, 2),
+        VMSTATE_UINT8_V(tx_shift, AT91TWIState, 2),
+        VMSTATE_UINT8_V(rx_head, AT91TWIState, 2),
+        VMSTATE_UINT8_V(rx_count, AT91TWIState, 2),
+        VMSTATE_UINT8_V(tx_head, AT91TWIState, 2),
+        VMSTATE_UINT8_V(tx_count, AT91TWIState, 2),
+        VMSTATE_BOOL_V(tx_shift_valid, AT91TWIState, 2),
+        VMSTATE_BOOL_V(rx_shift_pending, AT91TWIState, 2),
+        VMSTATE_CLOCK_V(pclk, AT91TWIState, 2),
+        VMSTATE_CLOCK_V(gclk, AT91TWIState, 2),
+        VMSTATE_TIMER_PTR_V(transfer_timer, AT91TWIState, 2),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -863,8 +1258,8 @@ static void at91_twi_realize(DeviceState *dev, Error **errp)
 {
     AT91TWIState *s = AT91_TWI(dev);
 
-    if (!clock_has_source(s->pclk)) {
-        error_setg(errp, TYPE_AT91_TWI ": pclk must be connected");
+    if (!clock_has_source(s->pclk) || !clock_has_source(s->gclk)) {
+        error_setg(errp, TYPE_AT91_TWI ": pclk and gclk must be connected");
         return;
     }
 
@@ -885,9 +1280,22 @@ static void at91_twi_init(Object *obj)
                           TYPE_AT91_TWI, TWI_MMIO_SIZE);
     sysbus_init_mmio(sbd, &s->mmio);
     sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_out_named(dev, &s->tx_request, "tx-request", 1);
+    qdev_init_gpio_out_named(dev, &s->rx_request, "rx-request", 1);
     qdev_init_gpio_in_named(dev, at91_twi_set_flexcom_enabled,
                             "flexcom-enabled", 1);
-    s->pclk = qdev_init_clock_in(dev, "pclk", NULL, NULL, 0);
+    s->pclk = qdev_init_clock_in(dev, "pclk", at91_twi_clock_changed,
+                                 s, ClockUpdate);
+    s->gclk = qdev_init_clock_in(dev, "gclk", at91_twi_clock_changed,
+                                 s, ClockUpdate);
+    s->transfer_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, at91_twi_timer, s);
+}
+
+static void at91_twi_finalize(Object *obj)
+{
+    AT91TWIState *s = AT91_TWI(obj);
+
+    timer_free(s->transfer_timer);
 }
 
 I2CBus *at91_twi_get_bus(AT91TWIState *s)
@@ -911,6 +1319,7 @@ static const TypeInfo at91_twi_info = {
     .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(AT91TWIState),
     .instance_init = at91_twi_init,
+    .instance_finalize = at91_twi_finalize,
     .class_init = at91_twi_class_init,
 };
 

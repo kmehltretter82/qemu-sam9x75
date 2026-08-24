@@ -33,6 +33,7 @@
 #define SAM9X7_FLEXCOM0_BASE    0xf801c000
 #define SAM9X7_USART0_BASE      (SAM9X7_FLEXCOM0_BASE + 0x200)
 #define SAM9X7_SPI0_BASE        (SAM9X7_FLEXCOM0_BASE + 0x400)
+#define SAM9X7_TWI0_BASE        (SAM9X7_FLEXCOM0_BASE + 0x600)
 #define SAM9X7_FLEXCOM6_BASE    0xf8010000
 #define SAM9X7_USART6_BASE      (SAM9X7_FLEXCOM6_BASE + 0x200)
 #define SAM9X7_SPI6_BASE        (SAM9X7_FLEXCOM6_BASE + 0x400)
@@ -334,23 +335,34 @@
 #define TWI_FILTR               0x44
 #define TWI_HSCWGR              0x48
 #define TWI_FMR                 0x50
+#define TWI_FLR                 0x54
+#define TWI_FSR                 0x60
 #define TWI_FIER                0x64
 #define TWI_FIDR                0x68
 #define TWI_FIMR                0x6c
 #define TWI_WPMR                0xe4
 #define TWI_WPSR                0xe8
 
+#define TWI_TEST_LATENCY_NS     10000
+
 #define TWI_CR_START            BIT(0)
 #define TWI_CR_STOP             BIT(1)
 #define TWI_CR_MSEN             BIT(2)
+#define TWI_CR_MSDIS            BIT(3)
 #define TWI_CR_SVDIS            BIT(5)
 #define TWI_CR_SWRST            BIT(7)
 #define TWI_CR_ACMEN            BIT(16)
+#define TWI_CR_THRCLR           BIT(24)
+#define TWI_CR_RXFCLR           BIT(25)
+#define TWI_CR_LOCKCLR          BIT(26)
 #define TWI_CR_FIFOEN           BIT(28)
+#define TWI_CR_FIFODIS          BIT(29)
 
 #define TWI_MMR_IADRSZ_1        BIT(8)
 #define TWI_MMR_MREAD           BIT(12)
 #define TWI_MMR_DADR(addr)      ((addr) << 16)
+
+#define TWI_CWGR_BRSRCCLK       BIT(20)
 
 #define TWI_SR_TXCOMP           BIT(0)
 #define TWI_SR_RXRDY            BIT(1)
@@ -362,6 +374,22 @@
 
 #define TWI_ACR_DATAL(len)      (len)
 #define TWI_ACR_DIR             BIT(8)
+
+#define TWI_FMR_TXRDYM_TWO      1
+#define TWI_FMR_TXRDYM_FOUR     2
+#define TWI_FMR_RXRDYM_TWO      (1U << 4)
+#define TWI_FMR_RXRDYM_FOUR     (2U << 4)
+#define TWI_FMR_TXFTHRES(n)     ((n) << 16)
+#define TWI_FMR_RXFTHRES(n)     ((n) << 24)
+
+#define TWI_FSR_TXFEF           BIT(0)
+#define TWI_FSR_TXFFF           BIT(1)
+#define TWI_FSR_TXFTHF          BIT(2)
+#define TWI_FSR_RXFEF           BIT(3)
+#define TWI_FSR_RXFFF           BIT(4)
+#define TWI_FSR_RXFTHF          BIT(5)
+#define TWI_FSR_TXFPTEF         BIT(6)
+#define TWI_FSR_RXFPTEF         BIT(7)
 
 #define TWI_WPMR_WPEN           BIT(0)
 #define TWI_WPMR_WPITEN         BIT(1)
@@ -1372,12 +1400,27 @@ static uint16_t gem_mdio_read(QTestState *qts, unsigned int phy,
 }
 
 static void twi_enable_master(QTestState *qts, uint64_t flexcom_base,
-                              uint64_t twi_base)
+                              uint64_t twi_base, unsigned int pid)
 {
+    pmc_write_pcr(qts, pid, PMC_PCR_EN);
     qtest_writeb(qts, flexcom_base + FLEX_MR, FLEX_MODE_TWI);
     qtest_writel(qts, twi_base + TWI_CR, TWI_CR_SWRST);
     qtest_writel(qts, twi_base + TWI_CR,
                  TWI_CR_MSEN | TWI_CR_SVDIS);
+}
+
+static void twi_wait_status(QTestState *qts, uint64_t twi_base,
+                            uint32_t mask)
+{
+    unsigned int i;
+
+    for (i = 0; i < 128; i++) {
+        if (qtest_readl(qts, twi_base + TWI_SR) & mask) {
+            return;
+        }
+        qtest_clock_step_next(qts);
+    }
+    g_assert_not_reached();
 }
 
 static void twi_read_regs(QTestState *qts, uint64_t twi_base,
@@ -1398,6 +1441,7 @@ static void twi_read_regs(QTestState *qts, uint64_t twi_base,
         if (i == length - 1 && length != 1) {
             qtest_writel(qts, twi_base + TWI_CR, TWI_CR_STOP);
         }
+        twi_wait_status(qts, twi_base, TWI_SR_RXRDY);
         data[i] = qtest_readb(qts, twi_base + TWI_RHR);
     }
 }
@@ -1411,6 +1455,35 @@ static uint8_t twi_read_reg(QTestState *qts, uint64_t twi_base,
     return value;
 }
 
+static uint8_t twi_read_reg_before_deadline(QTestState *qts,
+                                            uint64_t twi_base,
+                                            uint8_t address, uint8_t reg,
+                                            int64_t deadline)
+{
+    int64_t now = qtest_clock_step(qts, 1);
+    uint8_t value;
+
+    g_assert_cmpint(deadline - now, >, TWI_TEST_LATENCY_NS);
+    qtest_clock_step(qts, deadline - now - TWI_TEST_LATENCY_NS);
+    value = twi_read_reg(qts, twi_base, address, reg);
+    now = qtest_clock_step(qts, 1);
+    g_assert_cmpint(now, <, deadline);
+    if (deadline - now > 1) {
+        qtest_clock_step(qts, deadline - now - 1);
+    }
+    return value;
+}
+
+static void qtest_clock_step_to(QTestState *qts, int64_t deadline)
+{
+    int64_t now = qtest_clock_step(qts, 1);
+
+    g_assert_cmpint(now, <=, deadline);
+    if (now < deadline) {
+        qtest_clock_step(qts, deadline - now);
+    }
+}
+
 static void twi_write_reg(QTestState *qts, uint64_t twi_base,
                           uint8_t address, uint8_t reg, uint8_t value)
 {
@@ -1419,6 +1492,7 @@ static void twi_write_reg(QTestState *qts, uint64_t twi_base,
     qtest_writel(qts, twi_base + TWI_IADR, reg);
     qtest_writeb(qts, twi_base + TWI_THR, value);
     qtest_writel(qts, twi_base + TWI_CR, TWI_CR_STOP);
+    twi_wait_status(qts, twi_base, TWI_SR_TXCOMP);
 }
 
 static void twi_send_byte(QTestState *qts, uint64_t twi_base,
@@ -1427,16 +1501,25 @@ static void twi_send_byte(QTestState *qts, uint64_t twi_base,
     qtest_writel(qts, twi_base + TWI_MMR, TWI_MMR_DADR(address));
     qtest_writeb(qts, twi_base + TWI_THR, value);
     qtest_writel(qts, twi_base + TWI_CR, TWI_CR_STOP);
+    twi_wait_status(qts, twi_base, TWI_SR_TXCOMP);
 }
 
 static void twi6_enable_master(QTestState *qts)
 {
-    twi_enable_master(qts, SAM9X7_FLEXCOM6_BASE, SAM9X7_TWI6_BASE);
+    twi_enable_master(qts, SAM9X7_FLEXCOM6_BASE, SAM9X7_TWI6_BASE, 9);
 }
 
 static uint8_t twi6_read_reg(QTestState *qts, uint8_t address, uint8_t reg)
 {
     return twi_read_reg(qts, SAM9X7_TWI6_BASE, address, reg);
+}
+
+static uint8_t twi6_read_reg_before_deadline(QTestState *qts,
+                                             uint8_t address, uint8_t reg,
+                                             int64_t deadline)
+{
+    return twi_read_reg_before_deadline(qts, SAM9X7_TWI6_BASE, address,
+                                        reg, deadline);
 }
 
 static void twi6_write_reg(QTestState *qts, uint8_t address, uint8_t reg,
@@ -1759,6 +1842,7 @@ static void test_mcp16502_push_button_timeouts(void)
         SAM9X75_MACHINE
         " -global mcp16502-ab.request-system-shutdown=off");
     int64_t displaced_timeout;
+    int64_t deadline;
 
     qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PCR,
@@ -1772,8 +1856,9 @@ static void test_mcp16502_push_button_timeouts(void)
     /* PBTO=00 is 2 seconds; PBINTTO=00 is 100 milliseconds. */
     twi6_write_reg(qts, 0x5b, 0x02, 0x04);
     send_input_key(qts, "s", true);
-    qtest_clock_step(qts, short_push_timeout - 1);
-    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x04), ==, 0);
+    deadline = qtest_clock_step(qts, 1) - 1 + short_push_timeout;
+    g_assert_cmphex(twi6_read_reg_before_deadline(qts, 0x5b, 0x04,
+                                                  deadline), ==, 0);
     g_assert_true(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_PDSR) & BIT(12));
 
     qtest_clock_step(qts, 1);
@@ -1790,11 +1875,12 @@ static void test_mcp16502_push_button_timeouts(void)
 
     /* If PBINT is not serviced within t9, all rails enter OFF state. */
     send_input_key(qts, "s", true);
-    qtest_clock_step(qts, short_push_timeout);
+    deadline = qtest_clock_step(qts, short_push_timeout) +
+               short_interrupt_timeout;
     g_assert_false(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_PDSR) & BIT(12));
-    qtest_clock_step(qts, short_interrupt_timeout - 1);
+    g_assert_cmphex(twi6_read_reg_before_deadline(qts, 0x5b, 0x05,
+                                                  deadline), ==, 0x07);
     g_assert_false(qtest_get_irq(qts, 0));
-    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0x07);
     qtest_clock_step(qts, 1);
     g_assert_true(qtest_get_irq(qts, 0));
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
@@ -1804,8 +1890,9 @@ static void test_mcp16502_push_button_timeouts(void)
 
     /* A new START must survive t1; release before it leaves the PMIC off. */
     send_input_key(qts, "s", true);
-    qtest_clock_step(qts, 600000 - 1);
-    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
+    deadline = qtest_clock_step(qts, 1) - 1 + 600000;
+    g_assert_cmphex(twi6_read_reg_before_deadline(qts, 0x5b, 0x05,
+                                                  deadline), ==, 0);
     send_input_key(qts, "s", false);
     qtest_clock_step(qts, 31 * 1000000LL);
     g_assert_true(qtest_get_irq(qts, 0));
@@ -1872,6 +1959,8 @@ static void test_mcp16502_startup_sequence(void)
     const int64_t out2_slow_soft_start = 864000;
     const int64_t out34_soft_start = 368000;
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    int64_t sequence_start;
+    int64_t deadline;
     unsigned int reg;
 
     qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
@@ -1893,20 +1982,24 @@ static void test_mcp16502_startup_sequence(void)
     twi6_write_reg(qts, 0x5b, 0x64, 0x01);
 
     qtest_set_irq_in(qts, "/machine/mcp16502", "pwrhld", 0, 1);
-    qtest_clock_step(qts, wake_time - 1);
-    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
+    sequence_start = qtest_clock_step(qts, 1) - 1;
+    deadline = sequence_start + wake_time;
+    g_assert_cmphex(twi6_read_reg_before_deadline(qts, 0x5b, 0x05,
+                                                  deadline), ==, 0);
     qtest_clock_step(qts, 1);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 1);
-    qtest_clock_step(qts, out1_soft_start);
+    qtest_clock_step_to(qts, sequence_start + wake_time + out1_soft_start);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0x07);
 
-    qtest_clock_step(qts, one_ms - out1_soft_start - 1);
-    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x06), ==, 0);
+    deadline = sequence_start + wake_time + one_ms;
+    g_assert_cmphex(twi6_read_reg_before_deadline(qts, 0x5b, 0x06,
+                                                  deadline), ==, 0);
     qtest_clock_step(qts, 1);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x06), ==, 1);
-    qtest_clock_step(qts, out2_slow_soft_start);
+    qtest_clock_step_to(qts, deadline + out2_slow_soft_start);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x06), ==, 0x07);
-    qtest_clock_step(qts, one_ms - 1);
+    deadline += out2_slow_soft_start + one_ms;
+    qtest_clock_step_to(qts, deadline - 1);
     g_assert_true(qtest_get_irq(qts, 0));
     qtest_clock_step(qts, 1);
     g_assert_false(qtest_get_irq(qts, 0));
@@ -1928,26 +2021,30 @@ static void test_mcp16502_startup_sequence(void)
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x06), ==, 0x07);
 
-    qtest_set_irq_in(qts, "/machine/mcp16502", "pwrhld", 0, 1);
-    qtest_clock_step(qts, half_ms - 1);
-    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x06), ==, 0x07);
+    qtest_set_irq_in(qts, "/machine/mcp16502", "pwrhld", 0, 1);
+    sequence_start = qtest_clock_step(qts, 1) - 1;
+    deadline = sequence_start + half_ms;
+    g_assert_cmphex(twi6_read_reg_before_deadline(qts, 0x5b, 0x05,
+                                                  deadline), ==, 0);
     qtest_clock_step(qts, 1);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 1);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x09), ==, 1);
-    qtest_clock_step(qts, out1_soft_start);
+    qtest_clock_step_to(qts, deadline + out1_soft_start);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0x07);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x09), ==, 0x07);
 
-    qtest_clock_step(qts, 4 * one_ms - 1);
-    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x07), ==, 0);
+    deadline += out1_soft_start + 4 * one_ms;
+    g_assert_cmphex(twi6_read_reg_before_deadline(qts, 0x5b, 0x07,
+                                                  deadline), ==, 0);
     qtest_clock_step(qts, 1);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x07), ==, 1);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x08), ==, 1);
-    qtest_clock_step(qts, out34_soft_start);
+    qtest_clock_step_to(qts, deadline + out34_soft_start);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x07), ==, 0x07);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x08), ==, 0x07);
-    qtest_clock_step(qts, 16 * one_ms - 1);
+    deadline += out34_soft_start + 16 * one_ms;
+    qtest_clock_step_to(qts, deadline - 1);
     g_assert_true(qtest_get_irq(qts, 0));
     qtest_clock_step(qts, 1);
     g_assert_false(qtest_get_irq(qts, 0));
@@ -1989,10 +2086,11 @@ static void test_pac1934_register_protocol_and_board_wiring(void)
     };
     uint8_t data[76];
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    int64_t deadline;
     uint32_t status;
     size_t i;
 
-    twi_enable_master(qts, SAM9X7_FLEXCOM7_BASE, SAM9X7_TWI7_BASE);
+    twi_enable_master(qts, SAM9X7_FLEXCOM7_BASE, SAM9X7_TWI7_BASE, 10);
 
     twi_read_regs(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0xfd,
                   data, 3);
@@ -2030,11 +2128,12 @@ static void test_pac1934_register_protocol_and_board_wiring(void)
     twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x20, 0);
     twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x01, 0x40);
     twi_send_byte(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x00);
+    deadline = qtest_clock_step(qts, 1) - 1 + PAC1934_REFRESH_DELAY_NS;
     g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
                                  PAC1934_I2C_ADDRESS, 0x21), ==, 0);
-    qtest_clock_step(qts, PAC1934_REFRESH_DELAY_NS - 1);
-    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
-                                 PAC1934_I2C_ADDRESS, 0x21), ==, 0);
+    g_assert_cmphex(twi_read_reg_before_deadline(qts, SAM9X7_TWI7_BASE,
+                                                 PAC1934_I2C_ADDRESS, 0x21,
+                                                 deadline), ==, 0);
     qtest_clock_step(qts, 1);
     g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
                                  PAC1934_I2C_ADDRESS, 0x21), ==, 0x40);
@@ -2096,7 +2195,7 @@ static void test_pac1934_register_protocol_and_board_wiring(void)
     g_assert_true(status & TWI_SR_NACK);
 
     qtest_system_reset(qts);
-    twi_enable_master(qts, SAM9X7_FLEXCOM7_BASE, SAM9X7_TWI7_BASE);
+    twi_enable_master(qts, SAM9X7_FLEXCOM7_BASE, SAM9X7_TWI7_BASE, 10);
     g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
                                  PAC1934_I2C_ADDRESS, 0x20), ==, 0x95);
     g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
@@ -2112,7 +2211,7 @@ static void test_pac1934_measurements_accumulation_and_modes(void)
     QTestState *qts = qtest_init(
         SAM9X75_MACHINE " -global pac1934.vsense1-microvolts=1000");
 
-    twi_enable_master(qts, SAM9X7_FLEXCOM7_BASE, SAM9X7_TWI7_BASE);
+    twi_enable_master(qts, SAM9X7_FLEXCOM7_BASE, SAM9X7_TWI7_BASE, 10);
 
     pac1934_refresh(qts, 0x00);
     g_assert_cmphex(pac1934_read_be(qts, 0x07, 2), ==,
@@ -2161,7 +2260,7 @@ static void test_pac1934_overflow_alert_and_clear(void)
     qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PCR,
                  PMC_PCR_CMD | PMC_PCR_EN | 3);
-    twi_enable_master(qts, SAM9X7_FLEXCOM7_BASE, SAM9X7_TWI7_BASE);
+    twi_enable_master(qts, SAM9X7_FLEXCOM7_BASE, SAM9X7_TWI7_BASE, 10);
     twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x01,
                   BIT(3) | BIT(1));
     pac1934_refresh(qts, 0x00);
@@ -2192,7 +2291,7 @@ static void test_pac1934_i2c_jumpers(void)
             SAM9X75_MACHINE ",pac1934-route=%s", routes[i]);
         uint32_t status;
 
-        twi_enable_master(qts, SAM9X7_FLEXCOM7_BASE, SAM9X7_TWI7_BASE);
+        twi_enable_master(qts, SAM9X7_FLEXCOM7_BASE, SAM9X7_TWI7_BASE, 10);
         qtest_writel(qts, SAM9X7_TWI7_BASE + TWI_MMR,
                      TWI_MMR_DADR(PAC1934_I2C_ADDRESS) | TWI_MMR_MREAD |
                      TWI_MMR_IADRSZ_1);
@@ -2487,6 +2586,7 @@ static void test_flexcom_usart_migration(void)
     migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
     migrate_qmp(from, to, NULL, NULL, "{}");
     wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
 
     g_assert_cmphex(qtest_readl(to, SAM9X7_FLEXCOM0_BASE + FLEX_MR), ==,
                     FLEX_MODE_USART);
@@ -2733,6 +2833,7 @@ static void test_flexcom_spi_migration(void)
     migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
     migrate_qmp(from, to, NULL, NULL, "{}");
     wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
 
     g_assert_cmphex(qtest_readl(to, SAM9X7_FLEXCOM0_BASE + FLEX_MR), ==,
                     FLEX_MODE_SPI);
@@ -2891,10 +2992,12 @@ static void test_twi_eeprom_transfers_fifo_and_access_width(void)
                  TWI_MMR_DADR(0x53) | TWI_MMR_IADRSZ_1);
     qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IADR, 0x20);
     qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_THR, 0x5a);
+    twi_wait_status(qts, SAM9X7_TWI6_BASE, TWI_SR_TXRDY);
     g_assert_true(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR) &
                   TWI_SR_TXRDY);
     qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_THR, 0xa5);
     qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR, TWI_CR_STOP);
+    twi_wait_status(qts, SAM9X7_TWI6_BASE, TWI_SR_TXCOMP);
     g_assert_true(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR) &
                   TWI_SR_TXCOMP);
 
@@ -2903,11 +3006,13 @@ static void test_twi_eeprom_transfers_fifo_and_access_width(void)
                  TWI_MMR_IADRSZ_1);
     qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IADR, 0x20);
     qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR, TWI_CR_START);
+    twi_wait_status(qts, SAM9X7_TWI6_BASE, TWI_SR_RXRDY);
     g_assert_true(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR) &
                   TWI_SR_RXRDY);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_RHR), ==,
                     0x5a);
     qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR, TWI_CR_STOP);
+    twi_wait_status(qts, SAM9X7_TWI6_BASE, TWI_SR_RXRDY);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_RHR), ==,
                     0xa5);
     status = qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR);
@@ -2915,12 +3020,17 @@ static void test_twi_eeprom_transfers_fifo_and_access_width(void)
     g_assert_false(status & TWI_SR_RXRDY);
 
     qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR,
+                 TWI_CR_MSDIS | TWI_CR_SVDIS);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR,
                  TWI_CR_FIFOEN | TWI_CR_ACMEN);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR,
+                 TWI_CR_MSEN | TWI_CR_SVDIS);
     qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_ACR, TWI_ACR_DATAL(2));
     qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_MMR,
                  TWI_MMR_DADR(0x53) | TWI_MMR_IADRSZ_1);
     qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IADR, 0x40);
     qtest_writew(qts, SAM9X7_TWI6_BASE + TWI_THR, 0xbbaa);
+    twi_wait_status(qts, SAM9X7_TWI6_BASE, TWI_SR_TXCOMP);
     g_assert_true(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR) &
                   TWI_SR_TXCOMP);
 
@@ -2930,6 +3040,7 @@ static void test_twi_eeprom_transfers_fifo_and_access_width(void)
                  TWI_MMR_DADR(0x53) | TWI_MMR_IADRSZ_1);
     qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IADR, 0x40);
     qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR, TWI_CR_START);
+    twi_wait_status(qts, SAM9X7_TWI6_BASE, TWI_SR_TXCOMP);
     g_assert_cmphex(qtest_readw(qts, SAM9X7_TWI6_BASE + TWI_RHR), ==,
                     0xbbaa);
     status = qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR);
@@ -2937,6 +3048,231 @@ static void test_twi_eeprom_transfers_fifo_and_access_width(void)
     g_assert_false(status & TWI_SR_RXRDY);
 
     qtest_quit(qts);
+}
+
+static void test_twi_fifo_levels_thresholds_and_clock(void)
+{
+    static const uint32_t words[] = {
+        0x03020100, 0x07060504, 0x0b0a0908, 0x0f0e0d0c,
+    };
+    const uint32_t fifo_mode = TWI_FMR_TXRDYM_FOUR |
+                               TWI_FMR_RXRDYM_FOUR |
+                               TWI_FMR_TXFTHRES(12) |
+                               TWI_FMR_RXFTHRES(4);
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at24c-eeprom,bus=i2c0,address=0x53,rom-size=256");
+    uint64_t gclk_byte_ns;
+    uint64_t gclk_period;
+    uint32_t status;
+    unsigned int i;
+
+    pmc_write_pcr(qts, 5, PMC_PCR_EN);
+    qtest_writeb(qts, SAM9X7_FLEXCOM0_BASE + FLEX_MR, FLEX_MODE_TWI);
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_CR, TWI_CR_SWRST);
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_CR,
+                 TWI_CR_FIFOEN | TWI_CR_ACMEN);
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_CR,
+                 TWI_CR_MSEN | TWI_CR_SVDIS);
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_FMR, fifo_mode);
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_MMR,
+                 TWI_MMR_DADR(0x53) | TWI_MMR_IADRSZ_1);
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_IADR, 0x20);
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_ACR,
+                 TWI_ACR_DATAL(sizeof(words)));
+
+    aic_configure(qts, 5, AIC_SMR_LEVEL_HIGH | 3, 0x50050005);
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_FIER,
+                 TWI_FSR_TXFFF | TWI_FSR_TXFTHF | TWI_FSR_RXFTHF);
+
+    /* With PCLK stopped, four word writes fill all 16 FIFO entries. */
+    pmc_write_pcr(qts, 5, 0);
+    for (i = 0; i < ARRAY_SIZE(words); i++) {
+        qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_THR, words[i]);
+    }
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_FLR), ==,
+                    16);
+    g_assert_false(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_SR) &
+                   TWI_SR_TXRDY);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(5));
+    g_assert_true(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_FSR) &
+                  TWI_FSR_TXFFF);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(5));
+
+    /* The shifter resumes at PCLK enable and crosses TXFTHRES at 12. */
+    pmc_write_pcr(qts, 5, PMC_PCR_EN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_FLR), ==,
+                    15);
+    for (i = 0; i < 3; i++) {
+        qtest_clock_step_next(qts);
+    }
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_FLR), ==,
+                    12);
+    g_assert_true(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_SR) &
+                  TWI_SR_TXRDY);
+    g_assert_true(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_FSR) &
+                  TWI_FSR_TXFTHF);
+
+    for (i = 0; i < 32; i++) {
+        if (qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_SR) & TWI_SR_TXCOMP) {
+            break;
+        }
+        qtest_clock_step_next(qts);
+    }
+    g_assert_cmpuint(i, <, 32);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_FLR), ==, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_FSR) &
+                  TWI_FSR_TXFEF);
+
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_ACR,
+                 TWI_ACR_DIR | TWI_ACR_DATAL(sizeof(words)));
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_IADR, 0x20);
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_CR,
+                 TWI_CR_RXFCLR | TWI_CR_START);
+    for (i = 0; i < 3; i++) {
+        qtest_clock_step_next(qts);
+    }
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_FLR), ==,
+                    3U << 16);
+    g_assert_false(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_SR) &
+                   TWI_SR_RXRDY);
+    qtest_clock_step_next(qts);
+    status = qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_SR);
+    g_assert_true(status & TWI_SR_RXRDY);
+    g_assert_true(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_FSR) &
+                  TWI_FSR_RXFTHF);
+
+    for (i = 0; i < ARRAY_SIZE(words); i++) {
+        twi_wait_status(qts, SAM9X7_TWI0_BASE, TWI_SR_RXRDY);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_RHR), ==,
+                        words[i]);
+    }
+    g_assert_true(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_SR) &
+                  TWI_SR_TXCOMP);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_FLR), ==, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_FSR) &
+                  TWI_FSR_RXFEF);
+
+    qtest_readb(qts, SAM9X7_TWI0_BASE + TWI_RHR);
+    g_assert_true(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_FSR) &
+                  TWI_FSR_RXFPTEF);
+
+    pmc_write_pcr(qts, 5, PMC_PCR_EN | (2U << 8) | (2U << 20) |
+                           PMC_PCR_GCKEN);
+    gclk_period = get_clock_period(qts, "/machine/soc/pmc/gclk[5]");
+    g_assert_cmpuint(gclk_period, >, 0);
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_CWGR,
+                 TWI_CWGR_BRSRCCLK | 3 | (3U << 8));
+    gclk_byte_ns = (gclk_period * 54) >> 32;
+    g_assert_cmpuint(gclk_byte_ns, >, 1);
+
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_ACR, TWI_ACR_DATAL(1));
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_IADR, 0x50);
+    qtest_writeb(qts, SAM9X7_TWI0_BASE + TWI_THR, 0x5a);
+    qtest_clock_step(qts, gclk_byte_ns - 1);
+    g_assert_false(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_SR) &
+                   TWI_SR_TXCOMP);
+    qtest_clock_step(qts, 1);
+    g_assert_true(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_SR) &
+                  TWI_SR_TXCOMP);
+
+    /* Selecting GCLK still requires both the generic and peripheral clocks. */
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_ACR, TWI_ACR_DATAL(1));
+    qtest_writel(qts, SAM9X7_TWI0_BASE + TWI_IADR, 0x51);
+    qtest_writeb(qts, SAM9X7_TWI0_BASE + TWI_THR, 0xa5);
+    pmc_write_pcr(qts, 5, PMC_PCR_EN | (2U << 8) | (2U << 20));
+    qtest_clock_step(qts, 2 * gclk_byte_ns);
+    g_assert_false(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_SR) &
+                   TWI_SR_TXCOMP);
+    pmc_write_pcr(qts, 5, PMC_PCR_EN | (2U << 8) | (2U << 20) |
+                           PMC_PCR_GCKEN);
+    qtest_clock_step(qts, gclk_byte_ns - 1);
+    g_assert_false(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_SR) &
+                   TWI_SR_TXCOMP);
+    qtest_clock_step(qts, 1);
+    g_assert_true(qtest_readl(qts, SAM9X7_TWI0_BASE + TWI_SR) &
+                  TWI_SR_TXCOMP);
+
+    qtest_quit(qts);
+}
+
+static void test_flexcom_twi_migration(void)
+{
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    const uint32_t mmr = TWI_MMR_DADR(0x5b) | TWI_MMR_IADRSZ_1;
+    const uint32_t cwgr = 217 | (217U << 8);
+    const uint32_t fmr = TWI_FMR_TXRDYM_FOUR |
+                         TWI_FMR_RXRDYM_FOUR |
+                         TWI_FMR_TXFTHRES(2) |
+                         TWI_FMR_RXFTHRES(4);
+    uint64_t byte_ns;
+    int64_t from_clock;
+
+    pmc_write_pcr(from, 9, PMC_PCR_EN);
+    qtest_writeb(from, SAM9X7_FLEXCOM6_BASE + FLEX_MR, FLEX_MODE_TWI);
+    qtest_writel(from, SAM9X7_TWI6_BASE + TWI_CR, TWI_CR_SWRST);
+    qtest_writel(from, SAM9X7_TWI6_BASE + TWI_CR,
+                 TWI_CR_FIFOEN | TWI_CR_ACMEN);
+    qtest_writel(from, SAM9X7_TWI6_BASE + TWI_CR,
+                 TWI_CR_MSEN | TWI_CR_SVDIS);
+    qtest_writel(from, SAM9X7_TWI6_BASE + TWI_MMR, mmr);
+    qtest_writel(from, SAM9X7_TWI6_BASE + TWI_CWGR, cwgr);
+    qtest_writel(from, SAM9X7_TWI6_BASE + TWI_FMR, fmr);
+    qtest_writel(from, SAM9X7_TWI6_BASE + TWI_IER,
+                 TWI_SR_TXCOMP | TWI_SR_RXRDY);
+    qtest_writel(from, SAM9X7_TWI6_BASE + TWI_FIER,
+                 TWI_FSR_TXFEF | TWI_FSR_RXFTHF);
+    qtest_writel(from, SAM9X7_TWI6_BASE + TWI_IADR, 0x40);
+    qtest_writel(from, SAM9X7_TWI6_BASE + TWI_ACR, TWI_ACR_DATAL(4));
+    qtest_writel(from, SAM9X7_TWI6_BASE + TWI_THR, 0x44332211);
+
+    byte_ns = usart_cycles_to_ns(from, 9, 9 * (217 + 217 + 6));
+    g_assert_cmpuint(byte_ns, >, 1);
+    from_clock = qtest_clock_step(from, byte_ns / 2);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_TWI6_BASE + TWI_FLR), ==, 3);
+    g_assert_false(qtest_readl(from, SAM9X7_TWI6_BASE + TWI_SR) &
+                   TWI_SR_TXCOMP);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_cmphex(qtest_readl(to, SAM9X7_FLEXCOM6_BASE + FLEX_MR), ==,
+                    FLEX_MODE_TWI);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_TWI6_BASE + TWI_MMR), ==, mmr);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_TWI6_BASE + TWI_CWGR), ==,
+                    cwgr);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_TWI6_BASE + TWI_ACR), ==, 4);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_TWI6_BASE + TWI_FMR), ==, fmr);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_TWI6_BASE + TWI_IMR), ==,
+                    TWI_SR_TXCOMP | TWI_SR_RXRDY);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_TWI6_BASE + TWI_FIMR), ==,
+                    TWI_FSR_TXFEF | TWI_FSR_RXFTHF);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_TWI6_BASE + TWI_FLR), ==, 3);
+
+    g_assert_cmpint(qtest_clock_set(to, from_clock), ==, from_clock);
+    qtest_clock_step(to, byte_ns - byte_ns / 2 - 1);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_TWI6_BASE + TWI_FLR), ==, 3);
+    qtest_clock_step(to, 1);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_TWI6_BASE + TWI_FLR), ==, 2);
+    twi_wait_status(to, SAM9X7_TWI6_BASE, TWI_SR_TXCOMP);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_TWI6_BASE + TWI_FLR), ==, 0);
+
+    qtest_writel(to, SAM9X7_TWI6_BASE + TWI_ACR,
+                 TWI_ACR_DIR | TWI_ACR_DATAL(4));
+    qtest_writel(to, SAM9X7_TWI6_BASE + TWI_IADR, 0x40);
+    qtest_writel(to, SAM9X7_TWI6_BASE + TWI_CR,
+                 TWI_CR_RXFCLR | TWI_CR_START);
+    twi_wait_status(to, SAM9X7_TWI6_BASE, TWI_SR_RXRDY);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_TWI6_BASE + TWI_RHR), ==,
+                    0x44332211);
+    g_assert_true(qtest_readl(to, SAM9X7_TWI6_BASE + TWI_SR) &
+                  TWI_SR_TXCOMP);
+
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
 static void test_aic_dbgu_integration(void)
@@ -3749,6 +4085,182 @@ static uint32_t xdmac_waitl(QTestState *qts, uint64_t offset,
     g_error("timed out waiting for XDMAC offset 0x%04" PRIx64
             " mask 0x%08x to become 0x%08x (value 0x%08x)",
             offset, mask, expected, value);
+}
+
+static void test_flexcom_twi_xdmac_requests_and_mode_gating(void)
+{
+    static const uint8_t tx_values[] = {
+        0x10, 0x21, 0x32, 0x43, 0x54, 0x65,
+        0x76, 0x87, 0x98, 0xa9, 0xba, 0xcb,
+    };
+    static const uint8_t gated_values[] = { 0xdc, 0xed, 0xfe, 0x0f };
+    const uint32_t tx_source = SAM9X7_DDR_BASE + 0xf1c0;
+    const uint32_t gated_source = SAM9X7_DDR_BASE + 0xf1d0;
+    const uint32_t rx_target = SAM9X7_DDR_BASE + 0xf1e0;
+    const uint32_t rx_descriptor = SAM9X7_DDR_BASE + 0xf200;
+    const uint32_t mismatch_target = SAM9X7_DDR_BASE + 0xf220;
+    const uint64_t flex_base = SAM9X7_FLEXCOM6_BASE;
+    const uint64_t twi_base = SAM9X7_TWI6_BASE;
+    const uint64_t tx_channel = XDMAC_CHANNEL(0);
+    const uint64_t rx_channel = XDMAC_CHANNEL(1);
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at24c-eeprom,bus=i2c6,address=0x53,rom-size=256");
+    uint32_t descriptor[5] = { 0 };
+    uint8_t rx_values[sizeof(tx_values)] = { 0 };
+    unsigned int i;
+
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    pmc_write_pcr(qts, 9, PMC_PCR_EN);
+    qtest_writeb(qts, flex_base + FLEX_MR, FLEX_MODE_TWI);
+    qtest_writel(qts, twi_base + TWI_CR, TWI_CR_SWRST);
+    qtest_writel(qts, twi_base + TWI_CR,
+                 TWI_CR_FIFOEN | TWI_CR_ACMEN);
+    qtest_writel(qts, twi_base + TWI_CR,
+                 TWI_CR_MSEN | TWI_CR_SVDIS);
+    qtest_writel(qts, twi_base + TWI_FMR,
+                 TWI_FMR_TXRDYM_FOUR | TWI_FMR_RXRDYM_FOUR);
+    qtest_writel(qts, twi_base + TWI_MMR,
+                 TWI_MMR_DADR(0x53) | TWI_MMR_IADRSZ_1);
+    qtest_writel(qts, twi_base + TWI_IADR, 0x60);
+    qtest_writel(qts, twi_base + TWI_ACR,
+                 TWI_ACR_DATAL(sizeof(tx_values)));
+
+    qtest_memwrite(qts, tx_source, tx_values, sizeof(tx_values));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CSA,
+                 tx_source);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CDA,
+                 twi_base + TWI_THR);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CUBC,
+                 sizeof(tx_values) / sizeof(uint32_t));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_DSYNC_MEM2PER |
+                 XDMAC_CC_DWIDTH_WORD | XDMAC_CC_PERID(12) |
+                 XDMAC_CC_SAM_INC);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
+    xdmac_waitl(qts, XDMAC_GS, BIT(0), 0);
+    twi_wait_status(qts, twi_base, TWI_SR_TXCOMP);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + tx_channel +
+                                XDMAC_CUBC), ==, 0);
+
+    qtest_writel(qts, twi_base + TWI_ACR,
+                 TWI_ACR_DIR | TWI_ACR_DATAL(sizeof(rx_values)));
+    qtest_writel(qts, twi_base + TWI_IADR, 0x60);
+    qtest_writel(qts, twi_base + TWI_CR, TWI_CR_START);
+    qtest_clock_step_next(qts);
+
+    descriptor[1] = cpu_to_le32(XDMAC_MBR_UBC_NSEN |
+                                XDMAC_MBR_UBC_NDEN |
+                                XDMAC_MBR_UBC_NDV2 |
+                                sizeof(rx_values) / sizeof(uint32_t));
+    descriptor[2] = cpu_to_le32(twi_base + TWI_RHR);
+    descriptor[3] = cpu_to_le32(rx_target);
+    descriptor[4] = cpu_to_le32(XDMAC_CC_TYPE_PER |
+                                XDMAC_CC_DWIDTH_WORD |
+                                XDMAC_CC_PERID(13) | XDMAC_CC_DAM_INC);
+    qtest_memwrite(qts, rx_descriptor, descriptor, sizeof(descriptor));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CNDA,
+                 rx_descriptor);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CNDC,
+                 XDMAC_CNDC_NDE | XDMAC_CNDC_NDSUP |
+                 XDMAC_CNDC_NDDUP | XDMAC_CNDC_NDVIEW2);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_DWIDTH_WORD |
+                 XDMAC_CC_PERID(13) | XDMAC_CC_DAM_INC);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(1));
+    for (i = 0; i < 32; i++) {
+        if (!(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(1))) {
+            break;
+        }
+        qtest_clock_step_next(qts);
+    }
+    g_assert_cmpuint(i, <, 32);
+    qtest_memread(qts, rx_target, rx_values, sizeof(rx_values));
+    g_assert_cmpmem(rx_values, sizeof(rx_values),
+                    tx_values, sizeof(tx_values));
+    g_assert_true(qtest_readl(qts, twi_base + TWI_SR) &
+                  TWI_SR_TXCOMP);
+
+    /* The FIFO ready mode and XDMAC access width must describe one chunk. */
+    qtest_writel(qts, twi_base + TWI_ACR,
+                 TWI_ACR_DIR | TWI_ACR_DATAL(sizeof(rx_values)));
+    qtest_writel(qts, twi_base + TWI_IADR, 0x60);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CNDC, 0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CSA,
+                 twi_base + TWI_RHR);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CDA,
+                 mismatch_target);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CUBC,
+                 sizeof(rx_values));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_PERID(13) |
+                 XDMAC_CC_DAM_INC);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(1));
+    qtest_writel(qts, twi_base + TWI_CR, TWI_CR_RXFCLR | TWI_CR_START);
+    for (i = 0; i < 16; i++) {
+        if (qtest_readl(qts, twi_base + TWI_SR) & TWI_SR_TXCOMP) {
+            break;
+        }
+        qtest_clock_step_next(qts);
+    }
+    g_assert_cmpuint(i, <, 16);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(1));
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + rx_channel +
+                                XDMAC_CUBC), ==, 3);
+    g_assert_cmphex(qtest_readl(qts, twi_base + TWI_FLR), ==, 3U << 16);
+    g_assert_false(qtest_readl(qts, twi_base + TWI_SR) & TWI_SR_RXRDY);
+
+    qtest_writel(qts, twi_base + TWI_FMR, TWI_FMR_TXRDYM_FOUR);
+    xdmac_waitl(qts, XDMAC_GS, BIT(1), 0);
+    memset(rx_values, 0, sizeof(rx_values));
+    qtest_memread(qts, mismatch_target, rx_values, sizeof(rx_values));
+    g_assert_cmpmem(rx_values, sizeof(rx_values),
+                    tx_values, sizeof(tx_values));
+    g_assert_cmphex(qtest_readl(qts, twi_base + TWI_FLR), ==, 0);
+
+    qtest_writel(qts, twi_base + TWI_FMR,
+                 TWI_FMR_TXRDYM_FOUR | TWI_FMR_RXRDYM_FOUR);
+
+    /* A request from an inactive FLEXCOM personality must not leak. */
+    qtest_memwrite(qts, gated_source, gated_values, sizeof(gated_values));
+    qtest_writel(qts, twi_base + TWI_ACR,
+                 TWI_ACR_DATAL(sizeof(gated_values)));
+    qtest_writel(qts, twi_base + TWI_IADR, 0x80);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CSA,
+                 gated_source);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CDA,
+                 twi_base + TWI_THR);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CUBC,
+                 sizeof(gated_values) / sizeof(uint32_t));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_DSYNC_MEM2PER |
+                 XDMAC_CC_DWIDTH_WORD | XDMAC_CC_PERID(12) |
+                 XDMAC_CC_SAM_INC);
+    qtest_writeb(qts, flex_base + FLEX_MR, FLEX_MODE_SPI);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
+    qtest_clock_step(qts, 10000);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(0));
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + tx_channel +
+                                XDMAC_CUBC), ==,
+                    sizeof(gated_values) / sizeof(uint32_t));
+
+    qtest_writeb(qts, flex_base + FLEX_MR, FLEX_MODE_TWI);
+    xdmac_waitl(qts, XDMAC_GS, BIT(0), 0);
+    twi_wait_status(qts, twi_base, TWI_SR_TXCOMP);
+
+    qtest_writel(qts, twi_base + TWI_ACR,
+                 TWI_ACR_DIR | TWI_ACR_DATAL(sizeof(gated_values)));
+    qtest_writel(qts, twi_base + TWI_IADR, 0x80);
+    qtest_writel(qts, twi_base + TWI_CR,
+                 TWI_CR_RXFCLR | TWI_CR_START);
+    twi_wait_status(qts, twi_base, TWI_SR_RXRDY);
+    g_assert_cmphex(qtest_readl(qts, twi_base + TWI_RHR), ==,
+                    0x0ffeeddc);
+
+    qtest_quit(qts);
 }
 
 static void test_dbgu_xdmac_requests(void)
@@ -7836,6 +8348,12 @@ int main(int argc, char **argv)
                    test_flexcom_twi_registers_nack_and_protection);
     qtest_add_func("sam9x75/flexcom-twi/eeprom-fifo-and-access-width",
                    test_twi_eeprom_transfers_fifo_and_access_width);
+    qtest_add_func("sam9x75/flexcom-twi/fifo-levels-thresholds-and-clock",
+                   test_twi_fifo_levels_thresholds_and_clock);
+    qtest_add_func("sam9x75/flexcom-twi/migration",
+                   test_flexcom_twi_migration);
+    qtest_add_func("sam9x75/flexcom-twi/xdmac-and-mode-gating",
+                   test_flexcom_twi_xdmac_requests_and_mode_gating);
     qtest_add_func("sam9x75/board/mcp16502-registers-and-regulators",
                    test_mcp16502_registers_and_regulators);
     qtest_add_func("sam9x75/board/rgb-led-and-user-button",

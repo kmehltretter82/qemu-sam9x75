@@ -395,6 +395,12 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
         qdev_connect_gpio_out_named(DEVICE(&s->spi[i]), "rx-request", 0,
             qdev_get_gpio_in_named(DEVICE(&s->flexcom[i]),
                                    "spi-rx-request", 0));
+        qdev_connect_gpio_out_named(DEVICE(&s->twi[i]), "tx-request", 0,
+            qdev_get_gpio_in_named(DEVICE(&s->flexcom[i]),
+                                   "twi-tx-request", 0));
+        qdev_connect_gpio_out_named(DEVICE(&s->twi[i]), "rx-request", 0,
+            qdev_get_gpio_in_named(DEVICE(&s->flexcom[i]),
+                                   "twi-rx-request", 0));
         qdev_connect_gpio_out_named(DEVICE(&s->flexcom[i]), "tx-request", 0,
             qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", i * 2));
         qdev_connect_gpio_out_named(DEVICE(&s->flexcom[i]), "rx-request", 0,
@@ -670,6 +676,8 @@ static void sam9x7_init(Object *obj)
         qdev_prop_set_string(DEVICE(&s->twi[i]), "bus-name", bus_name);
         qdev_connect_clock_in(DEVICE(&s->twi[i]), "pclk",
                              qdev_get_clock_out(DEVICE(&s->pmc), pclk_name));
+        qdev_connect_clock_in(DEVICE(&s->twi[i]), "gclk",
+                             qdev_get_clock_out(DEVICE(&s->pmc), gclk_name));
     }
 
     for (i = 0; i < ARRAY_SIZE(s->sdmmc); i++) {
