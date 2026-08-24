@@ -178,6 +178,18 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->xdmac), 0,
                        qdev_get_gpio_in(DEVICE(&s->aic), 20));
 
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->aes), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->aes), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_AES_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->aes), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 39));
+    qdev_connect_gpio_out_named(DEVICE(&s->aes), "tx-request", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 32));
+    qdev_connect_gpio_out_named(DEVICE(&s->aes), "rx-request", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 33));
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->pit), errp)) {
         return;
     }
@@ -440,6 +452,10 @@ static void sam9x7_init(Object *obj)
     object_initialize_child(obj, "xdmac", &s->xdmac, TYPE_AT91_XDMAC);
     qdev_connect_clock_in(DEVICE(&s->xdmac), "pclk",
                           qdev_get_clock_out(DEVICE(&s->pmc), "pclk[20]"));
+
+    object_initialize_child(obj, "aes", &s->aes, TYPE_AT91_AES);
+    qdev_connect_clock_in(DEVICE(&s->aes), "pclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "pclk[39]"));
 
     object_initialize_child(obj, "sfr", &s->sfr, TYPE_AT91_SFR);
 

@@ -24,6 +24,7 @@
 #define SAM9X7_FLEXCOM6_BASE    0xf8010000
 #define SAM9X7_TWI6_BASE        (SAM9X7_FLEXCOM6_BASE + 0x600)
 #define SAM9X7_PIT64B0_BASE     0xf0028000
+#define SAM9X7_AES_BASE         0xf0034000
 #define SAM9X7_PIT64B1_BASE     0xf0040000
 #define SAM9X7_TCB_BASE         0xf8008000
 #define SAM9X7_GMAC_BASE        0xf802c000
@@ -462,11 +463,61 @@
 #define XDMAC_CC_MEMSET         BIT(7)
 #define XDMAC_CC_DWIDTH_HALFWORD (1U << 11)
 #define XDMAC_CC_DWIDTH_WORD    (2U << 11)
+#define XDMAC_CC_CSIZE_4        (2U << 8)
 #define XDMAC_CC_SAM_INC        (1U << 16)
 #define XDMAC_CC_DAM_INC        (1U << 18)
 #define XDMAC_CC_DAM_UBS        (2U << 18)
 #define XDMAC_CC_INITD          BIT(21)
 #define XDMAC_CC_PERID(id)      ((id) << 24)
+
+#define AES_CR                  0x00
+#define AES_MR                  0x04
+#define AES_IER                 0x10
+#define AES_IDR                 0x14
+#define AES_IMR                 0x18
+#define AES_ISR                 0x1c
+#define AES_KEYWR(index)        (0x20 + (index) * 4)
+#define AES_IDATAR(index)       (0x40 + (index) * 4)
+#define AES_ODATAR(index)       (0x50 + (index) * 4)
+#define AES_IVR(index)          (0x60 + (index) * 4)
+#define AES_AADLENR             0x70
+#define AES_CLENR               0x74
+#define AES_GHASHR(index)       (0x78 + (index) * 4)
+#define AES_TAGR(index)         (0x88 + (index) * 4)
+#define AES_CTRR                0x98
+#define AES_GCMHR(index)        (0x9c + (index) * 4)
+#define AES_EMR                 0xb0
+#define AES_BCNT                0xb4
+#define AES_TWR(index)          (0xc0 + (index) * 4)
+#define AES_ALPHAR(index)       (0xd0 + (index) * 4)
+#define AES_WPMR                0xe4
+#define AES_WPSR                0xe8
+#define AES_VERSION             0xfc
+
+#define AES_CR_START            BIT(0)
+#define AES_CR_SWRST            BIT(8)
+#define AES_MR_CIPHER           BIT(0)
+#define AES_MR_GTAGEN           BIT(1)
+#define AES_MR_SMOD_AUTO        (1U << 8)
+#define AES_MR_SMOD_DMA         (2U << 8)
+#define AES_MR_KEYSIZE_192      (1U << 10)
+#define AES_MR_KEYSIZE_256      (2U << 10)
+#define AES_MR_OPMODE_CBC       (1U << 12)
+#define AES_MR_OPMODE_OFB       (2U << 12)
+#define AES_MR_OPMODE_CFB       (3U << 12)
+#define AES_MR_OPMODE_CTR       (4U << 12)
+#define AES_MR_OPMODE_GCM       (5U << 12)
+#define AES_MR_OPMODE_XTS       (6U << 12)
+#define AES_MR_CFBS_8           (4U << 16)
+#define AES_MR_CKEY             (0xeU << 20)
+#define AES_INT_DATRDY          BIT(0)
+#define AES_INT_TAGRDY          BIT(16)
+#define AES_INT_SECE            BIT(19)
+#define AES_WPMR_WPEN           BIT(0)
+#define AES_WPMR_WPITEN         BIT(1)
+#define AES_WPMR_WPCREN         BIT(2)
+#define AES_WPMR_KEY            0x41455300
+#define AES_WPSR_WPVS           BIT(0)
 
 #define PIO_PER                 0x000
 #define PIO_PDR                 0x004
@@ -1959,6 +2010,517 @@ static void test_xdmac_pacing_striding_and_errors(void)
     qtest_quit(qts);
 }
 
+static void aes_write_bytes(QTestState *qts, uint64_t offset,
+                            const uint8_t *data, size_t length)
+{
+    size_t i;
+
+    g_assert_cmpuint(length % sizeof(uint32_t), ==, 0);
+    for (i = 0; i < length; i += sizeof(uint32_t)) {
+        qtest_writel(qts, SAM9X7_AES_BASE + offset + i,
+                     ldl_le_p(data + i));
+    }
+}
+
+static void aes_read_bytes(QTestState *qts, uint64_t offset,
+                           uint8_t *data, size_t length)
+{
+    size_t i;
+
+    g_assert_cmpuint(length % sizeof(uint32_t), ==, 0);
+    for (i = 0; i < length; i += sizeof(uint32_t)) {
+        stl_le_p(data + i,
+                 qtest_readl(qts, SAM9X7_AES_BASE + offset + i));
+    }
+}
+
+static void aes_configure(QTestState *qts, uint32_t mode,
+                          const uint8_t *key, size_t key_length,
+                          const uint8_t *iv)
+{
+    qtest_writel(qts, SAM9X7_AES_BASE + AES_CR, AES_CR_SWRST);
+    qtest_writel(qts, SAM9X7_AES_BASE + AES_MR, AES_MR_CKEY | mode);
+    aes_write_bytes(qts, AES_KEYWR(0), key, key_length);
+    if (iv) {
+        aes_write_bytes(qts, AES_IVR(0), iv, 16);
+    }
+}
+
+static void aes_process_cpu_block(QTestState *qts, const uint8_t input[16],
+                                  uint8_t output[16])
+{
+    aes_write_bytes(qts, AES_IDATAR(0), input, 16);
+    g_assert_true(qtest_readl(qts, SAM9X7_AES_BASE + AES_ISR) &
+                  AES_INT_DATRDY);
+    aes_read_bytes(qts, AES_ODATAR(0), output, 16);
+}
+
+static void aes_process_cpu_bytes(QTestState *qts, const uint8_t *input,
+                                  uint8_t *output, size_t length)
+{
+    size_t i;
+
+    for (i = 0; i < length; i++) {
+        qtest_writeb(qts, SAM9X7_AES_BASE + AES_IDATAR(0) + i, input[i]);
+    }
+    g_assert_true(qtest_readl(qts, SAM9X7_AES_BASE + AES_ISR) &
+                  AES_INT_DATRDY);
+    for (i = 0; i < length; i++) {
+        output[i] = qtest_readb(qts,
+                                SAM9X7_AES_BASE + AES_ODATAR(0) + i);
+    }
+}
+
+static void aes_process_dma(QTestState *qts, uint32_t source,
+                            uint32_t destination, size_t length)
+{
+    uint64_t tx_channel = XDMAC_CHANNEL(0);
+    uint64_t rx_channel = XDMAC_CHANNEL(1);
+
+    g_assert_cmpuint(length % sizeof(uint32_t), ==, 0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CSA,
+                 SAM9X7_AES_BASE + AES_ODATAR(0));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CDA,
+                 destination);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CUBC,
+                 length / sizeof(uint32_t));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_PERID(33) |
+                 XDMAC_CC_CSIZE_4 | XDMAC_CC_DWIDTH_WORD |
+                 XDMAC_CC_DAM_INC);
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CSA, source);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CDA,
+                 SAM9X7_AES_BASE + AES_IDATAR(0));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CUBC,
+                 length / sizeof(uint32_t));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_DSYNC_MEM2PER |
+                 XDMAC_CC_PERID(32) | XDMAC_CC_CSIZE_4 |
+                 XDMAC_CC_DWIDTH_WORD | XDMAC_CC_SAM_INC);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(1) | BIT(0));
+    xdmac_waitl(qts, XDMAC_GS, BIT(1) | BIT(0), 0);
+}
+
+static void test_aes_registers_ecb_irq_and_protection(void)
+{
+    static const struct {
+        uint8_t key[32];
+        size_t key_length;
+        uint32_t mode;
+        uint8_t ciphertext[16];
+    } vectors[] = {
+        {
+            .key = {
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+            },
+            .key_length = 16,
+            .ciphertext = {
+                0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30,
+                0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4, 0xc5, 0x5a,
+            },
+        }, {
+            .key = {
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+                0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+            },
+            .key_length = 24,
+            .mode = AES_MR_KEYSIZE_192,
+            .ciphertext = {
+                0xdd, 0xa9, 0x7c, 0xa4, 0x86, 0x4c, 0xdf, 0xe0,
+                0x6e, 0xaf, 0x70, 0xa0, 0xec, 0x0d, 0x71, 0x91,
+            },
+        }, {
+            .key = {
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+                0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+            },
+            .key_length = 32,
+            .mode = AES_MR_KEYSIZE_256,
+            .ciphertext = {
+                0x8e, 0xa2, 0xb7, 0xca, 0x51, 0x67, 0x45, 0xbf,
+                0xea, 0xfc, 0x49, 0x90, 0x4b, 0x49, 0x60, 0x89,
+            },
+        },
+    };
+    static const uint8_t plaintext[16] = {
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    };
+    uint8_t result[16];
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t mode;
+    uint32_t value;
+    unsigned int i;
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AES_BASE + AES_MR), ==,
+                    0x00080000);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AES_BASE + AES_VERSION), ==,
+                    0x700);
+    pmc_write_pcr(qts, 39, PMC_PCR_EN);
+    aic_configure(qts, 39, AIC_SMR_LEVEL_HIGH | 3, 0x39393939);
+
+    for (i = 0; i < ARRAY_SIZE(vectors); i++) {
+        mode = vectors[i].mode | AES_MR_SMOD_AUTO | AES_MR_CIPHER;
+        aes_configure(qts, mode, vectors[i].key, vectors[i].key_length,
+                      NULL);
+        /* Key loading computes the GCM H subkey and reports completion. */
+        g_assert_true(qtest_readl(qts, SAM9X7_AES_BASE + AES_ISR) &
+                      AES_INT_DATRDY);
+        qtest_readl(qts, SAM9X7_AES_BASE + AES_ODATAR(0));
+        if (i == 0) {
+            qtest_writel(qts, SAM9X7_AES_BASE + AES_IER,
+                         AES_INT_DATRDY);
+            aes_write_bytes(qts, AES_IDATAR(0), plaintext, 16);
+            g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) &
+                          BIT(7));
+            aes_read_bytes(qts, AES_ODATAR(0), result, 16);
+            g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) &
+                           BIT(7));
+        } else {
+            aes_process_cpu_block(qts, plaintext, result);
+        }
+        g_assert_cmpmem(result, sizeof(result), vectors[i].ciphertext,
+                        sizeof(vectors[i].ciphertext));
+
+        aes_configure(qts, vectors[i].mode | AES_MR_SMOD_AUTO,
+                      vectors[i].key, vectors[i].key_length, NULL);
+        qtest_readl(qts, SAM9X7_AES_BASE + AES_ODATAR(0));
+        aes_process_cpu_block(qts, vectors[i].ciphertext, result);
+        g_assert_cmpmem(result, sizeof(result), plaintext,
+                        sizeof(plaintext));
+    }
+
+    mode = qtest_readl(qts, SAM9X7_AES_BASE + AES_MR);
+    qtest_writel(qts, SAM9X7_AES_BASE + AES_WPMR,
+                 AES_WPMR_KEY | AES_WPMR_WPEN | AES_WPMR_WPITEN |
+                 AES_WPMR_WPCREN);
+    qtest_writel(qts, SAM9X7_AES_BASE + AES_MR, AES_MR_CKEY);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AES_BASE + AES_MR), ==, mode);
+    value = qtest_readl(qts, SAM9X7_AES_BASE + AES_WPSR);
+    g_assert_cmphex(value & (0xff00 | AES_WPSR_WPVS), ==,
+                    (AES_MR << 8) | AES_WPSR_WPVS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AES_BASE + AES_WPSR), ==, 0);
+
+    qtest_writel(qts, SAM9X7_AES_BASE + AES_CR, AES_CR_SWRST);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AES_BASE + AES_MR), ==, mode);
+    value = qtest_readl(qts, SAM9X7_AES_BASE + AES_ISR);
+    g_assert_true(value & AES_INT_SECE);
+    qtest_writel(qts, SAM9X7_AES_BASE + AES_WPMR, AES_WPMR_KEY);
+    qtest_writel(qts, SAM9X7_AES_BASE + AES_CR, AES_CR_SWRST);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AES_BASE + AES_MR), ==,
+                    0x00080000);
+
+    qtest_quit(qts);
+}
+
+static void test_aes_chaining_gcm_and_xdmac(void)
+{
+    static const uint8_t key[16] = {
+        0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+        0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c,
+    };
+    static const uint8_t iv[16] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    };
+    static const uint8_t plaintext[32] = {
+        0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96,
+        0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a,
+        0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c,
+        0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e, 0x51,
+    };
+    static const uint8_t cbc_ciphertext[32] = {
+        0x76, 0x49, 0xab, 0xac, 0x81, 0x19, 0xb2, 0x46,
+        0xce, 0xe9, 0x8e, 0x9b, 0x12, 0xe9, 0x19, 0x7d,
+        0x50, 0x86, 0xcb, 0x9b, 0x50, 0x72, 0x19, 0xee,
+        0x95, 0xdb, 0x11, 0x3a, 0x91, 0x76, 0x78, 0xb2,
+    };
+    static const uint8_t ctr_iv[16] = {
+        0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7,
+        0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
+    };
+    static const uint8_t ctr_ciphertext[32] = {
+        0x87, 0x4d, 0x61, 0x91, 0xb6, 0x20, 0xe3, 0x26,
+        0x1b, 0xef, 0x68, 0x64, 0x99, 0x0d, 0xb6, 0xce,
+        0x98, 0x06, 0xf6, 0x6b, 0x79, 0x70, 0xfd, 0xff,
+        0x86, 0x17, 0x18, 0x7b, 0xb9, 0xff, 0xfd, 0xff,
+    };
+    static const uint8_t zero[16] = { 0 };
+    static const uint8_t gcm_iv[16] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+    };
+    static const uint8_t gcm_ciphertext[16] = {
+        0x03, 0x88, 0xda, 0xce, 0x60, 0xb6, 0xa3, 0x92,
+        0xf3, 0x28, 0xc2, 0xb9, 0x71, 0xb2, 0xfe, 0x78,
+    };
+    static const uint8_t gcm_tag[16] = {
+        0xab, 0x6e, 0x47, 0xd4, 0x2c, 0xec, 0x13, 0xbd,
+        0xf5, 0x3a, 0x67, 0xb2, 0x12, 0x57, 0xbd, 0xdf,
+    };
+    static const uint8_t gcm_aad_key[16] = {
+        0xfe, 0xff, 0xe9, 0x92, 0x86, 0x65, 0x73, 0x1c,
+        0x6d, 0x6a, 0x8f, 0x94, 0x67, 0x30, 0x83, 0x08,
+    };
+    static const uint8_t gcm_aad_iv[16] = {
+        0xca, 0xfe, 0xba, 0xbe, 0xfa, 0xce, 0xdb, 0xad,
+        0xde, 0xca, 0xf8, 0x88, 0x00, 0x00, 0x00, 0x02,
+    };
+    static const uint8_t gcm_aad[32] = {
+        0xfe, 0xed, 0xfa, 0xce, 0xde, 0xad, 0xbe, 0xef,
+        0xfe, 0xed, 0xfa, 0xce, 0xde, 0xad, 0xbe, 0xef,
+        0xab, 0xad, 0xda, 0xd2,
+    };
+    static const uint8_t gcm_aad_plaintext[64] = {
+        0xd9, 0x31, 0x32, 0x25, 0xf8, 0x84, 0x06, 0xe5,
+        0xa5, 0x59, 0x09, 0xc5, 0xaf, 0xf5, 0x26, 0x9a,
+        0x86, 0xa7, 0xa9, 0x53, 0x15, 0x34, 0xf7, 0xda,
+        0x2e, 0x4c, 0x30, 0x3d, 0x8a, 0x31, 0x8a, 0x72,
+        0x1c, 0x3c, 0x0c, 0x95, 0x95, 0x68, 0x09, 0x53,
+        0x2f, 0xcf, 0x0e, 0x24, 0x49, 0xa6, 0xb5, 0x25,
+        0xb1, 0x6a, 0xed, 0xf5, 0xaa, 0x0d, 0xe6, 0x57,
+        0xba, 0x63, 0x7b, 0x39,
+    };
+    static const uint8_t gcm_aad_ciphertext[60] = {
+        0x42, 0x83, 0x1e, 0xc2, 0x21, 0x77, 0x74, 0x24,
+        0x4b, 0x72, 0x21, 0xb7, 0x84, 0xd0, 0xd4, 0x9c,
+        0xe3, 0xaa, 0x21, 0x2f, 0x2c, 0x02, 0xa4, 0xe0,
+        0x35, 0xc1, 0x7e, 0x23, 0x29, 0xac, 0xa1, 0x2e,
+        0x21, 0xd5, 0x14, 0xb2, 0x54, 0x66, 0x93, 0x1c,
+        0x7d, 0x8f, 0x6a, 0x5a, 0xac, 0x84, 0xaa, 0x05,
+        0x1b, 0xa3, 0x0b, 0x39, 0x6a, 0x0a, 0xac, 0x97,
+        0x3d, 0x58, 0xe0, 0x91,
+    };
+    static const uint8_t gcm_aad_tag[16] = {
+        0x5b, 0xc9, 0x4f, 0xbc, 0x32, 0x21, 0xa5, 0xdb,
+        0x94, 0xfa, 0xe9, 0x5a, 0xe7, 0x12, 0x1a, 0x47,
+    };
+    const uint32_t dma_src = SAM9X7_DDR_BASE + 0x11800;
+    const uint32_t dma_dst = SAM9X7_DDR_BASE + 0x11900;
+    uint8_t result[64];
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int i;
+
+    pmc_write_pcr(qts, 39, PMC_PCR_EN);
+    aes_configure(qts, AES_MR_SMOD_AUTO | AES_MR_OPMODE_CBC |
+                       AES_MR_CIPHER, key, sizeof(key), iv);
+    qtest_readl(qts, SAM9X7_AES_BASE + AES_ODATAR(0));
+    for (i = 0; i < 2; i++) {
+        aes_process_cpu_block(qts, plaintext + i * 16, result + i * 16);
+    }
+    g_assert_cmpmem(result, sizeof(cbc_ciphertext), cbc_ciphertext,
+                    sizeof(cbc_ciphertext));
+
+    aes_configure(qts, AES_MR_SMOD_AUTO | AES_MR_OPMODE_CTR |
+                       AES_MR_CIPHER, key, sizeof(key), ctr_iv);
+    qtest_readl(qts, SAM9X7_AES_BASE + AES_ODATAR(0));
+    for (i = 0; i < 2; i++) {
+        aes_process_cpu_block(qts, plaintext + i * 16, result + i * 16);
+    }
+    g_assert_cmpmem(result, sizeof(ctr_ciphertext), ctr_ciphertext,
+                    sizeof(ctr_ciphertext));
+
+    aes_configure(qts, AES_MR_SMOD_AUTO | AES_MR_OPMODE_GCM |
+                       AES_MR_GTAGEN | AES_MR_CIPHER,
+                  zero, sizeof(zero), gcm_iv);
+    qtest_writel(qts, SAM9X7_AES_BASE + AES_AADLENR, 0);
+    qtest_writel(qts, SAM9X7_AES_BASE + AES_CLENR, 16);
+    aes_process_cpu_block(qts, zero, result);
+    g_assert_cmpmem(result, 16, gcm_ciphertext, sizeof(gcm_ciphertext));
+    g_assert_true(qtest_readl(qts, SAM9X7_AES_BASE + AES_ISR) &
+                  AES_INT_TAGRDY);
+    aes_read_bytes(qts, AES_TAGR(0), result, 16);
+    g_assert_cmpmem(result, 16, gcm_tag, sizeof(gcm_tag));
+
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    aes_configure(qts, AES_MR_SMOD_DMA | AES_MR_OPMODE_CBC |
+                       AES_MR_CIPHER, key, sizeof(key), iv);
+    qtest_memwrite(qts, dma_src, plaintext, sizeof(plaintext));
+    memset(result, 0, sizeof(result));
+    qtest_memwrite(qts, dma_dst, result, sizeof(result));
+
+    aes_process_dma(qts, dma_src, dma_dst, sizeof(plaintext));
+    qtest_memread(qts, dma_dst, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(plaintext), cbc_ciphertext,
+                    sizeof(cbc_ciphertext));
+
+    /*
+     * Match the Linux GCM path: hash padded AAD through IDATAR, preserve the
+     * intermediate state while switching SMOD, then use paired DMA channels
+     * for a block-padded non-aligned payload.
+     */
+    aes_configure(qts, AES_MR_SMOD_AUTO | AES_MR_OPMODE_GCM |
+                       AES_MR_GTAGEN | AES_MR_CIPHER,
+                  gcm_aad_key, sizeof(gcm_aad_key), gcm_aad_iv);
+    qtest_writel(qts, SAM9X7_AES_BASE + AES_AADLENR, 20);
+    qtest_writel(qts, SAM9X7_AES_BASE + AES_CLENR, 60);
+    for (i = 0; i < 2; i++) {
+        aes_process_cpu_block(qts, gcm_aad + i * 16, result);
+    }
+    qtest_writel(qts, SAM9X7_AES_BASE + AES_MR,
+                 AES_MR_SMOD_DMA | AES_MR_OPMODE_GCM |
+                 AES_MR_GTAGEN | AES_MR_CIPHER);
+    qtest_memwrite(qts, dma_src, gcm_aad_plaintext,
+                   sizeof(gcm_aad_plaintext));
+    memset(result, 0, sizeof(result));
+    qtest_memwrite(qts, dma_dst, result, sizeof(result));
+    aes_process_dma(qts, dma_src, dma_dst, sizeof(gcm_aad_plaintext));
+    qtest_memread(qts, dma_dst, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(gcm_aad_ciphertext),
+                    gcm_aad_ciphertext, sizeof(gcm_aad_ciphertext));
+    g_assert_true(qtest_readl(qts, SAM9X7_AES_BASE + AES_ISR) &
+                  AES_INT_TAGRDY);
+    aes_read_bytes(qts, AES_TAGR(0), result, sizeof(gcm_aad_tag));
+    g_assert_cmpmem(result, sizeof(gcm_aad_tag),
+                    gcm_aad_tag, sizeof(gcm_aad_tag));
+
+    qtest_quit(qts);
+}
+
+static void test_aes_feedback_and_xts(void)
+{
+    static const uint8_t key[16] = {
+        0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+        0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c,
+    };
+    static const uint8_t iv[16] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    };
+    static const uint8_t plaintext[32] = {
+        0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96,
+        0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a,
+        0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c,
+        0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e, 0x51,
+    };
+    static const uint8_t ofb_ciphertext[32] = {
+        0x3b, 0x3f, 0xd9, 0x2e, 0xb7, 0x2d, 0xad, 0x20,
+        0x33, 0x34, 0x49, 0xf8, 0xe8, 0x3c, 0xfb, 0x4a,
+        0x77, 0x89, 0x50, 0x8d, 0x16, 0x91, 0x8f, 0x03,
+        0xf5, 0x3c, 0x52, 0xda, 0xc5, 0x4e, 0xd8, 0x25,
+    };
+    static const uint8_t cfb128_ciphertext[32] = {
+        0x3b, 0x3f, 0xd9, 0x2e, 0xb7, 0x2d, 0xad, 0x20,
+        0x33, 0x34, 0x49, 0xf8, 0xe8, 0x3c, 0xfb, 0x4a,
+        0xc8, 0xa6, 0x45, 0x37, 0xa0, 0xb3, 0xa9, 0x3f,
+        0xcd, 0xe3, 0xcd, 0xad, 0x9f, 0x1c, 0xe5, 0x8b,
+    };
+    static const uint8_t cfb8_ciphertext[32] = {
+        0x3b, 0x79, 0x42, 0x4c, 0x9c, 0x0d, 0xd4, 0x36,
+        0xba, 0xce, 0x9e, 0x0e, 0xd4, 0x58, 0x6a, 0x4f,
+        0x32, 0xb9, 0xde, 0xd5, 0x0a, 0xe3, 0xba, 0x69,
+        0xd4, 0x72, 0xe8, 0x82, 0x67, 0xfb, 0x50, 0x52,
+    };
+    static const uint8_t xts_key1[16] = {
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    };
+    static const uint8_t xts_key2[16] = {
+        0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+        0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+    };
+    static const uint8_t xts_iv[16] = {
+        0x33, 0x33, 0x33, 0x33, 0x33,
+    };
+    static const uint8_t xts_plaintext[32] = {
+        [0 ... 31] = 0x44,
+    };
+    static const uint8_t xts_ciphertext[32] = {
+        0xc4, 0x54, 0x18, 0x5e, 0x6a, 0x16, 0x93, 0x6e,
+        0x39, 0x33, 0x40, 0x38, 0xac, 0xef, 0x83, 0x8b,
+        0xfb, 0x18, 0x6f, 0xff, 0x74, 0x80, 0xad, 0xc4,
+        0x28, 0x93, 0x82, 0xec, 0xd6, 0xd3, 0x94, 0xf0,
+    };
+    uint8_t encrypted_tweak[16];
+    uint8_t register_tweak[16];
+    uint8_t alpha[16] = { 1 };
+    uint8_t result[32];
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int i;
+
+    pmc_write_pcr(qts, 39, PMC_PCR_EN);
+    aes_configure(qts, AES_MR_SMOD_AUTO | AES_MR_OPMODE_OFB |
+                       AES_MR_CIPHER, key, sizeof(key), iv);
+    qtest_readl(qts, SAM9X7_AES_BASE + AES_ODATAR(0));
+    for (i = 0; i < 2; i++) {
+        aes_process_cpu_block(qts, plaintext + i * 16, result + i * 16);
+    }
+    g_assert_cmpmem(result, sizeof(result), ofb_ciphertext,
+                    sizeof(ofb_ciphertext));
+
+    aes_configure(qts, AES_MR_SMOD_AUTO | AES_MR_OPMODE_CFB |
+                       AES_MR_CIPHER, key, sizeof(key), iv);
+    qtest_readl(qts, SAM9X7_AES_BASE + AES_ODATAR(0));
+    for (i = 0; i < 2; i++) {
+        aes_process_cpu_block(qts, plaintext + i * 16, result + i * 16);
+    }
+    g_assert_cmpmem(result, sizeof(result), cfb128_ciphertext,
+                    sizeof(cfb128_ciphertext));
+
+    aes_configure(qts, AES_MR_SMOD_AUTO | AES_MR_OPMODE_CFB |
+                       AES_MR_CFBS_8 | AES_MR_CIPHER,
+                  key, sizeof(key), iv);
+    qtest_readl(qts, SAM9X7_AES_BASE + AES_ODATAR(0));
+    for (i = 0; i < sizeof(plaintext); i++) {
+        aes_process_cpu_bytes(qts, plaintext + i, result + i, 1);
+    }
+    g_assert_cmpmem(result, sizeof(result), cfb8_ciphertext,
+                    sizeof(cfb8_ciphertext));
+
+    aes_configure(qts, AES_MR_SMOD_AUTO | AES_MR_OPMODE_CFB |
+                       AES_MR_CFBS_8, key, sizeof(key), iv);
+    qtest_readl(qts, SAM9X7_AES_BASE + AES_ODATAR(0));
+    for (i = 0; i < sizeof(plaintext); i++) {
+        aes_process_cpu_bytes(qts, cfb8_ciphertext + i, result + i, 1);
+    }
+    g_assert_cmpmem(result, sizeof(result), plaintext, sizeof(plaintext));
+
+    /* Follow the Linux driver's two-key XTS setup, including its byte swap. */
+    aes_configure(qts, AES_MR_SMOD_AUTO | AES_MR_CIPHER,
+                  xts_key2, sizeof(xts_key2), NULL);
+    qtest_readl(qts, SAM9X7_AES_BASE + AES_ODATAR(0));
+    aes_process_cpu_block(qts, xts_iv, encrypted_tweak);
+    for (i = 0; i < sizeof(register_tweak); i++) {
+        register_tweak[i] = encrypted_tweak[15 - i];
+    }
+
+    aes_configure(qts, AES_MR_SMOD_AUTO | AES_MR_OPMODE_XTS |
+                       AES_MR_CIPHER, xts_key1, sizeof(xts_key1), NULL);
+    qtest_readl(qts, SAM9X7_AES_BASE + AES_ODATAR(0));
+    aes_write_bytes(qts, AES_TWR(0), register_tweak,
+                    sizeof(register_tweak));
+    aes_write_bytes(qts, AES_ALPHAR(0), alpha, sizeof(alpha));
+    qtest_writel(qts, SAM9X7_AES_BASE + AES_BCNT,
+                 sizeof(xts_plaintext));
+    for (i = 0; i < 2; i++) {
+        aes_process_cpu_block(qts, xts_plaintext + i * 16,
+                              result + i * 16);
+    }
+    g_assert_cmpmem(result, sizeof(result), xts_ciphertext,
+                    sizeof(xts_ciphertext));
+
+    aes_configure(qts, AES_MR_SMOD_AUTO | AES_MR_OPMODE_XTS,
+                  xts_key1, sizeof(xts_key1), NULL);
+    qtest_readl(qts, SAM9X7_AES_BASE + AES_ODATAR(0));
+    aes_write_bytes(qts, AES_TWR(0), register_tweak,
+                    sizeof(register_tweak));
+    aes_write_bytes(qts, AES_ALPHAR(0), alpha, sizeof(alpha));
+    qtest_writel(qts, SAM9X7_AES_BASE + AES_BCNT,
+                 sizeof(xts_ciphertext));
+    for (i = 0; i < 2; i++) {
+        aes_process_cpu_block(qts, xts_ciphertext + i * 16,
+                              result + i * 16);
+    }
+    g_assert_cmpmem(result, sizeof(result), xts_plaintext,
+                    sizeof(xts_plaintext));
+
+    qtest_quit(qts);
+}
+
 static void test_system_slowclock_pit_reset_and_protection(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -3184,6 +3746,12 @@ int main(int argc, char **argv)
                    test_xdmac_registers_memcpy_and_descriptors);
     qtest_add_func("sam9x75/xdmac/pacing-striding-and-errors",
                    test_xdmac_pacing_striding_and_errors);
+    qtest_add_func("sam9x75/aes/registers-ecb-irq-and-protection",
+                   test_aes_registers_ecb_irq_and_protection);
+    qtest_add_func("sam9x75/aes/chaining-gcm-and-xdmac",
+                   test_aes_chaining_gcm_and_xdmac);
+    qtest_add_func("sam9x75/aes/feedback-and-xts",
+                   test_aes_feedback_and_xts);
     qtest_add_func("sam9x75/system/slowclock-pit-reset-and-protection",
                    test_system_slowclock_pit_reset_and_protection);
     qtest_add_func("sam9x75/rtt/count-alarm-modulo-and-protection",

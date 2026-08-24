@@ -175,9 +175,17 @@ Support matrix
      - Missing
      - Two Bosch M_CAN instances, shared message RAM and CAN bus backends.
    * - Crypto, TRNG, OTP and PUF
-     - Missing
-     - Functional engines, deterministic testing, protected virtual fuse/key
-       state and revision errata without using physical-board secrets.
+     - Initial
+     - AES has 128/192/256-bit keys; ECB, CBC, OFB, CFB8/16/32/64/128, CTR,
+       GCM and XTS processing; manual, automatic and DMA data ports; AIC and
+       XDMAC request wiring; write protection; and migration state.  NIST and
+       IEEE vectors cover chaining, GCM AAD/tag generation, the Linux GCM
+       mode transition and paired XDMAC transfers.  The unmodified Linux
+       driver probes version 0x700 and acquires both DMA channels.  The
+       version value requires hardware confirmation; processing timing,
+       double buffering, auto-padding, the AES/SHA protocol path, private-key
+       bus and security-event behavior remain incomplete.  SHA, TDES, TRNG,
+       OTP and PUF are missing.
    * - Display and camera
      - Missing
      - XLCDC, GFX2D, LVDS, DSI/CSI, MIPI PHY, CSI2DC and ISC backends.
@@ -204,8 +212,9 @@ boot path directly::
 This currently loads unmodified U-Boot, initializes DDR, NAND, MMC and QSPI,
 discovers the LAN8840, and supports DHCP and packet exchange through GEM0.  It
 then loads and enters the Linux image from SD.  The in-memory Linux log reaches
-the RTC, RTT, reset, shutdown-controller and watchdog probes; the next fatal
-probe is the unmodeled AES engine at ``0xf0034000``.  The unmodeled TRNG at
+the RTC, RTT, reset, shutdown-controller and watchdog probes.  The AES driver
+probes version 0x700 and acquires both XDMAC channels; the next fatal probe is
+the unmodeled SHA engine at ``0xf002c000``.  The unmodeled TRNG at
 ``0xf0030000`` also faults its hwrng worker, and the selected FLEXCOM USART
 console remains missing.  RomBOOT itself is also missing; ``-kernel`` is a
 development entry path and not a substitute for ROM media selection.

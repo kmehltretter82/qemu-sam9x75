@@ -87,6 +87,9 @@ config AT91_SHDWC
     bool
     select AT91_SYSC
 
+config AT91_AES
+    bool
+
 config AT91_FLEXCOM
     bool
 
