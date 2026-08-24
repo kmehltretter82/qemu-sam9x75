@@ -265,9 +265,11 @@ Support matrix
      - The populated LEDs and buttons are covered above.  The J9 NAND and J10
        QSPI chip-select jumpers default closed and have machine options with
        functional disconnected states.  The default J38/J39 setting connects
-       PAC1934 to FLEXCOM7.  The remaining power, clock and interface-selection
-       jumpers, mikroBUS, Raspberry Pi header, M.2 and official Microchip
-       overlay attachments remain.
+       PAC1934 to FLEXCOM7; its SoC, USB-bridge and disconnected jumper routes
+       have a machine option and functional SoC-side NACK behavior.  The
+       remaining power, clock and interface-selection jumpers, mikroBUS,
+       Raspberry Pi header, M.2 and official Microchip overlay attachments
+       remain.
 
 Execution roadmap
 -----------------
@@ -338,7 +340,7 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The 63-test board qtest baseline and this boot are clean of SAM9X75 model
+The 64-test board qtest baseline and this boot are clean of SAM9X75 model
 warnings with ``-d unimp,guest_errors``.  Generic SD diagnostics still report
 the expected failed MMC/SDIO probes against a memory-only SD card.  FLEXCOM
 USART children remain missing but are not the selected board console.
@@ -394,6 +396,17 @@ deselected by opening its jumper at machine creation::
 An open J9 makes NAND bus reads return the deselected value and ignores writes.
 An open J10 holds the serial flash chip select inactive while leaving the QSPI
 controller available.
+
+J38 and J39 both default to pins 2--3, routing PAC1934 I2C to FLEXCOM7.  The
+only other valid hardware settings route both jumpers to the external
+MCP2221A USB bridge on pins 1--2 or leave both open.  Select them with::
+
+  -M sam9x75-curiosity,pac1934-route=usb
+  -M sam9x75-curiosity,pac1934-route=off
+
+Both alternatives disconnect the monitor from the SoC and therefore make
+FLEXCOM7 accesses to address ``0x10`` NACK.  The external MCP2221A host USB
+interface is not yet exposed by QEMU.
 
 Completion gates
 ----------------

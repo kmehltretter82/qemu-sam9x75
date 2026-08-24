@@ -1975,6 +1975,30 @@ static void test_pac1934_overflow_alert_and_clear(void)
     qtest_quit(qts);
 }
 
+static void test_pac1934_i2c_jumpers(void)
+{
+    static const char * const routes[] = { "usb", "off" };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(routes); i++) {
+        QTestState *qts = qtest_initf(
+            SAM9X75_MACHINE ",pac1934-route=%s", routes[i]);
+        uint32_t status;
+
+        twi_enable_master(qts, SAM9X7_FLEXCOM7_BASE, SAM9X7_TWI7_BASE);
+        qtest_writel(qts, SAM9X7_TWI7_BASE + TWI_MMR,
+                     TWI_MMR_DADR(PAC1934_I2C_ADDRESS) | TWI_MMR_MREAD |
+                     TWI_MMR_IADRSZ_1);
+        qtest_writel(qts, SAM9X7_TWI7_BASE + TWI_IADR, 0xfd);
+        qtest_writel(qts, SAM9X7_TWI7_BASE + TWI_CR,
+                     TWI_CR_START | TWI_CR_STOP);
+        status = qtest_readl(qts, SAM9X7_TWI7_BASE + TWI_SR);
+        g_assert_true(status & TWI_SR_NACK);
+
+        qtest_quit(qts);
+    }
+}
+
 static void test_flexcom_twi_registers_nack_and_protection(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -6743,6 +6767,8 @@ int main(int argc, char **argv)
                    test_pac1934_measurements_accumulation_and_modes);
     qtest_add_func("sam9x75/board/pac1934-overflow-alert",
                    test_pac1934_overflow_alert_and_clear);
+    qtest_add_func("sam9x75/board/pac1934-i2c-jumpers",
+                   test_pac1934_i2c_jumpers);
     qtest_add_func("sam9x75/pmc/clock-tree-and-protection",
                    test_pmc_clock_tree_and_protection);
     qtest_add_func("sam9x75/pio/reset-gpio-mux-and-protection",

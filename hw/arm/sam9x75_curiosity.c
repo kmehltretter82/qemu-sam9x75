@@ -38,11 +38,18 @@
 OBJECT_DECLARE_SIMPLE_TYPE(SAM9X75CuriosityMachineState,
                            SAM9X75_CURIOSITY_MACHINE)
 
+typedef enum SAM9X75PAC1934Route {
+    SAM9X75_PAC1934_ROUTE_SOC,
+    SAM9X75_PAC1934_ROUTE_USB,
+    SAM9X75_PAC1934_ROUTE_OFF,
+} SAM9X75PAC1934Route;
+
 struct SAM9X75CuriosityMachineState {
     MachineState parent_obj;
 
     bool nand_cs;
     bool qspi_cs;
+    SAM9X75PAC1934Route pac1934_route;
     SAM9X7State *soc;
     struct arm_boot_info boot_info;
 };
@@ -146,6 +153,7 @@ static void sam9x75_curiosity_init(MachineState *machine)
     DeviceState *qspi_flash;
     I2CSlave *pmic;
     I2CSlave *power_monitor;
+    I2CBus *power_monitor_bus;
     DriveInfo *nand_dinfo;
     DriveInfo *qspi_dinfo;
 
@@ -221,7 +229,13 @@ static void sam9x75_curiosity_init(MachineState *machine)
                             &error_abort);
     object_property_set_int(OBJECT(power_monitor), "vbus4-millivolts", 1350,
                             &error_abort);
-    i2c_slave_realize_and_unref(power_monitor, soc->twi[7].bus,
+    if (board->pac1934_route == SAM9X75_PAC1934_ROUTE_SOC) {
+        power_monitor_bus = soc->twi[7].bus;
+    } else {
+        /* J38/J39 routed away from the SoC leave FLEXCOM7 disconnected. */
+        power_monitor_bus = i2c_init_bus(DEVICE(soc), "pac1934-external");
+    }
+    i2c_slave_realize_and_unref(power_monitor, power_monitor_bus,
                                 &error_fatal);
 
     /* PB18 is the PAC1934's bidirectional SLOW/ALERT board signal. */
@@ -274,6 +288,42 @@ static void sam9x75_curiosity_set_qspi_cs(Object *obj, bool value,
     SAM9X75_CURIOSITY_MACHINE(obj)->qspi_cs = value;
 }
 
+static char *sam9x75_curiosity_get_pac1934_route(Object *obj, Error **errp)
+{
+    SAM9X75CuriosityMachineState *board =
+        SAM9X75_CURIOSITY_MACHINE(obj);
+
+    switch (board->pac1934_route) {
+    case SAM9X75_PAC1934_ROUTE_SOC:
+        return g_strdup("soc");
+    case SAM9X75_PAC1934_ROUTE_USB:
+        return g_strdup("usb");
+    case SAM9X75_PAC1934_ROUTE_OFF:
+        return g_strdup("off");
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void sam9x75_curiosity_set_pac1934_route(Object *obj,
+                                                 const char *value,
+                                                 Error **errp)
+{
+    SAM9X75CuriosityMachineState *board =
+        SAM9X75_CURIOSITY_MACHINE(obj);
+
+    if (!strcmp(value, "soc")) {
+        board->pac1934_route = SAM9X75_PAC1934_ROUTE_SOC;
+    } else if (!strcmp(value, "usb")) {
+        board->pac1934_route = SAM9X75_PAC1934_ROUTE_USB;
+    } else if (!strcmp(value, "off")) {
+        board->pac1934_route = SAM9X75_PAC1934_ROUTE_OFF;
+    } else {
+        error_setg(errp, "Invalid PAC1934 route '%s'", value);
+        error_append_hint(errp, "Valid values are soc, usb and off.\n");
+    }
+}
+
 static void sam9x75_curiosity_machine_instance_init(Object *obj)
 {
     SAM9X75CuriosityMachineState *board =
@@ -281,6 +331,7 @@ static void sam9x75_curiosity_machine_instance_init(Object *obj)
 
     board->nand_cs = true;
     board->qspi_cs = true;
+    board->pac1934_route = SAM9X75_PAC1934_ROUTE_SOC;
 }
 
 static void sam9x75_curiosity_machine_reset(MachineState *machine,
@@ -324,6 +375,11 @@ static void sam9x75_curiosity_machine_class_init(ObjectClass *oc,
                                    sam9x75_curiosity_set_qspi_cs);
     object_class_property_set_description(oc, "qspi-cs",
                                           "Connect the J10 QSPI CS jumper");
+    object_class_property_add_str(oc, "pac1934-route",
+                                  sam9x75_curiosity_get_pac1934_route,
+                                  sam9x75_curiosity_set_pac1934_route);
+    object_class_property_set_description(oc, "pac1934-route",
+        "Route both J38/J39 PAC1934 I2C jumpers to soc, usb, or off");
 }
 
 static const TypeInfo sam9x75_curiosity_machine_types[] = {
