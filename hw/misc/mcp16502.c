@@ -181,6 +181,7 @@ static const VMStateDescription vmstate_mcp16502 = {
     .version_id = 1,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
+        VMSTATE_I2C_SLAVE(parent_obj, MCP16502State),
         VMSTATE_UINT8_ARRAY(regs, MCP16502State, MCP16502_NUM_REGS),
         VMSTATE_UINT8(pointer, MCP16502State),
         VMSTATE_UINT8(count, MCP16502State),

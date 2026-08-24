@@ -14,6 +14,7 @@
 #include "hw/i2c/i2c.h"
 #include "hw/misc/mcp16502.h"
 #include "hw/sd/sd.h"
+#include "hw/sensor/pac1934.h"
 #include "hw/ssi/ssi.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
@@ -50,6 +51,7 @@ static void sam9x75_curiosity_init(MachineState *machine)
     MemoryRegion *sysmem = get_system_memory();
     SAM9X7State *soc;
     DeviceState *qspi_flash;
+    I2CSlave *power_monitor;
     DriveInfo *nand_dinfo;
     DriveInfo *qspi_dinfo;
 
@@ -99,6 +101,27 @@ static void sam9x75_curiosity_init(MachineState *machine)
 
     /* U8 is the board's MCP16502TAB-E/S8B power-management IC. */
     i2c_slave_create_simple(soc->twi[6].bus, TYPE_MCP16502_AB, 0x5b);
+
+    /* U12 measures the four main rails through 10-milliohm shunts. */
+    power_monitor = i2c_slave_new(TYPE_PAC1934, 0x10);
+    object_property_add_child(OBJECT(machine), "pac1934",
+                              OBJECT(power_monitor));
+    object_property_set_int(OBJECT(power_monitor), "vbus1-millivolts", 3300,
+                            &error_abort);
+    object_property_set_int(OBJECT(power_monitor), "vbus2-millivolts", 1150,
+                            &error_abort);
+    object_property_set_int(OBJECT(power_monitor), "vbus3-millivolts", 1150,
+                            &error_abort);
+    object_property_set_int(OBJECT(power_monitor), "vbus4-millivolts", 1350,
+                            &error_abort);
+    i2c_slave_realize_and_unref(power_monitor, soc->twi[7].bus,
+                                &error_fatal);
+
+    /* PB18 is the PAC1934's bidirectional SLOW/ALERT board signal. */
+    qdev_connect_gpio_out(DEVICE(&soc->pio[1]), 18,
+        qdev_get_gpio_in_named(DEVICE(power_monitor), "slow", 0));
+    qdev_connect_gpio_out_named(DEVICE(power_monitor), "alert", 0,
+        qdev_get_gpio_in(DEVICE(&soc->pio[1]), 18));
 
     if (sam9x75_curiosity_attach_sd(soc, 0)) {
         /* The Curiosity card-detect switch drives PA23 low when inserted. */

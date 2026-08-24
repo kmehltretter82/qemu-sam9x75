@@ -27,6 +27,8 @@
 #define SAM9X7_CLASSD_BASE      0xf003c000
 #define SAM9X7_FLEXCOM6_BASE    0xf8010000
 #define SAM9X7_TWI6_BASE        (SAM9X7_FLEXCOM6_BASE + 0x600)
+#define SAM9X7_FLEXCOM7_BASE    0xf8014000
+#define SAM9X7_TWI7_BASE        (SAM9X7_FLEXCOM7_BASE + 0x600)
 #define SAM9X7_PIT64B0_BASE     0xf0028000
 #define SAM9X7_TRNG_BASE        0xf0030000
 #define SAM9X7_AES_BASE         0xf0034000
@@ -1128,34 +1130,78 @@ static uint16_t gem_mdio_read(QTestState *qts, unsigned int phy,
     return qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_PHYMNTNC);
 }
 
+static void twi_enable_master(QTestState *qts, uint64_t flexcom_base,
+                              uint64_t twi_base)
+{
+    qtest_writeb(qts, flexcom_base + FLEX_MR, FLEX_MODE_TWI);
+    qtest_writel(qts, twi_base + TWI_CR, TWI_CR_SWRST);
+    qtest_writel(qts, twi_base + TWI_CR,
+                 TWI_CR_MSEN | TWI_CR_SVDIS);
+}
+
+static void twi_read_regs(QTestState *qts, uint64_t twi_base,
+                          uint8_t address, uint8_t reg, uint8_t *data,
+                          size_t length)
+{
+    size_t i;
+
+    g_assert_cmpuint(length, >, 0);
+    qtest_writel(qts, twi_base + TWI_MMR,
+                 TWI_MMR_DADR(address) | TWI_MMR_MREAD |
+                 TWI_MMR_IADRSZ_1);
+    qtest_writel(qts, twi_base + TWI_IADR, reg);
+    qtest_writel(qts, twi_base + TWI_CR,
+                 TWI_CR_START | (length == 1 ? TWI_CR_STOP : 0));
+
+    for (i = 0; i < length; i++) {
+        if (i == length - 1 && length != 1) {
+            qtest_writel(qts, twi_base + TWI_CR, TWI_CR_STOP);
+        }
+        data[i] = qtest_readb(qts, twi_base + TWI_RHR);
+    }
+}
+
+static uint8_t twi_read_reg(QTestState *qts, uint64_t twi_base,
+                            uint8_t address, uint8_t reg)
+{
+    uint8_t value;
+
+    twi_read_regs(qts, twi_base, address, reg, &value, 1);
+    return value;
+}
+
+static void twi_write_reg(QTestState *qts, uint64_t twi_base,
+                          uint8_t address, uint8_t reg, uint8_t value)
+{
+    qtest_writel(qts, twi_base + TWI_MMR,
+                 TWI_MMR_DADR(address) | TWI_MMR_IADRSZ_1);
+    qtest_writel(qts, twi_base + TWI_IADR, reg);
+    qtest_writeb(qts, twi_base + TWI_THR, value);
+    qtest_writel(qts, twi_base + TWI_CR, TWI_CR_STOP);
+}
+
+static void twi_send_byte(QTestState *qts, uint64_t twi_base,
+                          uint8_t address, uint8_t value)
+{
+    qtest_writel(qts, twi_base + TWI_MMR, TWI_MMR_DADR(address));
+    qtest_writeb(qts, twi_base + TWI_THR, value);
+    qtest_writel(qts, twi_base + TWI_CR, TWI_CR_STOP);
+}
+
 static void twi6_enable_master(QTestState *qts)
 {
-    qtest_writeb(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR, FLEX_MODE_TWI);
-    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR, TWI_CR_SWRST);
-    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR,
-                 TWI_CR_MSEN | TWI_CR_SVDIS);
+    twi_enable_master(qts, SAM9X7_FLEXCOM6_BASE, SAM9X7_TWI6_BASE);
 }
 
 static uint8_t twi6_read_reg(QTestState *qts, uint8_t address, uint8_t reg)
 {
-    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_MMR,
-                 TWI_MMR_DADR(address) | TWI_MMR_MREAD |
-                 TWI_MMR_IADRSZ_1);
-    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IADR, reg);
-    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR,
-                 TWI_CR_START | TWI_CR_STOP);
-
-    return qtest_readb(qts, SAM9X7_TWI6_BASE + TWI_RHR);
+    return twi_read_reg(qts, SAM9X7_TWI6_BASE, address, reg);
 }
 
 static void twi6_write_reg(QTestState *qts, uint8_t address, uint8_t reg,
                            uint8_t value)
 {
-    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_MMR,
-                 TWI_MMR_DADR(address) | TWI_MMR_IADRSZ_1);
-    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IADR, reg);
-    qtest_writeb(qts, SAM9X7_TWI6_BASE + TWI_THR, value);
-    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR, TWI_CR_STOP);
+    twi_write_reg(qts, SAM9X7_TWI6_BASE, address, reg, value);
 }
 
 static void test_mcp16502_registers_and_regulators(void)
@@ -1220,6 +1266,232 @@ static void test_mcp16502_registers_and_regulators(void)
     twi6_enable_master(qts);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x02), ==, 0x54);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x40), ==, 0xe3);
+
+    qtest_quit(qts);
+}
+
+#define PAC1934_I2C_ADDRESS         0x10
+#define PAC1934_REFRESH_DELAY_NS    1000000
+
+static uint64_t pac1934_read_be(QTestState *qts, uint8_t reg, size_t length)
+{
+    uint8_t data[6];
+    uint64_t value = 0;
+    size_t i;
+
+    g_assert_cmpuint(length, <=, sizeof(data));
+    twi_read_regs(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, reg,
+                  data, length);
+    for (i = 0; i < length; i++) {
+        value = (value << 8) | data[i];
+    }
+    return value;
+}
+
+static void pac1934_refresh(QTestState *qts, uint8_t command)
+{
+    twi_send_byte(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, command);
+    qtest_clock_step(qts, PAC1934_REFRESH_DELAY_NS);
+}
+
+static void test_pac1934_register_protocol_and_board_wiring(void)
+{
+    static const uint8_t ids[] = { 0x5b, 0x5d, 0x03 };
+    static const uint8_t initial_status[] = {
+        0x00, 0x00, 0x95, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x5b, 0x5d, 0x03,
+    };
+    uint8_t data[76];
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t status;
+    size_t i;
+
+    twi_enable_master(qts, SAM9X7_FLEXCOM7_BASE, SAM9X7_TWI7_BASE);
+
+    twi_read_regs(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0xfd,
+                  data, 3);
+    g_assert_cmpmem(data, 3, ids, sizeof(ids));
+
+    twi_read_regs(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x1c,
+                  data, sizeof(initial_status));
+    g_assert_cmpmem(data, sizeof(initial_status), initial_status,
+                    sizeof(initial_status));
+
+    twi_read_regs(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x02,
+                  data, sizeof(data));
+    for (i = 0; i < sizeof(data); i++) {
+        g_assert_cmphex(data[i], ==, 0);
+    }
+
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOB_BASE + PIO_PDSR) & BIT(18));
+
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x01, 0xff);
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x1c, 0xfa);
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x1d, 0xa5);
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x20, 0xff);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x01), ==, 0xfe);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x1c), ==, 0xfa);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x1d), ==, 0xa5);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x20), ==, 0x9f);
+
+    /* Match the Linux driver's individual configuration writes. */
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x1c, 0x40);
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x1d, 0);
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x20, 0);
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x01, 0x40);
+    twi_send_byte(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x00);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x21), ==, 0);
+    qtest_clock_step(qts, PAC1934_REFRESH_DELAY_NS - 1);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x21), ==, 0);
+    qtest_clock_step(qts, 1);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x21), ==, 0x40);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x22), ==, 0x40);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x24), ==, 0);
+
+    /* A second snapshot associates the results with CH2 disabled. */
+    pac1934_refresh(qts, 0x00);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x24), ==, 0x40);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x25), ==, 0x40);
+
+    /* CH2 is skipped; the following result is CH3, then CH4. */
+    twi_read_regs(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x07,
+                  data, 6);
+    g_assert_cmphex(((uint16_t)data[0] << 8) | data[1], ==,
+                    3300U * 65536 / 32000);
+    g_assert_cmphex(((uint16_t)data[2] << 8) | data[3], ==,
+                    1150U * 65536 / 32000);
+    g_assert_cmphex(((uint16_t)data[4] << 8) | data[5], ==,
+                    1350U * 65536 / 32000);
+
+    /* NO_SKIP returns FF for a disabled channel. */
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x1c, 0x42);
+    twi_read_regs(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x08,
+                  data, 2);
+    g_assert_cmphex(data[0], ==, 0xff);
+    g_assert_cmphex(data[1], ==, 0xff);
+
+    /* SMBus mode prefixes a block with the addressed register's width. */
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x1c, 0x46);
+    twi_read_regs(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x07,
+                  data, 3);
+    g_assert_cmphex(data[0], ==, 2);
+    g_assert_cmphex(((uint16_t)data[1] << 8) | data[2], ==,
+                    3300U * 65536 / 32000);
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x1c, 0x42);
+
+    /* REFRESH_V activates pending settings but does not rewrite LAT. */
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x01, 0xc0);
+    pac1934_refresh(qts, 0x1f);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x21), ==, 0xc0);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x24), ==, 0x40);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x25), ==, 0x40);
+
+    qtest_writel(qts, SAM9X7_TWI7_BASE + TWI_MMR,
+                 TWI_MMR_DADR(PAC1934_I2C_ADDRESS) | TWI_MMR_MREAD |
+                 TWI_MMR_IADRSZ_1);
+    qtest_writel(qts, SAM9X7_TWI7_BASE + TWI_IADR, 0x1b);
+    qtest_writel(qts, SAM9X7_TWI7_BASE + TWI_CR,
+                 TWI_CR_START | TWI_CR_STOP);
+    status = qtest_readl(qts, SAM9X7_TWI7_BASE + TWI_SR);
+    g_assert_true(status & TWI_SR_NACK);
+
+    qtest_system_reset(qts);
+    twi_enable_master(qts, SAM9X7_FLEXCOM7_BASE, SAM9X7_TWI7_BASE);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x20), ==, 0x95);
+    g_assert_cmphex(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                 PAC1934_I2C_ADDRESS, 0x21), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_pac1934_measurements_accumulation_and_modes(void)
+{
+    const uint64_t power = 3300ULL * 1000 * (1U << 28) /
+                           (32000ULL * 100000);
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE " -global pac1934.vsense1-microvolts=1000");
+
+    twi_enable_master(qts, SAM9X7_FLEXCOM7_BASE, SAM9X7_TWI7_BASE);
+
+    pac1934_refresh(qts, 0x00);
+    g_assert_cmphex(pac1934_read_be(qts, 0x07, 2), ==,
+                    3300ULL * 65536 / 32000);
+    g_assert_cmphex(pac1934_read_be(qts, 0x0b, 2), ==,
+                    1000ULL * 65536 / 100000);
+    g_assert_cmphex(pac1934_read_be(qts, 0x17, 4), ==, power << 4);
+
+    qtest_clock_step(qts, 999 * PAC1934_REFRESH_DELAY_NS);
+    pac1934_refresh(qts, 0x00);
+    g_assert_cmphex(pac1934_read_be(qts, 0x02, 3), ==, 1024);
+    g_assert_cmphex(pac1934_read_be(qts, 0x03, 6), ==, power * 1024);
+
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x01, 0xc0);
+    pac1934_refresh(qts, 0x00);
+    qtest_clock_step(qts, 999 * PAC1934_REFRESH_DELAY_NS);
+    pac1934_refresh(qts, 0x00);
+    g_assert_cmphex(pac1934_read_be(qts, 0x02, 3), ==, 8);
+    g_assert_cmphex(pac1934_read_be(qts, 0x03, 6), ==, power * 8);
+
+    /* SLEEP stops conversion; SINGLE contributes exactly one sample. */
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x01, 0xe0);
+    pac1934_refresh(qts, 0x00);
+    qtest_clock_step(qts, 10ULL * 1000 * PAC1934_REFRESH_DELAY_NS);
+    pac1934_refresh(qts, 0x00);
+    g_assert_cmphex(pac1934_read_be(qts, 0x02, 3), ==, 0);
+
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x01, 0xd0);
+    pac1934_refresh(qts, 0x00);
+    pac1934_refresh(qts, 0x00);
+    g_assert_cmphex(pac1934_read_be(qts, 0x02, 3), ==, 1);
+    g_assert_cmphex(pac1934_read_be(qts, 0x03, 6), ==, power);
+
+    qtest_quit(qts);
+}
+
+static void test_pac1934_overflow_alert_and_clear(void)
+{
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -global pac1934.vsense1-microvolts=100000");
+
+    qtest_qmp_assert_success(qts,
+        "{'execute':'qom-set','arguments':{'path':'/machine/pac1934',"
+        "'property':'vbus1-millivolts','value':32000}}");
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PCR,
+                 PMC_PCR_CMD | PMC_PCR_EN | 3);
+    twi_enable_master(qts, SAM9X7_FLEXCOM7_BASE, SAM9X7_TWI7_BASE);
+    twi_write_reg(qts, SAM9X7_TWI7_BASE, PAC1934_I2C_ADDRESS, 0x01,
+                  BIT(3) | BIT(1));
+    pac1934_refresh(qts, 0x00);
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOB_BASE + PIO_PDSR) & BIT(18));
+
+    qtest_clock_step(qts, 1025ULL * 1000 * PAC1934_REFRESH_DELAY_NS);
+    g_assert_true(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                               PAC1934_I2C_ADDRESS, 0x01) & BIT(0));
+    g_assert_false(qtest_readl(qts, SAM9X7_PIOB_BASE + PIO_PDSR) & BIT(18));
+
+    pac1934_refresh(qts, 0x00);
+    g_assert_false(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                                PAC1934_I2C_ADDRESS, 0x01) & BIT(0));
+    g_assert_true(twi_read_reg(qts, SAM9X7_TWI7_BASE,
+                               PAC1934_I2C_ADDRESS, 0x24) & BIT(0));
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOB_BASE + PIO_PDSR) & BIT(18));
 
     qtest_quit(qts);
 }
@@ -5902,6 +6174,12 @@ int main(int argc, char **argv)
                    test_twi_eeprom_transfers_fifo_and_access_width);
     qtest_add_func("sam9x75/board/mcp16502-registers-and-regulators",
                    test_mcp16502_registers_and_regulators);
+    qtest_add_func("sam9x75/board/pac1934-register-protocol-and-wiring",
+                   test_pac1934_register_protocol_and_board_wiring);
+    qtest_add_func("sam9x75/board/pac1934-measurements-and-modes",
+                   test_pac1934_measurements_accumulation_and_modes);
+    qtest_add_func("sam9x75/board/pac1934-overflow-alert",
+                   test_pac1934_overflow_alert_and_clear);
     qtest_add_func("sam9x75/pmc/clock-tree-and-protection",
                    test_pmc_clock_tree_and_protection);
     qtest_add_func("sam9x75/pio/reset-gpio-mux-and-protection",

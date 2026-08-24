@@ -163,8 +163,17 @@ Support matrix
      - Missing
      - OHCI, EHCI, UDPHS, port power, hotplug, gadget mode and SAM-BA path.
    * - I2C board devices
-     - Missing
-     - MCP16502, PAC1934 and board/extension EEPROMs.
+     - Initial
+     - The exact MCP16502TAB-E/S8B PMIC is present on FLEXCOM6 with OTP
+       defaults, writable masks and live regulator status.  FLEXCOM7 carries
+       the PAC1934 with its sparse variable-width register loops, delayed
+       REFRESH/REFRESH_V activation, channel skipping, four voltage inputs,
+       virtual-time power accumulation, overflow signaling, migration state
+       and the shared PB18 SLOW/ALERT connection.  The current-sense inputs
+       default to zero and can be driven through QOM properties for workload
+       or hardware-trace replay.  Conversion-complete alert pulses, SMBus
+       timeout/electrical details, hardware-calibrated telemetry and the
+       board/extension EEPROMs remain.
    * - Timers, ADC, PWM and SSC
      - Initial
      - TC0 has three 32-bit channels, GCLK/MCK-divided/slow-clock selection,
@@ -242,11 +251,11 @@ phase green merely by avoiding it in the device tree.
    negative-path coverage where those concepts apply.  The full board qtest
    suite and a boot with ``-d unimp,guest_errors`` are mandatory regression
    gates after every slice.
-#. **Finish the populated base board.**  Model the MCP16502 regulators and
-   PAC1934 power monitor on FLEXCOM6/7, then expose the RGB LED, user button,
-   reset/start controls and the board's fixed straps.  Exercise the exact
-   upstream board DT without QEMU-only changes, including regulator state,
-   IIO telemetry and suspend/resume.
+#. **Finish the populated base board.**  The MCP16502 regulators and PAC1934
+   power monitor are modeled on FLEXCOM6/7.  Next expose the RGB LED, user
+   button, reset/start controls and the board's fixed straps.  Exercise the
+   exact upstream board DT without QEMU-only changes, including regulator
+   state, IIO telemetry and suspend/resume.
 #. **Complete reusable data paths.**  Add the USART and SPI personalities to
    all applicable FLEXCOM instances, complete TWI client/SMBus/PEC/FIFO
    behavior, and wire every documented XDMAC request.  Complete SSC, TC1,
@@ -296,7 +305,7 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The 51-test board qtest baseline and this boot are clean of SAM9X75 model
+The 55-test board qtest baseline and this boot are clean of SAM9X75 model
 warnings with ``-d unimp,guest_errors``.  Generic SD diagnostics still report
 the expected failed MMC/SDIO probes against a memory-only SD card.  FLEXCOM
 USART children remain missing but are not the selected board console.
