@@ -37,6 +37,7 @@
 #include "hw/misc/at91_sysc.h"
 #include "hw/misc/at91_trng.h"
 #include "hw/net/cadence_gem.h"
+#include "hw/nvram/at91_otpc.h"
 #include "hw/rtc/at91_rtc.h"
 #include "hw/sd/at91_sdhci.h"
 #include "hw/ssi/at91_ospi.h"
@@ -80,6 +81,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_SDMMC1_BASE           0x90000000
 
 /* User peripherals. */
+#define SAM9X7_OTPC_BASE             0xeff00000
 #define SAM9X7_XDMAC_BASE            0xf0008000
 #define SAM9X7_QSPI_BASE             0xf0014000
 #define SAM9X7_I2SMCC_BASE           0xf001c000
@@ -135,6 +137,7 @@ struct SAM9X7State {
     AT91I2SMCCState i2smcc;
     AT91DBGUState dbgu;
     AT91BSCState bsc;
+    AT91OTPCState otpc;
     AT91MatrixState matrix;
     AT91PMCState pmc;
     AT91PMECCState pmecc;

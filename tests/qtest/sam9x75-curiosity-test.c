@@ -24,6 +24,7 @@
 #define SAM9X7_QSPI_MEM_BASE    0x60000000
 #define SAM9X7_SDMMC0_BASE      0x80000000
 #define SAM9X7_SDMMC1_BASE      0x90000000
+#define SAM9X7_OTPC_BASE        0xeff00000
 #define SAM9X7_XDMAC_BASE       0xf0008000
 #define SAM9X7_QSPI_BASE        0xf0014000
 #define SAM9X7_I2SMCC_BASE      0xf001c000
@@ -573,6 +574,81 @@
 #define BSC_CR                  0x00
 #define BSC_CR_BOOT_MASK        0x00000007
 #define BSC_CR_WPKEY            0x66830000
+
+#define OTPC_CR                 0x00
+#define OTPC_MR                 0x04
+#define OTPC_AR                 0x08
+#define OTPC_SR                 0x0c
+#define OTPC_IER                0x10
+#define OTPC_IDR                0x14
+#define OTPC_IMR                0x18
+#define OTPC_ISR                0x1c
+#define OTPC_HR                 0x20
+#define OTPC_DR                 0x24
+#define OTPC_BAR                0x30
+#define OTPC_CAR                0x34
+#define OTPC_LRMR               0x40
+#define OTPC_UHC0R              0x50
+#define OTPC_UHC1R              0x54
+#define OTPC_UID0R              0x60
+#define OTPC_UID1R              0x64
+#define OTPC_UID2R              0x68
+#define OTPC_UID3R              0x6c
+#define OTPC_WPMR               0xe4
+#define OTPC_WPSR               0xe8
+
+#define OTPC_CR_PGM             BIT(0)
+#define OTPC_CR_CKSGEN          BIT(1)
+#define OTPC_CR_INVLD           BIT(2)
+#define OTPC_CR_HIDE            BIT(4)
+#define OTPC_CR_READ            BIT(6)
+#define OTPC_CR_FLUSH           BIT(7)
+#define OTPC_CR_KBSTART         BIT(8)
+#define OTPC_CR_REFRESH         BIT(15)
+#define OTPC_CR_KEY             0x71670000
+#define OTPC_LRMR_KEY           0x73640000
+#define OTPC_MR_UHCRRDIS        BIT(0)
+#define OTPC_MR_NPCKT           BIT(4)
+#define OTPC_MR_EMUL            BIT(7)
+#define OTPC_MR_RDDIS           BIT(8)
+#define OTPC_MR_WRDIS           BIT(9)
+#define OTPC_MR_LOCK            BIT(15)
+#define OTPC_MR_ADDR(addr)      ((uint32_t)(addr) << 16)
+#define OTPC_AR_INCRT           BIT(16)
+#define OTPC_SR_ONEF            BIT(9)
+#define OTPC_SR_EMUL            BIT(3)
+#define OTPC_INT_PGERR          BIT(4)
+#define OTPC_INT_LKERR          BIT(5)
+#define OTPC_INT_IVERR          BIT(6)
+#define OTPC_INT_WERR           BIT(7)
+#define OTPC_INT_EOR            BIT(8)
+#define OTPC_INT_EOF            BIT(9)
+#define OTPC_INT_EOH            BIT(10)
+#define OTPC_INT_EORF           BIT(11)
+#define OTPC_INT_CKERR          BIT(12)
+#define OTPC_INT_COERR          BIT(13)
+#define OTPC_INT_HDERR          BIT(14)
+#define OTPC_INT_KBERR          BIT(16)
+#define OTPC_INT_SECE           BIT(28)
+#define OTPC_PACKET_REGULAR     1
+#define OTPC_PACKET_KEY         2
+#define OTPC_PACKET_BOOT        3
+#define OTPC_PACKET_SECURE_BOOT 4
+#define OTPC_PACKET_HARDWARE    5
+#define OTPC_PACKET_CUSTOM      6
+#define OTPC_HEADER(type, size) (BIT(7) | ((size) << 8) | (type))
+#define OTPC_WPMR_WPCFEN        BIT(0)
+#define OTPC_WPMR_WPITEN        BIT(1)
+#define OTPC_WPMR_WPCTEN        BIT(2)
+#define OTPC_WPMR_FIRSTE        BIT(4)
+#define OTPC_WPMR_KEY           0x4f545000
+#define OTPC_WPSR_WPVS          BIT(0)
+#define OTPC_WPSR_SWE           BIT(3)
+#define OTPC_WPSR_SWETYP(type)  ((type) << 24)
+#define OTPC_WPSR_READ_WO       0
+#define OTPC_WPSR_WRITE_RO      1
+#define OTPC_WPSR_KEY_ERROR     3
+#define OTPC_WPSR_ECLASS        BIT(31)
 
 #define PMC_PLL_CTRL0           0x0c
 #define PMC_PLL_CTRL1           0x10
@@ -7669,6 +7745,668 @@ static void test_bsc_migration(void)
     qtest_quit(to);
 }
 
+static void test_otpc_registers_protection_and_irq(void)
+{
+    const uint32_t protection = OTPC_WPMR_WPCFEN |
+                                OTPC_WPMR_WPITEN |
+                                OTPC_WPMR_WPCTEN;
+    const uint32_t unsupported_errors = OTPC_INT_PGERR |
+                                        OTPC_INT_LKERR |
+                                        OTPC_INT_IVERR |
+                                        OTPC_INT_HDERR |
+                                        OTPC_INT_KBERR;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+
+    aic_configure(qts, 46, AIC_SMR_LEVEL_HIGH | 3, 0x2e2e2e2e);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_MR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_AR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_BAR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_CAR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_LRMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UHC0R), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UHC1R), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UID0R), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UID1R), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UID2R), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UID3R), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR), ==, 0);
+
+    /* Refreshing the blank OTP area completes without a corruption error. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_IER,
+                 OTPC_INT_EORF | OTPC_INT_SECE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_IMR), ==,
+                    OTPC_INT_EORF | OTPC_INT_SECE);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EORF);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==, 0);
+
+    /* The prescribed max-address probe finds no ones in QEMU's blank OTP. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_ADDR(UINT16_MAX));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==, 0);
+    g_assert_false(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
+                   OTPC_SR_ONEF);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOR);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, 0);
+
+    /* Invalid register access reports a warning-class software event. */
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_CR), ==, 0);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR);
+    g_assert_cmphex(value & (OTPC_WPSR_SWE |
+                             OTPC_WPSR_SWETYP(0xf) |
+                             OTPC_WPSR_ECLASS), ==,
+                    OTPC_WPSR_SWE |
+                    OTPC_WPSR_SWETYP(OTPC_WPSR_READ_WO));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR) & 0xf,
+                    ==, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_SECE);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
+
+    /* LRMR uses its own key but does not classify a bad key as CR/WPMR SWE. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_LRMR, 0x13);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_LRMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR) & 0xf,
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_LRMR,
+                 OTPC_LRMR_KEY | 0x13);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_LRMR), ==,
+                    0x13);
+
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_SR, UINT32_MAX);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR);
+    g_assert_cmphex(value & (OTPC_WPSR_SWE |
+                             OTPC_WPSR_SWETYP(0xf) |
+                             OTPC_WPSR_ECLASS), ==,
+                    OTPC_WPSR_SWE |
+                    OTPC_WPSR_SWETYP(OTPC_WPSR_WRITE_RO));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR) & 0xf,
+                    ==, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_SECE);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
+
+    /* A wrong WPMR key is rejected and reported as a software error. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_WPMR, protection);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPMR), ==, 0);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR);
+    g_assert_cmphex(value & (OTPC_WPSR_SWE |
+                             OTPC_WPSR_SWETYP(0xf) |
+                             OTPC_WPSR_ECLASS), ==,
+                    OTPC_WPSR_SWE |
+                    OTPC_WPSR_SWETYP(OTPC_WPSR_KEY_ERROR) |
+                    OTPC_WPSR_ECLASS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR) & 0xf,
+                    ==, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_SECE);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
+
+    /* Unsupported permanent operations report their modeled failure bits. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_IER, unsupported_errors);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_CKSGEN);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_INVLD);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_HIDE);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_KBSTART);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    unsupported_errors);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
+
+    /* FIRSTE also selects the first software error in an error series. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_WPMR,
+                 OTPC_WPMR_KEY | OTPC_WPMR_FIRSTE);
+    qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_CR);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_WPMR, 0);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR);
+    g_assert_cmphex(value & (OTPC_WPSR_SWE |
+                             OTPC_WPSR_SWETYP(0xf) |
+                             OTPC_WPSR_ECLASS), ==,
+                    OTPC_WPSR_SWE |
+                    OTPC_WPSR_SWETYP(OTPC_WPSR_READ_WO));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR) & 0xf,
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_SECE);
+
+    /* Without FIRSTE, the last software error in the series wins. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_WPMR, OTPC_WPMR_KEY);
+    qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_CR);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_WPMR, 0);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR);
+    g_assert_cmphex(value & (OTPC_WPSR_SWE |
+                             OTPC_WPSR_SWETYP(0xf) |
+                             OTPC_WPSR_ECLASS), ==,
+                    OTPC_WPSR_SWE |
+                    OTPC_WPSR_SWETYP(OTPC_WPSR_KEY_ERROR) |
+                    OTPC_WPSR_ECLASS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR) & 0xf,
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_SECE);
+
+    /* FIRSTE retains the first protected register in an error series. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_WPMR,
+                 OTPC_WPMR_KEY | protection | OTPC_WPMR_FIRSTE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPMR), ==,
+                    protection | OTPC_WPMR_FIRSTE);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_EMUL);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_IER, OTPC_INT_EOR);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR);
+    g_assert_true(value & OTPC_WPSR_WPVS);
+    g_assert_cmphex(value & 0x00ffff00, ==, OTPC_MR << 8);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR) & 0xf,
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_MR), ==, 0);
+    g_assert_false(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_IMR) &
+                   OTPC_INT_EOR);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_SECE);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
+
+    /* With FIRSTE clear, the last protected register is reported. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_WPMR,
+                 OTPC_WPMR_KEY | protection);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_EMUL);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_IER, OTPC_INT_EOR);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR);
+    g_assert_true(value & OTPC_WPSR_WPVS);
+    g_assert_cmphex(value & 0x00ffff00, ==, OTPC_CR << 8);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR) & 0xf,
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_MR), ==, 0);
+    g_assert_false(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_IMR) &
+                   OTPC_INT_EOR);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_SECE);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
+
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_WPMR, OTPC_WPMR_KEY);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_IDR, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_IMR), ==, 0);
+
+    /* WRDIS covers DR, while hardware owns protected HR fields. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_NPCKT | OTPC_MR_WRDIS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_HR,
+                 (UINT32_MAX & ~7U) | OTPC_PACKET_CUSTOM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                    0x0000ff86);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, 0xfeed9750);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_FLUSH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOF);
+
+    /* MR.LOCK freezes configuration and packet commands until reset. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_LOCK | OTPC_MR_EMUL | OTPC_MR_NPCKT |
+                 OTPC_MR_ADDR(3));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_MR), ==,
+                    OTPC_MR_LOCK | OTPC_MR_EMUL | OTPC_MR_NPCKT |
+                    OTPC_MR_ADDR(3));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_MR), ==,
+                    OTPC_MR_LOCK | OTPC_MR_EMUL | OTPC_MR_NPCKT |
+                    OTPC_MR_ADDR(3));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_HR,
+                 (UINT32_MAX & ~7U) | OTPC_PACKET_CUSTOM);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, 0xfeed9750);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                    0x0000ff86);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==,
+                    0xfeed9750);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_otpc_emulation_scan_and_read(void)
+{
+    const uint32_t boot_header = OTPC_HEADER(OTPC_PACKET_BOOT, 17);
+    const uint32_t secure_header =
+        OTPC_HEADER(OTPC_PACKET_SECURE_BOOT, 7);
+    const uint32_t hardware_header =
+        OTPC_HEADER(OTPC_PACKET_HARDWARE, 1);
+    const uint32_t custom_header = OTPC_HEADER(OTPC_PACKET_CUSTOM, 0);
+    const uint32_t key_header = OTPC_HEADER(OTPC_PACKET_KEY, 0);
+    const uint32_t uhc1_raw = 0xabc04420;
+    const uint32_t uhc1 = 0x00004420;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+
+    /* Two boot packets exercise last-special-wins during the area scan. */
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 0 * 4, boot_header);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 1 * 4, 0x11111111);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 19 * 4, custom_header);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 20 * 4, 0xdead0001);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 21 * 4, hardware_header);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 22 * 4, 0x5a);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 23 * 4, uhc1_raw);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 24 * 4,
+                 OTPC_HEADER(OTPC_PACKET_HARDWARE, 0) | (3U << 4));
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 25 * 4, 0xc0570001);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 26 * 4, boot_header);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 27 * 4, 0xfeed9750);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 45 * 4, secure_header);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 46 * 4, 0x5ec00001);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 54 * 4, key_header);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 55 * 4, 0x01234567);
+
+    /* BSC only instructs RomBOOT; it does not directly enable OTPC mode. */
+    qtest_writel(qts, SAM9X7_BSC_BASE + BSC_CR, BSC_CR_WPKEY | 1);
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BSC_BASE + BSC_CR), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE), ==, boot_header);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
+                    OTPC_SR_EMUL, ==, 0);
+
+    qtest_irq_intercept_out_named(qts, "/machine/soc/otpc", "sysbus-irq");
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_IER,
+                 OTPC_INT_EORF | OTPC_INT_EOR | OTPC_INT_EOF);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_EMUL);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
+                    OTPC_SR_EMUL, ==, 0);
+
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_REFRESH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
+                    OTPC_SR_EMUL, ==, 0);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR);
+    g_assert_cmphex(value & (OTPC_WPSR_SWE |
+                             OTPC_WPSR_SWETYP(0xf) |
+                             OTPC_WPSR_ECLASS), ==,
+                    OTPC_WPSR_SWE |
+                    OTPC_WPSR_SWETYP(OTPC_WPSR_KEY_ERROR) |
+                    OTPC_WPSR_ECLASS);
+    g_assert_false(qtest_get_irq(qts, 0));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_SECE);
+
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
+                    OTPC_SR_EMUL, ==, OTPC_SR_EMUL);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_BAR), ==,
+                    (45U << 16) | 26);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_CAR), ==, 19);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UHC0R), ==,
+                    0x5a);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UHC1R), ==,
+                    uhc1);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EORF);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    /* A max-address read returns raw bits at the prospective packet tail. */
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 56 * 4, 0);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 57 * 4, 0x80000000);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_EMUL | OTPC_MR_ADDR(UINT16_MAX));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==,
+                    0x80000000);
+    g_assert_true(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
+                  OTPC_SR_ONEF);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOR);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 56 * 4, OTPC_PACKET_REGULAR);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 57 * 4, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                    OTPC_PACKET_REGULAR);
+    g_assert_false(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
+                   OTPC_SR_ONEF);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOR);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 56 * 4, 0);
+
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_EMUL | OTPC_MR_UHCRRDIS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UHC0R), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UHC1R), ==, 0);
+
+    /* An address inside the payload resolves to its containing packet. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_EMUL | OTPC_MR_ADDR(27));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                    boot_header);
+    g_assert_true(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
+                  OTPC_SR_ONEF);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==,
+                    0xfeed9750);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_AR), ==, 1);
+
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, OTPC_AR_INCRT | 1);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_AR), ==,
+                    OTPC_AR_INCRT | 2);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, OTPC_AR_INCRT | 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==,
+                    0x12345678);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_AR), ==,
+                    OTPC_AR_INCRT | 1);
+
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_EMUL | OTPC_MR_ADDR(27) | OTPC_MR_WRDIS);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, 0x87654321);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, OTPC_AR_INCRT | 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==,
+                    0x12345678);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_EMUL | OTPC_MR_ADDR(27) |
+                 OTPC_MR_WRDIS | OTPC_MR_RDDIS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==, 0);
+
+    /* KEY payload data is never exposed through the system bus. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_EMUL | OTPC_MR_ADDR(55));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                    key_header);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==, 0);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR);
+    g_assert_true(value & OTPC_INT_EOR);
+
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_FLUSH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOF);
+
+    /* UHC1.UPGDIS makes the packet PGM command nonfunctional. */
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 23 * 4, uhc1_raw | BIT(1));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UHC1R), ==,
+                    uhc1 | BIT(1));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EORF);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==, 0);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 23 * 4, uhc1_raw);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EORF);
+
+    /* UHC1.URDDIS makes the packet READ command nonfunctional. */
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 23 * 4, uhc1_raw | BIT(0));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UHC1R), ==,
+                    uhc1 | BIT(0));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EORF);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_EMUL | OTPC_MR_ADDR(27));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==, 0);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 23 * 4, uhc1_raw);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EORF);
+
+    /* UHC1.URFDIS still permits refresh while emulation is active. */
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 23 * 4,
+                 uhc1_raw | BIT(17));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UHC1R), ==,
+                    uhc1 | BIT(17));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EORF);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EORF);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 23 * 4, uhc1_raw);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EORF);
+
+    /* MR.EMUL is only a request; REFRESH latches the active backing area. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
+                  OTPC_SR_EMUL);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    g_assert_false(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
+                   OTPC_SR_EMUL);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_BAR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_CAR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UHC0R), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UHC1R), ==, 0);
+    qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR);
+
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_EMUL);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    g_assert_true(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
+                  OTPC_SR_EMUL);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_BAR), ==,
+                    (45U << 16) | 26);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_CAR), ==, 19);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UHC0R), ==,
+                    0x5a);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UHC1R), ==,
+                    uhc1);
+
+    qtest_quit(qts);
+}
+
+static void test_otpc_corruption_bounds_and_reset(void)
+{
+    const uint32_t regular_header =
+        OTPC_HEADER(OTPC_PACKET_REGULAR, 0);
+    const uint32_t largest_packet =
+        OTPC_HEADER(OTPC_PACKET_REGULAR, UINT8_MAX);
+    const uint32_t bad_specials[] = {
+        OTPC_HEADER(OTPC_PACKET_BOOT, 16),
+        OTPC_HEADER(OTPC_PACKET_SECURE_BOOT, 6),
+        OTPC_HEADER(OTPC_PACKET_HARDWARE, 0),
+    };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+    size_t i;
+
+    /* A nonblank header without ONE is corrupt and stops the scan. */
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 0 * 4, regular_header);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 1 * 4, 0x11112222);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 2 * 4, OTPC_PACKET_REGULAR);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 3 * 4, 0xa5a50001);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 4 * 4, regular_header);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_EMUL);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR);
+    g_assert_true(value & OTPC_INT_COERR);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                    OTPC_PACKET_REGULAR);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_MR) &
+                    OTPC_MR_ADDR(UINT16_MAX), ==, OTPC_MR_ADDR(2));
+
+    /* Corruption repair exposes SIZE payload words plus the next header. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                    OTPC_PACKET_REGULAR);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==,
+                    0xa5a50001);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==,
+                    regular_header);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOR);
+
+    /* The three fixed-format special packets require their exact sizes. */
+    for (i = 0; i < ARRAY_SIZE(bad_specials); i++) {
+        qtest_writel(qts, SAM9X7_SRAM1_BASE, bad_specials[i]);
+        qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                     OTPC_CR_KEY | OTPC_CR_REFRESH);
+        value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR);
+        g_assert_true(value & OTPC_INT_COERR);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                        bad_specials[i]);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_MR) &
+                        OTPC_MR_ADDR(UINT16_MAX), ==, 0);
+    }
+
+    /* QEMU defensively reports an out-of-SRAM packet extent as COERR. */
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 0 * 4, largest_packet);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 257 * 4, largest_packet);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 514 * 4, largest_packet);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 771 * 4, largest_packet);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR);
+    g_assert_true(value & OTPC_INT_COERR);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                    largest_packet);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_MR) &
+                    OTPC_MR_ADDR(UINT16_MAX), ==, OTPC_MR_ADDR(771));
+
+    /* Ordinary QEMU system reset returns to OTP mode and retains SRAM1. */
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_MR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_BAR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 771 * 4), ==,
+                    largest_packet);
+
+    qtest_quit(qts);
+}
+
+static void test_otpc_migration(void)
+{
+    const char *args = SAM9X75_MACHINE;
+    const uint32_t regular_header =
+        OTPC_HEADER(OTPC_PACKET_REGULAR, 0);
+    const uint32_t custom_header = OTPC_HEADER(OTPC_PACKET_CUSTOM, 1);
+    const uint32_t pending = OTPC_INT_EORF | OTPC_INT_EOR | OTPC_INT_SECE;
+    QTestState *from = qtest_init(args);
+    QTestState *to = qtest_initf("%s -incoming defer", args);
+    uint32_t value;
+
+    qtest_writel(from, SAM9X7_SRAM1_BASE + 0 * 4, regular_header);
+    qtest_writel(from, SAM9X7_SRAM1_BASE + 1 * 4, 0x11112222);
+    qtest_writel(from, SAM9X7_SRAM1_BASE + 2 * 4, custom_header);
+    qtest_writel(from, SAM9X7_SRAM1_BASE + 3 * 4, 0x33445566);
+    qtest_writel(from, SAM9X7_SRAM1_BASE + 4 * 4, 0x778899aa);
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_IER, pending);
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_EMUL);
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_EMUL | OTPC_MR_ADDR(3));
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_OTPC_BASE + OTPC_DR), ==,
+                    0x33445566);
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_WPMR,
+                 OTPC_WPMR_KEY | OTPC_WPMR_FIRSTE);
+    qtest_readl(from, SAM9X7_OTPC_BASE + OTPC_CR);
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_LOCK | OTPC_MR_EMUL | OTPC_MR_ADDR(3));
+
+    qtest_irq_intercept_out_named(to, "/machine/soc/otpc", "sysbus-irq");
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_true(qtest_get_irq(to, 0));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_MR), ==,
+                    OTPC_MR_LOCK | OTPC_MR_EMUL | OTPC_MR_ADDR(3));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_SR) &
+                    OTPC_SR_EMUL, ==, OTPC_SR_EMUL);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_CAR), ==, 2);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                    custom_header);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_AR), ==, 1);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_IMR), ==,
+                    pending);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_WPMR), ==,
+                    OTPC_WPMR_FIRSTE);
+    value = qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_WPSR);
+    g_assert_cmphex(value & (OTPC_WPSR_SWE |
+                             OTPC_WPSR_SWETYP(0xf) |
+                             OTPC_WPSR_ECLASS), ==,
+                    OTPC_WPSR_SWE |
+                    OTPC_WPSR_SWETYP(OTPC_WPSR_READ_WO));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_WPSR) & 0xf,
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_DR), ==,
+                    0x778899aa);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_AR), ==, 2);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SRAM1_BASE + 4 * 4), ==,
+                    0x778899aa);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    pending);
+    g_assert_false(qtest_get_irq(to, 0));
+
+    qtest_writel(to, SAM9X7_OTPC_BASE + OTPC_IER, OTPC_INT_EOF);
+    qtest_writel(to, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_FLUSH);
+    g_assert_true(qtest_get_irq(to, 0));
+    qtest_system_reset(to);
+    g_assert_false(qtest_get_irq(to, 0));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_MR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_AR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_SR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_WPMR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_WPSR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_CAR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_ISR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SRAM1_BASE + 4 * 4), ==,
+                    0x778899aa);
+
+    qtest_quit(from);
+    qtest_quit(to);
+}
+
 static void test_gpbr_protection_and_retention(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -8883,6 +9621,13 @@ int main(int argc, char **argv)
     qtest_add_func("sam9x75/bsc/key-retention-and-factory-reset",
                    test_bsc_key_retention_and_factory_reset);
     qtest_add_func("sam9x75/bsc/migration", test_bsc_migration);
+    qtest_add_func("sam9x75/otpc/registers-protection-and-irq",
+                   test_otpc_registers_protection_and_irq);
+    qtest_add_func("sam9x75/otpc/emulation-scan-and-read",
+                   test_otpc_emulation_scan_and_read);
+    qtest_add_func("sam9x75/otpc/corruption-bounds-and-reset",
+                   test_otpc_corruption_bounds_and_reset);
+    qtest_add_func("sam9x75/otpc/migration", test_otpc_migration);
     qtest_add_func("sam9x75/gpbr/protection-and-retention",
                    test_gpbr_protection_and_retention);
     qtest_add_func("sam9x75/gpbr/tamper-clear",

@@ -500,6 +500,16 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     }
     memory_region_add_subregion(s->memory, SAM9X7_SRAM1_BASE, &s->sram1);
 
+    object_property_set_link(OBJECT(&s->otpc), "emulation-memory",
+                             OBJECT(&s->sram1), &error_abort);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->otpc), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->otpc), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_OTPC_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->otpc), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 46));
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->dbgu), errp)) {
         return;
     }
@@ -574,6 +584,8 @@ static void sam9x7_init(Object *obj)
     object_initialize_child(obj, "sysc", &s->sysc, TYPE_AT91_SYSCWP);
 
     object_initialize_child(obj, "bsc", &s->bsc, TYPE_AT91_BSC);
+
+    object_initialize_child(obj, "otpc", &s->otpc, TYPE_AT91_OTPC);
 
     object_initialize_child(obj, "matrix", &s->matrix, TYPE_AT91_MATRIX);
 

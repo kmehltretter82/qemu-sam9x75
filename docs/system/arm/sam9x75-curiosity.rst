@@ -78,9 +78,9 @@ Support matrix
        migrates.  The boot chapter calls bit 0
        ``EMUL_EN`` while the controller chapter and 2026 Microchip device pack
        call the complete field ``BOOT[2:0]``; values 2--7 need hardware
-       characterization.  Genuine-image validation, OTPC-backed media
-       selection, authentication/error fallbacks and revision errata remain
-       incomplete.
+       characterization.  Genuine-image validation, RomBOOT use of the
+       modeled OTPC contents for media selection, authentication/error
+       fallbacks and revision errata remain incomplete.
    * - Bus MATRIX
      - Initial
      - All 14 host and 12 client configuration/priority banks, remap control,
@@ -92,10 +92,10 @@ Support matrix
        not yet modeled.
    * - SRAM and DDR3L
      - Initial
-     - 64 KiB SRAM0, 4 KiB SRAM1 and fixed 256 MiB DDR mapped.  The BSC
-       request for RomBOOT to use SRAM1 as OTP emulation storage is modeled,
-       but OTPC mode control, packet parsing and access redirection are not
-       yet implemented.  MPDDRC
+     - 64 KiB SRAM0, 4 KiB SRAM1 and fixed 256 MiB DDR mapped.  SRAM1 can hold
+       the OTPC emulation packet chain selected by ``MR.EMUL`` and a keyed
+       ``REFRESH`` command.  The BSC request is state that RomBOOT reads; there
+       is deliberately no direct BSC-to-OTPC hardware signal.  MPDDRC
        configuration, refresh, error reporting, interrupts and write
        protection have an initial register model; DDR timing/training remains
        missing.
@@ -311,9 +311,35 @@ Support matrix
        timing, paired DMA and TX-only CBC-MAC.  The unmodified Linux driver
        probes version 0x700 and acquires both DMA channels.  XTEA register-word
        ordering and timing, the version value, private-key bus, tamper and
-       fault-injection behavior require hardware confirmation.  The BSC
-       request to RomBOOT is modeled; the OTPC packet engine, OTP contents,
-       private-key paths and PUF are missing.
+       fault-injection behavior require hardware confirmation.  OTPC is
+       mapped at ``0xeff00000`` with a blank 10 KiB in-memory physical OTP
+       array.  The array and controller state migrate, but the array has no
+       persistent backend and starts blank on each QEMU launch.  ``MR.EMUL``
+       records whether emulation is requested; only a correctly keyed
+       ``REFRESH`` makes that request active and updates ``SR.EMUL``.  Active
+       emulation parses a packet chain from the 4 KiB SRAM1.  Regular, key,
+       boot, secure-boot, hardware and custom packet types are recognized,
+       with the last applicable special packet supplying ``BAR``, ``CAR`` and
+       ``UHC`` values.  The initial subset covers reads, temporary writes,
+       flush, interrupts, write protection, migration and the maximum-address
+       pre-programming probe, which exposes raw bits at the prospective packet
+       tail.  Corrupt-header reads also expose the documented extra next-header
+       word; a SIZE=255 packet cannot expose a 257th temporary word through the
+       hardware's 8-bit ``DADDR`` field.  Permanent programming, invalidation,
+       hiding, checksum
+       generation/checking, private-key-bus delivery, a persistent backend and
+       command timing are not implemented.  Locked packets therefore report a
+       checksum error and are not interpreted as special packets.  The
+       documented UHC read, program and refresh disables are enforced; the
+       physical-OTP refresh-disable case cannot be qtested until that backing
+       array is externally seedable.  OTPC peripheral-clock gating still needs
+       hardware characterization because the data sheet asks software to
+       enable the peripheral clock while its identifier table gives instance
+       46 no PMC clock-control bit.
+       Unsupported destructive commands are non-destructive and report errors
+       through the modeled status and interrupt paths.  The BSC and OTPC
+       remain independent hardware blocks: RomBOOT software reads BSC state
+       and then configures OTPC.  PUF is missing.
    * - Display and camera
      - Missing
      - XLCDC, GFX2D, LVDS, DSI/CSI, MIPI PHY, CSI2DC and ISC backends.
@@ -373,9 +399,9 @@ phase green merely by avoiding it in the device tree.
    Prove host storage/input, gadget/SAM-BA and CAN-FD traffic with existing
    QEMU USB and CAN backends.
 #. **Complete high-bandwidth and security blocks.**  Add XLCDC, GFX2D, ISC,
-   CSI2DC, MIPI CSI/DSI PHY and LVDS endpoints, followed by OTPC and PUF.
-   Close documented crypto, TRNG, audio and GEM/PTP/TSN corner cases rather
-   than treating successful driver probes as completion.
+   CSI2DC, MIPI CSI/DSI PHY and LVDS endpoints, complete the initial OTPC
+   model, and add PUF.  Close documented crypto, TRNG, audio and GEM/PTP/TSN
+   corner cases rather than treating successful driver probes as completion.
 #. **Differentially validate on hardware.**  Run the same bare-metal probes,
    firmware, DTB and Linux tests on the Curiosity LAN Kit and QEMU.  Compare
    reset values, reserved-bit behavior, interrupt timing, DMA ordering,
@@ -410,7 +436,7 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The 87-test board qtest baseline and this boot are clean of SAM9X75 model
+The 91-test board qtest baseline and this boot are clean of SAM9X75 model
 warnings with ``-d unimp,guest_errors``.  Generic SD diagnostics still report
 the expected failed MMC/SDIO probes against a memory-only SD card.  ``-kernel``
 remains a development entry path and is not a substitute for ROM media
@@ -437,13 +463,17 @@ example::
 
   -global at91-bsc.factory-boot-sequence=1
 
-This models the retained BSC request available to RomBOOT after reset.  It
-does not yet make SRAM1 a functional OTP packet store; that requires the OTPC
-packet parser and access-redirection model.  On physical hardware, first read
-and record the factory value, then confirm the key, write mask, reset-latch
-and VDDBU-loss behavior with a recovery path available.  In particular,
-values 2--7 must not be programmed until their undocumented boot effects have
-been established safely.
+This models the retained BSC request that RomBOOT reads after reset.  It does
+not directly switch the OTPC: there is no BSC-to-OTPC hardware signal.  Guest
+software requests SRAM1 emulation with ``OTPC_MR.EMUL`` and then issues a
+correctly keyed ``OTPC_CR.REFRESH``.  The requested and active states are
+separate, and ``OTPC_SR.EMUL`` reports the active state after refresh.
+
+Real-hardware validation must start with the SRAM1 emulation path.  Re-read
+``OTPC_SR.EMUL`` immediately before issuing any command that could be
+destructive on silicon, and do not program the board's factory OTP array.
+Likewise, BSC values 2--7 must not be programmed until their undocumented
+boot effects have been established safely with a recovery path available.
 
 The pinned Linux ``i2c-at91`` driver probes the FLEXCOM6 FIFO and obtains its
 XDMAC channels.  Byte-width DMA, including an unaligned 13-byte transfer,

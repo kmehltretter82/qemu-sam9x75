@@ -5,6 +5,9 @@ config AT24C
     bool
     depends on I2C
 
+config AT91_OTPC
+    bool
+
 config MAC_NVRAM
     bool
     select CHRP_NVRAM
