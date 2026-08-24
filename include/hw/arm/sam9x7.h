@@ -7,6 +7,7 @@
 #ifndef HW_ARM_SAM9X7_H
 #define HW_ARM_SAM9X7_H
 
+#include "hw/audio/at91_classd.h"
 #include "hw/audio/at91_i2smcc.h"
 #include "hw/block/at91_nand.h"
 #include "hw/char/at91_dbgu.h"
@@ -79,6 +80,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_TRNG_BASE             0xf0030000
 #define SAM9X7_AES_BASE              0xf0034000
 #define SAM9X7_TDES_BASE             0xf0038000
+#define SAM9X7_CLASSD_BASE           0xf003c000
 #define SAM9X7_PIT64B1_BASE          0xf0040000
 #define SAM9X7_TCB_BASE              0xf8008000
 #define SAM9X7_SFR_BASE              0xf8050000
@@ -120,6 +122,7 @@ struct SAM9X7State {
     AT91SHAState sha;
     AT91TDESState tdes;
     AT91TRNGState trng;
+    AT91CLASSDState classd;
     AT91I2SMCCState i2smcc;
     AT91DBGUState dbgu;
     AT91PMCState pmc;

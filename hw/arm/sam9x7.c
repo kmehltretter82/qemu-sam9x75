@@ -232,6 +232,16 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     qdev_connect_gpio_out_named(DEVICE(&s->i2smcc), "rx-request", 0,
         qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 37));
 
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->classd), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->classd), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_CLASSD_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->classd), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 42));
+    qdev_connect_gpio_out_named(DEVICE(&s->classd), "tx-request", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 35));
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->pit), errp)) {
         return;
     }
@@ -524,6 +534,12 @@ static void sam9x7_init(Object *obj)
                           qdev_get_clock_out(DEVICE(&s->pmc), "pclk[34]"));
     qdev_connect_clock_in(DEVICE(&s->i2smcc), "gclk",
                           qdev_get_clock_out(DEVICE(&s->pmc), "gclk[34]"));
+
+    object_initialize_child(obj, "classd", &s->classd, TYPE_AT91_CLASSD);
+    qdev_connect_clock_in(DEVICE(&s->classd), "pclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "pclk[42]"));
+    qdev_connect_clock_in(DEVICE(&s->classd), "gclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "gclk[42]"));
 
     object_initialize_child(obj, "sfr", &s->sfr, TYPE_AT91_SFR);
 

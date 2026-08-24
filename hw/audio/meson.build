@@ -1,4 +1,5 @@
 system_ss.add(files('model.c'))
+system_ss.add(when: 'CONFIG_AT91_CLASSD', if_true: files('at91_classd.c'))
 system_ss.add(when: 'CONFIG_AT91_I2SMCC', if_true: files('at91_i2smcc.c'))
 system_ss.add(when: 'CONFIG_AC97', if_true: files('ac97.c'))
 system_ss.add(when: 'CONFIG_ADLIB', if_true: files('fmopl.c', 'adlib.c'))

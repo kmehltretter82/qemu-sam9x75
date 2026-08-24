@@ -23,6 +23,7 @@
 #define SAM9X7_QSPI_BASE        0xf0014000
 #define SAM9X7_I2SMCC_BASE      0xf001c000
 #define SAM9X7_SHA_BASE         0xf002c000
+#define SAM9X7_CLASSD_BASE      0xf003c000
 #define SAM9X7_FLEXCOM6_BASE    0xf8010000
 #define SAM9X7_TWI6_BASE        (SAM9X7_FLEXCOM6_BASE + 0x600)
 #define SAM9X7_PIT64B0_BASE     0xf0028000
@@ -249,6 +250,31 @@
 #define I2SMCC_WPMR_WPCTEN      BIT(2)
 #define I2SMCC_WPMR_KEY         0x49325300
 #define I2SMCC_WPSR_WPVS        BIT(0)
+
+#define CLASSD_CR                0x00
+#define CLASSD_MR                0x04
+#define CLASSD_INTPMR            0x08
+#define CLASSD_INTSR             0x0c
+#define CLASSD_THR               0x10
+#define CLASSD_IER               0x14
+#define CLASSD_IDR               0x18
+#define CLASSD_IMR               0x1c
+#define CLASSD_ISR               0x20
+#define CLASSD_WPMR              0xe4
+
+#define CLASSD_CR_SWRST          BIT(0)
+#define CLASSD_MR_LEN            BIT(0)
+#define CLASSD_MR_REN            BIT(4)
+#define CLASSD_MR_MASK           0x00310133
+#define CLASSD_MR_RESET          0x00010022
+#define CLASSD_INTPMR_DSPCLKFREQ BIT(16)
+#define CLASSD_INTPMR_FRAME(n)   ((n) << 20)
+#define CLASSD_INTPMR_MASK       0x7f7d7f7f
+#define CLASSD_INTPMR_RESET      0x00304e4e
+#define CLASSD_INTSR_CFGERR      BIT(0)
+#define CLASSD_INT_DATRDY        BIT(0)
+#define CLASSD_WPMR_WPEN         BIT(0)
+#define CLASSD_WPMR_KEY          0x434c4400
 
 #define RTC_CR                  0x00
 #define RTC_MR                  0x04
@@ -1417,6 +1443,24 @@ static void pmc_configure_pll(QTestState *qts, unsigned int id)
                  selector | PMC_PLL_UPDT_UPDATE);
 }
 
+static void pmc_configure_audio_pll(QTestState *qts)
+{
+    const uint32_t selector = 2 | (0x3fU << 16);
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT, selector);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_ACR, 0x00020010);
+    /* 24 MHz * (3 + 1 + 0.096) = 98.304 MHz. */
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_CTRL1,
+                 (3U << 24) | 0x624dd);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT,
+                 selector | PMC_PLL_UPDT_UPDATE);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_CTRL0,
+                 PMC_PLL_CTRL0_ENLOCK | PMC_PLL_CTRL0_ENPLL |
+                 PMC_PLL_CTRL0_ENPLLCK);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT,
+                 selector | PMC_PLL_UPDT_UPDATE);
+}
+
 static void pmc_write_pcr(QTestState *qts, unsigned int id, uint32_t config)
 {
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PCR,
@@ -2352,6 +2396,153 @@ static void test_i2smcc_tdm_compact_and_mono(void)
     status = qtest_readl(qts, SAM9X7_I2SMCC_BASE + I2SMCC_ISRA);
     g_assert_true(status & I2SMCC_INT_RXLOVF);
     g_assert_false(status & I2SMCC_INT_RXROVF);
+
+    qtest_quit(qts);
+}
+
+static void test_classd_registers_and_protection(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_MR), ==,
+                    CLASSD_MR_RESET);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_CLASSD_BASE + CLASSD_INTPMR), ==,
+                    CLASSD_INTPMR_RESET);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_CLASSD_BASE + CLASSD_INTSR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_THR), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_IMR), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_ISR), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_WPMR), ==,
+                    0);
+
+    qtest_writel(qts, SAM9X7_CLASSD_BASE + CLASSD_MR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_CLASSD_BASE + CLASSD_INTPMR, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_MR), ==,
+                    CLASSD_MR_MASK);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_CLASSD_BASE + CLASSD_INTPMR), ==,
+                    CLASSD_INTPMR_MASK);
+
+    qtest_writel(qts, SAM9X7_CLASSD_BASE + CLASSD_THR, 0xa5a55a5a);
+    qtest_writew(qts, SAM9X7_CLASSD_BASE + CLASSD_THR, 0x1122);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_THR), ==,
+                    0xa5a51122);
+
+    qtest_writel(qts, SAM9X7_CLASSD_BASE + CLASSD_IER, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_IMR), ==,
+                    CLASSD_INT_DATRDY);
+    qtest_writel(qts, SAM9X7_CLASSD_BASE + CLASSD_IDR, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_IMR), ==,
+                    0);
+
+    qtest_writel(qts, SAM9X7_CLASSD_BASE + CLASSD_WPMR,
+                 0x12345600 | CLASSD_WPMR_WPEN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_WPMR), ==,
+                    0);
+    qtest_writel(qts, SAM9X7_CLASSD_BASE + CLASSD_WPMR,
+                 CLASSD_WPMR_KEY | CLASSD_WPMR_WPEN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_WPMR), ==,
+                    CLASSD_WPMR_WPEN);
+    qtest_writel(qts, SAM9X7_CLASSD_BASE + CLASSD_MR, 0);
+    qtest_writel(qts, SAM9X7_CLASSD_BASE + CLASSD_INTPMR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_MR), ==,
+                    CLASSD_MR_MASK);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_CLASSD_BASE + CLASSD_INTPMR), ==,
+                    CLASSD_INTPMR_MASK);
+
+    qtest_writel(qts, SAM9X7_CLASSD_BASE + CLASSD_CR, CLASSD_CR_SWRST);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_MR), ==,
+                    CLASSD_MR_RESET);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_CLASSD_BASE + CLASSD_INTPMR), ==,
+                    CLASSD_INTPMR_RESET);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_WPMR), ==,
+                    0);
+
+    qtest_quit(qts);
+}
+
+static void test_classd_timing_irq_and_xdmac(void)
+{
+    const uint32_t tx_source = SAM9X7_DDR_BASE + 0xf400;
+    const uint32_t samples[] = {
+        cpu_to_le32(0x11223344),
+        cpu_to_le32(0x55667788),
+        cpu_to_le32(0x99aabbcc),
+    };
+    const uint64_t channel = XDMAC_CHANNEL(0);
+    const uint64_t sample_period = DIV_ROUND_UP(1000000000ULL, 48000);
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    pmc_configure_audio_pll(qts);
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    pmc_write_pcr(qts, 42, PMC_PCR_EN | (6U << 8) | PMC_PCR_GCKEN);
+    g_assert_cmpuint(get_clock_period(qts,
+                                     "/machine/soc/pmc/gclk[42]"), ==,
+                     CLOCK_PERIOD_FROM_HZ(98303998));
+
+    qtest_writel(qts, SAM9X7_CLASSD_BASE + CLASSD_INTPMR,
+                 CLASSD_INTPMR_FRAME(6));
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_CLASSD_BASE + CLASSD_INTSR), ==,
+                    CLASSD_INTSR_CFGERR);
+    qtest_writel(qts, SAM9X7_CLASSD_BASE + CLASSD_INTPMR,
+                 CLASSD_INTPMR_FRAME(3));
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_CLASSD_BASE + CLASSD_INTSR), ==, 0);
+
+    aic_configure(qts, 42, AIC_SMR_LEVEL_HIGH | 7, 0x42004200);
+    qtest_writel(qts, SAM9X7_CLASSD_BASE + CLASSD_IER,
+                 CLASSD_INT_DATRDY);
+
+    qtest_memwrite(qts, tx_source, samples, sizeof(samples));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CSA,
+                 tx_source);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CDA,
+                 SAM9X7_CLASSD_BASE + CLASSD_THR);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC,
+                 G_N_ELEMENTS(samples));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_DSYNC_MEM2PER |
+                 XDMAC_CC_PERID(35) | XDMAC_CC_DWIDTH_WORD |
+                 XDMAC_CC_SAM_INC);
+
+    qtest_writel(qts, SAM9X7_CLASSD_BASE + CLASSD_MR,
+                 CLASSD_MR_LEN | CLASSD_MR_REN);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(10));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(0));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_THR), ==,
+                    0x11223344);
+
+    qtest_clock_step(qts, sample_period);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(0));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_THR), ==,
+                    0x55667788);
+    qtest_clock_step(qts, sample_period);
+    xdmac_waitl(qts, XDMAC_GS, BIT(0), 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_THR), ==,
+                    0x99aabbcc);
+
+    g_assert_true(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_ISR) &
+                  CLASSD_INT_DATRDY);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(10));
+    qtest_clock_step(qts, sample_period);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(10));
+    g_assert_true(qtest_readl(qts, SAM9X7_CLASSD_BASE + CLASSD_ISR) &
+                  CLASSD_INT_DATRDY);
+
+    pmc_write_pcr(qts, 42, PMC_PCR_EN | (2U << 8) | PMC_PCR_GCKEN);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_CLASSD_BASE + CLASSD_INTSR), ==,
+                    CLASSD_INTSR_CFGERR);
+    qtest_writel(qts, SAM9X7_CLASSD_BASE + CLASSD_MR, 0);
 
     qtest_quit(qts);
 }
@@ -5377,6 +5568,10 @@ int main(int argc, char **argv)
                    test_i2smcc_loopback_timing_and_xdmac);
     qtest_add_func("sam9x75/i2smcc/tdm-compact-and-mono",
                    test_i2smcc_tdm_compact_and_mono);
+    qtest_add_func("sam9x75/classd/registers-and-protection",
+                   test_classd_registers_and_protection);
+    qtest_add_func("sam9x75/classd/timing-irq-and-xdmac",
+                   test_classd_timing_irq_and_xdmac);
     qtest_add_func("sam9x75/aic/dbgu-integration",
                    test_aic_dbgu_integration);
     qtest_add_func("sam9x75/aic/priority-and-nesting",

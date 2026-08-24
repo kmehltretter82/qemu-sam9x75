@@ -182,6 +182,7 @@ config SAM9X7
     select AT91_TRNG
     select AT91_XDMAC
     select AT91_AIC
+    select AT91_CLASSD
     select AT91_DBGU
     select AT91_FLEXCOM
     select AT91_I2SMCC
