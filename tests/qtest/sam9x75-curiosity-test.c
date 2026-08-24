@@ -19,6 +19,7 @@
 #define SAM9X7_DDR_BASE         0x20000000
 #define SAM9X7_NAND_BASE        0x30000000
 #define SAM9X7_QSPI_MEM_BASE    0x60000000
+#define SAM9X7_SDMMC0_BASE      0x80000000
 #define SAM9X7_XDMAC_BASE       0xf0008000
 #define SAM9X7_QSPI_BASE        0xf0014000
 #define SAM9X7_I2SMCC_BASE      0xf001c000
@@ -54,6 +55,40 @@
 #define SAM9X7_PIOD_BASE        0xfffffa00
 #define SAM9X7_PMC_BASE         0xfffffc00
 #define SAM9X7_WDT_BASE         0xffffff80
+
+#define SDHCI_BLKSIZE           0x04
+#define SDHCI_BLKCNT            0x06
+#define SDHCI_ARGUMENT          0x08
+#define SDHCI_TRNMOD            0x0c
+#define SDHCI_CMDREG            0x0e
+#define SDHCI_RSPREG0           0x10
+#define SDHCI_HOSTCTL           0x28
+#define SDHCI_CLKCON            0x2c
+#define SDHCI_SWRST             0x2f
+#define SDHCI_NORINTSTS         0x30
+#define SDHCI_ERRINTSTS         0x32
+#define SDHCI_NORINTSTSEN       0x34
+#define SDHCI_ERRINTSTSEN       0x36
+#define SDHCI_ADMAERR           0x54
+#define SDHCI_ADMASYSADDR       0x58
+
+#define SDHCI_TRNS_DMA          BIT(0)
+#define SDHCI_TRNS_BLK_CNT_EN   BIT(1)
+#define SDHCI_TRNS_READ         BIT(4)
+#define SDHCI_CMD_RESPONSE      3
+#define SDHCI_CMD_DATA_PRESENT  BIT(5)
+#define SDHCI_CTRL_ADMA2_32     BIT(4)
+#define SDHCI_CLOCK_ENABLE      (BIT(2) | BIT(1) | BIT(0))
+#define SDHCI_RESET_ALL         BIT(0)
+#define SDHCI_INT_CMD_COMPLETE  BIT(0)
+#define SDHCI_INT_XFER_COMPLETE BIT(1)
+#define SDHCI_INT_ERROR         BIT(15)
+#define SDHCI_ERR_ADMA          BIT(9)
+
+#define SDHCI_CMD_INDEX(index)  ((index) << 8)
+#define SDHCI_ADMA2_VALID       BIT(0)
+#define SDHCI_ADMA2_END         BIT(1)
+#define SDHCI_ADMA2_TRAN        BIT(5)
 
 #define CLOCK_PERIOD_1SEC       (1000000000ULL << 32)
 #define CLOCK_PERIOD_FROM_HZ(hz) \
@@ -5250,6 +5285,105 @@ static void test_wdt_events_and_system_irq(void)
     qtest_quit(qts);
 }
 
+static void sdhci_issue_command(QTestState *qts, uint16_t block_size,
+                                uint16_t block_count, uint32_t argument,
+                                uint16_t transfer_mode, uint16_t command)
+{
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_BLKSIZE, block_size);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_BLKCNT, block_count);
+    qtest_writel(qts, SAM9X7_SDMMC0_BASE + SDHCI_ARGUMENT, argument);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_TRNMOD, transfer_mode);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_CMDREG, command);
+}
+
+static void test_sdhci_adma2_linux_nop_terminator(void)
+{
+    const uint64_t descriptor_addr = SAM9X7_DDR_BASE + 0x1000;
+    const uint64_t data_addr = SAM9X7_DDR_BASE + 0x2000;
+    g_autofree char *sd_path = NULL;
+    uint8_t expected[512];
+    uint8_t actual[512];
+    QTestState *qts;
+    GError *error = NULL;
+    uint16_t rca;
+    int fd;
+    int ret;
+    size_t i;
+
+    for (i = 0; i < sizeof(expected); i++) {
+        expected[i] = i ^ 0xa5;
+    }
+
+    fd = g_file_open_tmp("sam9x75-sdhci-XXXXXX", &sd_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = write(fd, expected, sizeof(expected));
+    g_assert_cmpint(ret, ==, sizeof(expected));
+    ret = ftruncate(fd, 1 << 20);
+    g_assert_cmpint(ret, ==, 0);
+    close(fd);
+
+    qts = qtest_initf(SAM9X75_MACHINE
+                      " -drive file=%s,if=sd,format=raw,auto-read-only=off",
+                      sd_path);
+
+    qtest_writeb(qts, SAM9X7_SDMMC0_BASE + SDHCI_SWRST,
+                 SDHCI_RESET_ALL);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_CLKCON,
+                 SDHCI_CLOCK_ENABLE);
+
+    /* Bring the SD card to transfer state. */
+    sdhci_issue_command(qts, 0, 0, 0, 0, SDHCI_CMD_INDEX(55));
+    sdhci_issue_command(qts, 0, 0, 0x41200000, 0,
+                        SDHCI_CMD_INDEX(41));
+    sdhci_issue_command(qts, 0, 0, 0, 0, SDHCI_CMD_INDEX(2));
+    sdhci_issue_command(qts, 0, 0, 0, 0,
+                        SDHCI_CMD_INDEX(3) | SDHCI_CMD_RESPONSE);
+    rca = qtest_readl(qts, SAM9X7_SDMMC0_BASE + SDHCI_RSPREG0) >> 16;
+    sdhci_issue_command(qts, 0, 0, (uint32_t)rca << 16, 0,
+                        SDHCI_CMD_INDEX(7) | SDHCI_CMD_RESPONSE);
+
+    qtest_writeb(qts, SAM9X7_SDMMC0_BASE + SDHCI_HOSTCTL,
+                 SDHCI_CTRL_ADMA2_32);
+    qtest_writel(qts, descriptor_addr,
+                 (512U << 16) | SDHCI_ADMA2_TRAN | SDHCI_ADMA2_VALID);
+    qtest_writel(qts, descriptor_addr + 4, data_addr);
+    qtest_writel(qts, descriptor_addr + 8,
+                 SDHCI_ADMA2_END | SDHCI_ADMA2_VALID);
+    qtest_writel(qts, descriptor_addr + 12, 0);
+    qtest_writel(qts, SAM9X7_SDMMC0_BASE + SDHCI_ADMASYSADDR,
+                 descriptor_addr);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_NORINTSTSEN,
+                 SDHCI_INT_CMD_COMPLETE | SDHCI_INT_XFER_COMPLETE);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_ERRINTSTSEN,
+                 SDHCI_ERR_ADMA);
+
+    /* Linux terminates ADMA2 tables with a valid END/NOP descriptor. */
+    sdhci_issue_command(qts, sizeof(expected), 1, 0,
+                        SDHCI_TRNS_DMA | SDHCI_TRNS_BLK_CNT_EN |
+                        SDHCI_TRNS_READ,
+                        SDHCI_CMD_INDEX(17) | SDHCI_CMD_DATA_PRESENT |
+                        SDHCI_CMD_RESPONSE);
+    qtest_clock_step(qts, 1000);
+
+    g_assert_cmphex(qtest_readb(qts, SAM9X7_SDMMC0_BASE + SDHCI_ADMAERR),
+                    ==, 0);
+    g_assert_cmphex(qtest_readw(qts,
+                               SAM9X7_SDMMC0_BASE + SDHCI_ERRINTSTS) &
+                    SDHCI_ERR_ADMA, ==, 0);
+    g_assert_cmphex(qtest_readw(qts,
+                               SAM9X7_SDMMC0_BASE + SDHCI_NORINTSTS) &
+                    SDHCI_INT_ERROR, ==, 0);
+    g_assert_cmphex(qtest_readw(qts,
+                               SAM9X7_SDMMC0_BASE + SDHCI_NORINTSTS) &
+                    SDHCI_INT_XFER_COMPLETE, !=, 0);
+    qtest_memread(qts, data_addr, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+
+    qtest_quit(qts);
+    unlink(sd_path);
+}
+
 static void nand_command(QTestState *qts, uint8_t command)
 {
     qtest_writeb(qts, NAND_CLE, command);
@@ -5646,6 +5780,8 @@ int main(int argc, char **argv)
                    test_wdt_reset_disable_and_lock);
     qtest_add_func("sam9x75/wdt/events-and-system-irq",
                    test_wdt_events_and_system_irq);
+    qtest_add_func("sam9x75/sdhci/adma2-linux-nop-terminator",
+                   test_sdhci_adma2_linux_nop_terminator);
     qtest_add_func("sam9x75/nand/identification-program-and-erase",
                    test_nand_identification_program_and_erase);
     qtest_add_func("sam9x75/smc-pmecc/registers",
