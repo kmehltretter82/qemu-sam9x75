@@ -24,6 +24,7 @@
 #define SAM9X7_TWI6_BASE        (SAM9X7_FLEXCOM6_BASE + 0x600)
 #define SAM9X7_PIT64B0_BASE     0xf0028000
 #define SAM9X7_PIT64B1_BASE     0xf0040000
+#define SAM9X7_TCB_BASE         0xf8008000
 #define SAM9X7_GMAC_BASE        0xf802c000
 #define SAM9X7_SFR_BASE         0xf8050000
 #define SAM9X7_PMECC_BASE       0xffffe000
@@ -303,6 +304,36 @@
 #define PIT64B_INT_OVRE         BIT(1)
 #define PIT64B_WPMR_WPEN        BIT(0)
 #define PIT64B_WPMR_KEY         0x50495400
+
+#define TCB_CCR                 0x00
+#define TCB_CMR                 0x04
+#define TCB_CV                  0x10
+#define TCB_RC                  0x1c
+#define TCB_SR                  0x20
+#define TCB_IER                 0x24
+#define TCB_IDR                 0x28
+#define TCB_IMR                 0x2c
+#define TCB_CSR                 0x34
+#define TCB_SSR                 0x38
+#define TCB_BCR                 0xc0
+#define TCB_BMR                 0xc4
+#define TCB_QIMR                0xd0
+#define TCB_WPMR                0xe4
+#define TCB_CHANNEL(n)          ((n) * 0x40)
+
+#define TCB_CCR_CLKEN           BIT(0)
+#define TCB_CCR_CLKDIS          BIT(1)
+#define TCB_CCR_SWTRG           BIT(2)
+#define TCB_CMR_CLOCK2          1
+#define TCB_CMR_CPCSTOP         BIT(6)
+#define TCB_CMR_WAVESEL_UP_RC   (2U << 13)
+#define TCB_CMR_WAVE            BIT(15)
+#define TCB_INT_CPCS            BIT(4)
+#define TCB_SR_CLKSTA           BIT(16)
+#define TCB_WPMR_WPEN           BIT(0)
+#define TCB_WPMR_WPITEN         BIT(1)
+#define TCB_WPMR_WPCREN         BIT(2)
+#define TCB_WPMR_KEY            0x54494d00
 
 #define PIO_PER                 0x000
 #define PIO_PDR                 0x004
@@ -1363,6 +1394,102 @@ static void test_pit64b_timing_gating_and_irq(void)
     qtest_quit(qts);
 }
 
+static void test_tcb_clocksource_clockevent_and_protection(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint64_t ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
+    uint64_t ch1 = SAM9X7_TCB_BASE + TCB_CHANNEL(1);
+    uint64_t ch2 = SAM9X7_TCB_BASE + TCB_CHANNEL(2);
+    uint32_t value;
+
+    g_assert_cmphex(qtest_readl(qts, ch0 + TCB_CMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, ch1 + TCB_CMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, ch2 + TCB_CMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, ch0 + TCB_CV), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, ch0 + TCB_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TCB_BASE + TCB_BMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TCB_BASE + TCB_QIMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TCB_BASE + TCB_WPMR), ==, 0);
+
+    /* Select the 12 MHz main clock so short qtest steps exercise MCK/8. */
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MCKR, 1);
+    aic_configure(qts, 17, AIC_SMR_LEVEL_HIGH | 3, 0x17171717);
+    qtest_writel(qts, ch0 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE);
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+
+    /* A reset-gated peripheral clock leaves an enabled counter frozen. */
+    qtest_clock_step(qts, 100000);
+    g_assert_cmphex(qtest_readl(qts, ch0 + TCB_CV), ==, 0);
+    g_assert_true(qtest_readl(qts, ch0 + TCB_CSR) & TCB_SR_CLKSTA);
+
+    pmc_write_pcr(qts, 17, PMC_PCR_EN);
+    g_assert_cmpuint(get_clock_period(qts,
+                                     "/machine/soc/pmc/pclk[17]"), !=, 0);
+    qtest_clock_step(qts, 100000);
+    value = qtest_readl(qts, ch0 + TCB_CV);
+    g_assert_cmpuint(value, >, 0);
+
+    pmc_write_pcr(qts, 17, 0);
+    value = qtest_readl(qts, ch0 + TCB_CV);
+    qtest_clock_step(qts, 100000);
+    g_assert_cmphex(qtest_readl(qts, ch0 + TCB_CV), ==, value);
+    pmc_write_pcr(qts, 17, PMC_PCR_EN);
+    qtest_clock_step(qts, 100000);
+    g_assert_cmpuint(qtest_readl(qts, ch0 + TCB_CV), >, value);
+
+    qtest_writel(qts, SAM9X7_TCB_BASE + TCB_BCR, 1);
+    g_assert_cmpuint(qtest_readl(qts, ch0 + TCB_CV), <=, 1);
+
+    /* Channel 2 is the Linux periodic and one-shot clockevent source. */
+    qtest_writel(qts, ch2 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE |
+                 TCB_CMR_WAVESEL_UP_RC);
+    qtest_writel(qts, ch2 + TCB_RC, 4);
+    qtest_writel(qts, ch2 + TCB_IER, TCB_INT_CPCS);
+    g_assert_cmphex(qtest_readl(qts, ch2 + TCB_IMR), ==, TCB_INT_CPCS);
+    qtest_writel(qts, ch2 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_clock_step(qts, 10000);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(17));
+    value = qtest_readl(qts, ch2 + TCB_SR);
+    g_assert_true(value & TCB_INT_CPCS);
+    g_assert_true(value & TCB_SR_CLKSTA);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(17));
+
+    qtest_writel(qts, ch2 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_CPCSTOP | TCB_CMR_WAVE |
+                 TCB_CMR_WAVESEL_UP_RC);
+    qtest_writel(qts, ch2 + TCB_RC, 6);
+    qtest_writel(qts, ch2 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_clock_step(qts, 10000);
+    g_assert_true(qtest_readl(qts, ch2 + TCB_SR) & TCB_INT_CPCS);
+    g_assert_true(qtest_readl(qts, ch2 + TCB_CSR) & TCB_SR_CLKSTA);
+    qtest_clock_step(qts, 10000);
+    g_assert_false(qtest_readl(qts, ch2 + TCB_SR) & TCB_INT_CPCS);
+    qtest_writel(qts, ch2 + TCB_CCR, TCB_CCR_CLKDIS);
+    g_assert_false(qtest_readl(qts, ch2 + TCB_CSR) & TCB_SR_CLKSTA);
+
+    qtest_writel(qts, SAM9X7_TCB_BASE + TCB_WPMR,
+                 TCB_WPMR_KEY | TCB_WPMR_WPEN | TCB_WPMR_WPITEN |
+                 TCB_WPMR_WPCREN);
+    qtest_writel(qts, ch1 + TCB_CMR, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, ch1 + TCB_CMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, ch1 + TCB_SSR), ==,
+                    ((TCB_CHANNEL(1) + TCB_CMR) << 8) | 1);
+    qtest_writel(qts, ch2 + TCB_IER, TCB_INT_CPCS);
+    g_assert_cmphex(qtest_readl(qts, ch2 + TCB_IMR), ==, TCB_INT_CPCS);
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKDIS);
+    g_assert_true(qtest_readl(qts, ch0 + TCB_CSR) & TCB_SR_CLKSTA);
+
+    qtest_writel(qts, SAM9X7_TCB_BASE + TCB_WPMR, TCB_WPMR_KEY);
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKDIS);
+    g_assert_false(qtest_readl(qts, ch0 + TCB_CSR) & TCB_SR_CLKSTA);
+    qtest_writel(qts, ch2 + TCB_IDR, TCB_INT_CPCS);
+    g_assert_cmphex(qtest_readl(qts, ch2 + TCB_IMR), ==, 0);
+
+    qtest_quit(qts);
+}
+
 static void test_system_slowclock_pit_reset_and_protection(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -2069,6 +2196,8 @@ int main(int argc, char **argv)
                    test_pio_interrupt_filter_and_clock_gating);
     qtest_add_func("sam9x75/pit64b/timing-gating-and-irq",
                    test_pit64b_timing_gating_and_irq);
+    qtest_add_func("sam9x75/tcb/clocksource-clockevent-and-protection",
+                   test_tcb_clocksource_clockevent_and_protection);
     qtest_add_func("sam9x75/system/slowclock-pit-reset-and-protection",
                    test_system_slowclock_pit_reset_and_protection);
     qtest_add_func("sam9x75/rtt/count-alarm-modulo-and-protection",

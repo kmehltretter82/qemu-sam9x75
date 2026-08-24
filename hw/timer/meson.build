@@ -3,6 +3,7 @@ system_ss.add(when: 'CONFIG_ALLWINNER_A10_PIT', if_true: files('allwinner-a10-pi
 system_ss.add(when: 'CONFIG_AT91_PIT64B', if_true: files('at91_pit64b.c'))
 system_ss.add(when: 'CONFIG_AT91_PIT', if_true: files('at91_pit.c'))
 system_ss.add(when: 'CONFIG_AT91_RTT', if_true: files('at91_rtt.c'))
+system_ss.add(when: 'CONFIG_AT91_TCB', if_true: files('at91_tcb.c'))
 system_ss.add(when: 'CONFIG_ARM_MPTIMER', if_true: files('arm_mptimer.c'))
 system_ss.add(when: 'CONFIG_ARM_TIMER', if_true: files('arm_timer.c'))
 system_ss.add(when: 'CONFIG_ARM_V7M', if_true: files('armv7m_systick.c'))

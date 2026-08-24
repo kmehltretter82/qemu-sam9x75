@@ -183,6 +183,7 @@ config SAM9X7
     select AT91_PIT
     select AT91_PIT64B
     select AT91_RTT
+    select AT91_TCB
     select AT91_MPDDRC
     select AT91_NAND
     select AT91_OSPI

@@ -1,0 +1,722 @@
+/*
+ * Microchip AT91 Timer Counter Block
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#include "qemu/osdep.h"
+
+#include "hw/core/irq.h"
+#include "hw/core/qdev-clock.h"
+#include "hw/timer/at91_tcb.h"
+#include "migration/vmstate.h"
+#include "qapi/error.h"
+#include "qemu/bitops.h"
+#include "qemu/log.h"
+#include "qemu/module.h"
+
+#define TCB_CCR                 0x00
+#define TCB_CMR                 0x04
+#define TCB_SMMR                0x08
+#define TCB_RAB                 0x0c
+#define TCB_CV                  0x10
+#define TCB_RA                  0x14
+#define TCB_RB                  0x18
+#define TCB_RC                  0x1c
+#define TCB_SR                  0x20
+#define TCB_IER                 0x24
+#define TCB_IDR                 0x28
+#define TCB_IMR                 0x2c
+#define TCB_EMR                 0x30
+#define TCB_CSR                 0x34
+#define TCB_SSR                 0x38
+
+#define TCB_CHANNEL_STRIDE      0x40
+#define TCB_BCR                 0xc0
+#define TCB_BMR                 0xc4
+#define TCB_QIER                0xc8
+#define TCB_QIDR                0xcc
+#define TCB_QIMR                0xd0
+#define TCB_QISR                0xd4
+#define TCB_QSR                 0xdc
+#define TCB_WPMR                0xe4
+#define TCB_MMIO_SIZE           0x100
+
+#define TCB_CCR_CLKEN           BIT(0)
+#define TCB_CCR_CLKDIS          BIT(1)
+#define TCB_CCR_SWTRG           BIT(2)
+
+#define TCB_CMR_TCCLKS_MASK     0x7
+#define TCB_CMR_CPCSTOP         BIT(6)
+#define TCB_CMR_CPCDIS          BIT(7)
+#define TCB_CMR_WAVESEL_MASK    (3U << 13)
+#define TCB_CMR_WAVESEL_UP_RC   (2U << 13)
+#define TCB_CMR_WAVE            BIT(15)
+
+#define TCB_EMR_NODIVCLK        BIT(8)
+#define TCB_EMR_MASK            (TCB_EMR_NODIVCLK | (3U << 4) | 3U)
+#define TCB_SMMR_MASK           0x3
+
+#define TCB_INT_COVFS           BIT(0)
+#define TCB_INT_CPCS            BIT(4)
+#define TCB_INT_SECE            BIT(10)
+#define TCB_INT_MASK            (0xffU | TCB_INT_SECE)
+#define TCB_SR_CLKSTA           BIT(16)
+#define TCB_SR_MIRROR_MASK      (7U << 16)
+
+#define TCB_QINT_MASK           0xf7
+
+#define TCB_WPMR_WPEN           BIT(0)
+#define TCB_WPMR_WPITEN         BIT(1)
+#define TCB_WPMR_WPCREN         BIT(2)
+#define TCB_WPMR_FIRSTE         BIT(4)
+#define TCB_WPMR_ENABLE_MASK    0x17
+#define TCB_WPMR_KEY_MASK       0xffffff00
+#define TCB_WPMR_KEY            0x54494d00
+
+#define TCB_SSR_WPVS            BIT(0)
+#define TCB_SSR_WPVSRC_MASK     0x00ffff00
+
+#define TCB_COUNTER_RANGE       (UINT64_C(1) << 32)
+
+static void at91_tcb_update_irq(AT91TCBState *s)
+{
+    bool level = s->qisr & s->qimr;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(s->channel); i++) {
+        level |= !!(s->channel[i].status & s->channel[i].imr);
+    }
+    qemu_set_irq(s->irq, level);
+}
+
+static bool at91_tcb_auto_rc(const AT91TCBChannel *ch)
+{
+    return (ch->cmr & (TCB_CMR_WAVE | TCB_CMR_WAVESEL_MASK)) ==
+           (TCB_CMR_WAVE | TCB_CMR_WAVESEL_UP_RC);
+}
+
+static uint64_t at91_tcb_limit(const AT91TCBChannel *ch)
+{
+    if (at91_tcb_auto_rc(ch) && ch->rc) {
+        return ch->rc;
+    }
+    return TCB_COUNTER_RANGE;
+}
+
+static Clock *at91_tcb_selected_clock(AT91TCBChannel *ch,
+                                      unsigned int *divider)
+{
+    AT91TCBState *s = ch->owner;
+
+    if (ch->emr & TCB_EMR_NODIVCLK) {
+        *divider = 1;
+        return s->pclk;
+    }
+
+    switch (ch->cmr & TCB_CMR_TCCLKS_MASK) {
+    case 0:
+        *divider = 1;
+        return s->gclk;
+    case 1:
+        *divider = 8;
+        return s->pclk;
+    case 2:
+        *divider = 32;
+        return s->pclk;
+    case 3:
+        *divider = 128;
+        return s->pclk;
+    case 4:
+        *divider = 1;
+        return s->slck;
+    default:
+        /* XC0--XC2 require an externally routed clock. */
+        *divider = 1;
+        return NULL;
+    }
+}
+
+static bool at91_tcb_clock_active(AT91TCBChannel *ch)
+{
+    unsigned int divider;
+    Clock *clk = at91_tcb_selected_clock(ch, &divider);
+
+    return clk && clock_get_hz(clk);
+}
+
+static void at91_tcb_set_period(AT91TCBChannel *ch)
+{
+    unsigned int divider;
+    Clock *clk = at91_tcb_selected_clock(ch, &divider);
+
+    if (clk && clock_get_hz(clk)) {
+        ptimer_set_period_from_clock(ch->timer, clk, divider);
+    } else {
+        /* Keep the ptimer configuration valid while its source is gated. */
+        ptimer_set_period(ch->timer, 1);
+    }
+}
+
+static uint32_t at91_tcb_counter(AT91TCBChannel *ch)
+{
+    uint64_t remaining = ptimer_get_count(ch->timer);
+    uint64_t limit = at91_tcb_limit(ch);
+
+    if (!remaining) {
+        return 0;
+    }
+    return limit - remaining;
+}
+
+static bool at91_tcb_periodic(const AT91TCBChannel *ch)
+{
+    return !(ch->cmr & (TCB_CMR_CPCSTOP | TCB_CMR_CPCDIS));
+}
+
+static void at91_tcb_configure_channel(AT91TCBChannel *ch, uint32_t counter)
+{
+    uint64_t limit = at91_tcb_limit(ch);
+
+    if (counter >= limit) {
+        counter = 0;
+    }
+
+    ptimer_transaction_begin(ch->timer);
+    ptimer_stop(ch->timer);
+    at91_tcb_set_period(ch);
+    ptimer_set_limit(ch->timer, limit, 1);
+    if (counter) {
+        ptimer_set_count(ch->timer, limit - counter);
+    }
+    ch->clock_suspended = !at91_tcb_clock_active(ch);
+    if (ch->running && !ch->clock_suspended) {
+        ptimer_run(ch->timer, !at91_tcb_periodic(ch));
+    }
+    ptimer_transaction_commit(ch->timer);
+}
+
+static void at91_tcb_start_channel(AT91TCBChannel *ch, bool reset)
+{
+    uint32_t counter = reset ? 0 : at91_tcb_counter(ch);
+
+    ch->enabled = true;
+    ch->running = true;
+    at91_tcb_configure_channel(ch, counter);
+}
+
+static void at91_tcb_stop_channel(AT91TCBChannel *ch)
+{
+    ptimer_transaction_begin(ch->timer);
+    ptimer_stop(ch->timer);
+    ptimer_transaction_commit(ch->timer);
+    ch->enabled = false;
+    ch->running = false;
+    ch->clock_suspended = false;
+}
+
+static uint32_t at91_tcb_channel_status(const AT91TCBChannel *ch)
+{
+    return ch->status | (ch->enabled ? TCB_SR_CLKSTA : 0);
+}
+
+static void at91_tcb_record_wp_violation(AT91TCBChannel *ch, hwaddr offset)
+{
+    AT91TCBState *s = ch->owner;
+
+    if (!(s->wpmr & TCB_WPMR_FIRSTE) || !(ch->ssr & TCB_SSR_WPVS)) {
+        ch->ssr &= ~TCB_SSR_WPVSRC_MASK;
+        ch->ssr |= TCB_SSR_WPVS | ((offset & 0xffff) << 8);
+    }
+    ch->status |= TCB_INT_SECE;
+    at91_tcb_update_irq(s);
+}
+
+static bool at91_tcb_write_protected(AT91TCBState *s, AT91TCBChannel *ch,
+                                     hwaddr offset)
+{
+    bool protected = false;
+    hwaddr reg = offset < TCB_BCR ? offset % TCB_CHANNEL_STRIDE : offset;
+
+    switch (reg) {
+    case TCB_CCR:
+    case TCB_BCR:
+        protected = s->wpmr & TCB_WPMR_WPCREN;
+        break;
+    case TCB_IER:
+    case TCB_IDR:
+    case TCB_QIER:
+    case TCB_QIDR:
+        protected = s->wpmr & TCB_WPMR_WPITEN;
+        break;
+    case TCB_CMR:
+    case TCB_SMMR:
+    case TCB_RA:
+    case TCB_RB:
+    case TCB_RC:
+    case TCB_EMR:
+    case TCB_BMR:
+        protected = s->wpmr & TCB_WPMR_WPEN;
+        break;
+    default:
+        break;
+    }
+
+    if (protected) {
+        at91_tcb_record_wp_violation(ch, offset);
+    }
+    return protected;
+}
+
+static uint64_t at91_tcb_channel_read(AT91TCBState *s, unsigned int index,
+                                      hwaddr reg)
+{
+    AT91TCBChannel *ch = &s->channel[index];
+    uint32_t value;
+
+    switch (reg) {
+    case TCB_CCR:
+    case TCB_IER:
+    case TCB_IDR:
+        return 0;
+    case TCB_CMR:
+        return ch->cmr;
+    case TCB_SMMR:
+        return ch->smmr;
+    case TCB_RAB:
+        return 0;
+    case TCB_CV:
+        return at91_tcb_counter(ch);
+    case TCB_RA:
+        return ch->ra;
+    case TCB_RB:
+        return ch->rb;
+    case TCB_RC:
+        return ch->rc;
+    case TCB_SR:
+        value = at91_tcb_channel_status(ch);
+        ch->status = 0;
+        at91_tcb_update_irq(s);
+        return value;
+    case TCB_IMR:
+        return ch->imr;
+    case TCB_EMR:
+        return ch->emr;
+    case TCB_CSR:
+        return at91_tcb_channel_status(ch) & TCB_SR_MIRROR_MASK;
+    case TCB_SSR:
+        value = ch->ssr;
+        ch->ssr = 0;
+        return value;
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      TYPE_AT91_TCB ": read from bad channel offset 0x%"
+                      HWADDR_PRIx "\n", reg);
+        return 0;
+    }
+}
+
+static uint64_t at91_tcb_read(void *opaque, hwaddr offset, unsigned int size)
+{
+    AT91TCBState *s = AT91_TCB(opaque);
+
+    if (offset < TCB_BCR) {
+        unsigned int index = offset / TCB_CHANNEL_STRIDE;
+        hwaddr reg = offset % TCB_CHANNEL_STRIDE;
+
+        if (index < ARRAY_SIZE(s->channel)) {
+            return at91_tcb_channel_read(s, index, reg);
+        }
+    }
+
+    switch (offset) {
+    case TCB_BCR:
+    case TCB_QIER:
+    case TCB_QIDR:
+        return 0;
+    case TCB_BMR:
+        return s->bmr;
+    case TCB_QIMR:
+        return s->qimr;
+    case TCB_QISR: {
+        uint32_t value = s->qisr;
+
+        s->qisr = 0;
+        at91_tcb_update_irq(s);
+        return value;
+    }
+    case TCB_QSR:
+        return s->qisr;
+    case TCB_WPMR:
+        return s->wpmr;
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      TYPE_AT91_TCB ": read from bad offset 0x%"
+                      HWADDR_PRIx "\n", offset);
+        return 0;
+    }
+}
+
+static void at91_tcb_channel_write(AT91TCBState *s, unsigned int index,
+                                   hwaddr reg, uint32_t value)
+{
+    AT91TCBChannel *ch = &s->channel[index];
+    hwaddr offset = index * TCB_CHANNEL_STRIDE + reg;
+    uint32_t counter;
+
+    if (at91_tcb_write_protected(s, ch, offset)) {
+        return;
+    }
+
+    switch (reg) {
+    case TCB_CCR:
+        if (value & TCB_CCR_CLKDIS) {
+            at91_tcb_stop_channel(ch);
+        } else if (value & TCB_CCR_SWTRG) {
+            at91_tcb_start_channel(ch, true);
+        } else if (value & TCB_CCR_CLKEN) {
+            at91_tcb_start_channel(ch, false);
+        }
+        break;
+    case TCB_CMR:
+        counter = at91_tcb_counter(ch);
+        ch->cmr = value;
+        at91_tcb_configure_channel(ch, counter);
+        break;
+    case TCB_SMMR:
+        ch->smmr = value & TCB_SMMR_MASK;
+        break;
+    case TCB_RA:
+        ch->ra = value;
+        break;
+    case TCB_RB:
+        ch->rb = value;
+        break;
+    case TCB_RC:
+        counter = at91_tcb_counter(ch);
+        ch->rc = value;
+        at91_tcb_configure_channel(ch, counter);
+        break;
+    case TCB_IER:
+        ch->imr |= value & TCB_INT_MASK;
+        at91_tcb_update_irq(s);
+        break;
+    case TCB_IDR:
+        ch->imr &= ~(value & TCB_INT_MASK);
+        at91_tcb_update_irq(s);
+        break;
+    case TCB_EMR:
+        counter = at91_tcb_counter(ch);
+        ch->emr = value & TCB_EMR_MASK;
+        at91_tcb_configure_channel(ch, counter);
+        break;
+    case TCB_RAB:
+    case TCB_CV:
+    case TCB_SR:
+    case TCB_IMR:
+    case TCB_CSR:
+    case TCB_SSR:
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      TYPE_AT91_TCB ": write to read-only offset 0x%"
+                      HWADDR_PRIx "\n", offset);
+        break;
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      TYPE_AT91_TCB ": write to bad channel offset 0x%"
+                      HWADDR_PRIx "\n", offset);
+        break;
+    }
+}
+
+static void at91_tcb_write(void *opaque, hwaddr offset, uint64_t value,
+                           unsigned int size)
+{
+    AT91TCBState *s = AT91_TCB(opaque);
+    AT91TCBChannel *ch = &s->channel[0];
+    unsigned int i;
+
+    if (offset < TCB_BCR) {
+        unsigned int index = offset / TCB_CHANNEL_STRIDE;
+        hwaddr reg = offset % TCB_CHANNEL_STRIDE;
+
+        if (index < ARRAY_SIZE(s->channel)) {
+            at91_tcb_channel_write(s, index, reg, value);
+            return;
+        }
+    }
+
+    if (offset != TCB_WPMR &&
+        at91_tcb_write_protected(s, ch, offset)) {
+        return;
+    }
+
+    switch (offset) {
+    case TCB_BCR:
+        if (value & BIT(0)) {
+            for (i = 0; i < ARRAY_SIZE(s->channel); i++) {
+                if (s->channel[i].enabled) {
+                    at91_tcb_start_channel(&s->channel[i], true);
+                }
+            }
+        }
+        break;
+    case TCB_BMR:
+        s->bmr = value & 0x03f3ff3f;
+        break;
+    case TCB_QIER:
+        s->qimr |= value & TCB_QINT_MASK;
+        at91_tcb_update_irq(s);
+        break;
+    case TCB_QIDR:
+        s->qimr &= ~(value & TCB_QINT_MASK);
+        at91_tcb_update_irq(s);
+        break;
+    case TCB_WPMR:
+        if ((value & TCB_WPMR_KEY_MASK) == TCB_WPMR_KEY) {
+            s->wpmr = value & TCB_WPMR_ENABLE_MASK;
+        }
+        break;
+    case TCB_QIMR:
+    case TCB_QISR:
+    case TCB_QSR:
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      TYPE_AT91_TCB ": write to read-only offset 0x%"
+                      HWADDR_PRIx "\n", offset);
+        break;
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      TYPE_AT91_TCB ": write to bad offset 0x%"
+                      HWADDR_PRIx "\n", offset);
+        break;
+    }
+}
+
+static const MemoryRegionOps at91_tcb_ops = {
+    .read = at91_tcb_read,
+    .write = at91_tcb_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
+};
+
+static void at91_tcb_tick(void *opaque)
+{
+    AT91TCBChannel *ch = opaque;
+
+    if (at91_tcb_auto_rc(ch)) {
+        ch->status |= TCB_INT_CPCS;
+    } else {
+        ch->status |= TCB_INT_COVFS;
+    }
+
+    if (ch->cmr & TCB_CMR_CPCDIS) {
+        ch->enabled = false;
+        ch->running = false;
+    } else if (ch->cmr & TCB_CMR_CPCSTOP) {
+        ch->running = false;
+    }
+    at91_tcb_update_irq(ch->owner);
+}
+
+static void at91_tcb_clock_changed(void *opaque, ClockEvent event)
+{
+    AT91TCBState *s = AT91_TCB(opaque);
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(s->channel); i++) {
+        AT91TCBChannel *ch = &s->channel[i];
+        bool active;
+
+        if (!ch->timer) {
+            continue;
+        }
+        active = at91_tcb_clock_active(ch);
+
+        ptimer_transaction_begin(ch->timer);
+        if (!active) {
+            if (ch->running && !ch->clock_suspended) {
+                ptimer_stop(ch->timer);
+                ch->clock_suspended = true;
+            }
+        } else {
+            at91_tcb_set_period(ch);
+            if (ch->running && ch->clock_suspended) {
+                ptimer_run(ch->timer, !at91_tcb_periodic(ch));
+                ch->clock_suspended = false;
+            }
+        }
+        ptimer_transaction_commit(ch->timer);
+    }
+}
+
+static void at91_tcb_reset(DeviceState *dev)
+{
+    AT91TCBState *s = AT91_TCB(dev);
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(s->channel); i++) {
+        AT91TCBChannel *ch = &s->channel[i];
+
+        ptimer_transaction_begin(ch->timer);
+        ptimer_stop(ch->timer);
+        ptimer_set_period(ch->timer, 1);
+        ptimer_set_limit(ch->timer, TCB_COUNTER_RANGE, 1);
+        ptimer_transaction_commit(ch->timer);
+        ch->cmr = 0;
+        ch->smmr = 0;
+        ch->ra = 0;
+        ch->rb = 0;
+        ch->rc = 0;
+        ch->status = 0;
+        ch->imr = 0;
+        ch->emr = 0;
+        ch->ssr = 0;
+        ch->enabled = false;
+        ch->running = false;
+        ch->clock_suspended = false;
+    }
+    s->bmr = 0;
+    s->qimr = 0;
+    s->qisr = 0;
+    s->wpmr = 0;
+    at91_tcb_update_irq(s);
+}
+
+static void at91_tcb_init(Object *obj)
+{
+    AT91TCBState *s = AT91_TCB(obj);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+    unsigned int i;
+
+    memory_region_init_io(&s->mmio, obj, &at91_tcb_ops, s,
+                          TYPE_AT91_TCB, TCB_MMIO_SIZE);
+    sysbus_init_mmio(sbd, &s->mmio);
+    sysbus_init_irq(sbd, &s->irq);
+
+    s->pclk = qdev_init_clock_in(DEVICE(s), "pclk",
+                                 at91_tcb_clock_changed, s, ClockUpdate);
+    s->gclk = qdev_init_clock_in(DEVICE(s), "gclk",
+                                 at91_tcb_clock_changed, s, ClockUpdate);
+    s->slck = qdev_init_clock_in(DEVICE(s), "slck",
+                                 at91_tcb_clock_changed, s, ClockUpdate);
+
+    for (i = 0; i < ARRAY_SIZE(s->channel); i++) {
+        s->channel[i].owner = s;
+    }
+}
+
+static void at91_tcb_realize(DeviceState *dev, Error **errp)
+{
+    AT91TCBState *s = AT91_TCB(dev);
+    unsigned int i;
+
+    if (!clock_has_source(s->pclk) || !clock_has_source(s->gclk) ||
+        !clock_has_source(s->slck)) {
+        error_setg(errp, TYPE_AT91_TCB
+                   ": pclk, gclk and slck clocks must be connected");
+        return;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(s->channel); i++) {
+        AT91TCBChannel *ch = &s->channel[i];
+
+        ch->timer = ptimer_init(at91_tcb_tick, ch,
+            PTIMER_POLICY_WRAP_AFTER_ONE_PERIOD |
+            PTIMER_POLICY_TRIGGER_ONLY_ON_DECREMENT |
+            PTIMER_POLICY_NO_IMMEDIATE_RELOAD |
+            PTIMER_POLICY_NO_COUNTER_ROUND_DOWN);
+        ptimer_transaction_begin(ch->timer);
+        ptimer_set_period(ch->timer, 1);
+        ptimer_set_limit(ch->timer, TCB_COUNTER_RANGE, 1);
+        ptimer_transaction_commit(ch->timer);
+    }
+}
+
+static void at91_tcb_finalize(Object *obj)
+{
+    AT91TCBState *s = AT91_TCB(obj);
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(s->channel); i++) {
+        if (s->channel[i].timer) {
+            ptimer_free(s->channel[i].timer);
+        }
+    }
+}
+
+static const VMStateDescription at91_tcb_channel_vmstate = {
+    .name = TYPE_AT91_TCB "/channel",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_PTIMER(timer, AT91TCBChannel),
+        VMSTATE_UINT32(cmr, AT91TCBChannel),
+        VMSTATE_UINT32(smmr, AT91TCBChannel),
+        VMSTATE_UINT32(ra, AT91TCBChannel),
+        VMSTATE_UINT32(rb, AT91TCBChannel),
+        VMSTATE_UINT32(rc, AT91TCBChannel),
+        VMSTATE_UINT32(status, AT91TCBChannel),
+        VMSTATE_UINT32(imr, AT91TCBChannel),
+        VMSTATE_UINT32(emr, AT91TCBChannel),
+        VMSTATE_UINT32(ssr, AT91TCBChannel),
+        VMSTATE_BOOL(enabled, AT91TCBChannel),
+        VMSTATE_BOOL(running, AT91TCBChannel),
+        VMSTATE_BOOL(clock_suspended, AT91TCBChannel),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static int at91_tcb_post_load(void *opaque, int version_id)
+{
+    AT91TCBState *s = opaque;
+
+    at91_tcb_update_irq(s);
+    return 0;
+}
+
+static const VMStateDescription at91_tcb_vmstate = {
+    .name = TYPE_AT91_TCB,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = at91_tcb_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_CLOCK(pclk, AT91TCBState),
+        VMSTATE_CLOCK(gclk, AT91TCBState),
+        VMSTATE_CLOCK(slck, AT91TCBState),
+        VMSTATE_STRUCT_ARRAY(channel, AT91TCBState, AT91_TCB_NUM_CHANNELS,
+                             1, at91_tcb_channel_vmstate, AT91TCBChannel),
+        VMSTATE_UINT32(bmr, AT91TCBState),
+        VMSTATE_UINT32(qimr, AT91TCBState),
+        VMSTATE_UINT32(qisr, AT91TCBState),
+        VMSTATE_UINT32(wpmr, AT91TCBState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static void at91_tcb_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->desc = "Microchip AT91 Timer Counter Block";
+    dc->realize = at91_tcb_realize;
+    dc->vmsd = &at91_tcb_vmstate;
+    device_class_set_legacy_reset(dc, at91_tcb_reset);
+}
+
+static const TypeInfo at91_tcb_info = {
+    .name = TYPE_AT91_TCB,
+    .parent = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(AT91TCBState),
+    .instance_init = at91_tcb_init,
+    .instance_finalize = at91_tcb_finalize,
+    .class_init = at91_tcb_class_init,
+};
+
+static void at91_tcb_register_types(void)
+{
+    type_register_static(&at91_tcb_info);
+}
+
+type_init(at91_tcb_register_types)

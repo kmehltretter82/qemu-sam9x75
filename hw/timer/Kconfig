@@ -39,6 +39,10 @@ config AT91_RTT
     bool
     select PTIMER
 
+config AT91_TCB
+    bool
+    select PTIMER
+
 config PXA2XX_TIMER
     bool
 

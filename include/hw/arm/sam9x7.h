@@ -30,6 +30,7 @@
 #include "hw/timer/at91_pit64b.h"
 #include "hw/timer/at91_pit.h"
 #include "hw/timer/at91_rtt.h"
+#include "hw/timer/at91_tcb.h"
 #include "hw/watchdog/at91_wdt.h"
 #include "qom/object.h"
 #include "system/memory.h"
@@ -64,6 +65,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_QSPI_BASE             0xf0014000
 #define SAM9X7_PIT64B0_BASE          0xf0028000
 #define SAM9X7_PIT64B1_BASE          0xf0040000
+#define SAM9X7_TCB_BASE              0xf8008000
 #define SAM9X7_SFR_BASE              0xf8050000
 #define SAM9X7_GMAC_BASE             0xf802c000
 
@@ -118,6 +120,7 @@ struct SAM9X7State {
     AT91PIT64BState pit64b[2];
     AT91PITState pit;
     AT91RTTState rtt;
+    AT91TCBState tcb;
     AT91WDTState wdt;
     OrIRQState sys_irq;
 

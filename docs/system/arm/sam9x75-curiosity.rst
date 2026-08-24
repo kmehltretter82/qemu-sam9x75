@@ -151,8 +151,13 @@ Support matrix
      - Missing
      - MCP16502, PAC1934 and board/extension EEPROMs.
    * - Timers, ADC, PWM and SSC
-     - Missing
-     - TC blocks, ADC inputs, PWM outputs and synchronous serial operation.
+     - Initial
+     - TC0 has three 32-bit channels, GCLK/MCK-divided/slow-clock selection,
+       PMC gating, free-running and RC-reset waveform timing, synchronization,
+       periodic and one-shot interrupts, write protection and migration state.
+       This covers the unmodified Linux clocksource and clockevent paths.
+       External TCLK/TIO capture and waveform routing, up/down modes, QDEC,
+       TC1, ADC inputs, PWM outputs and synchronous serial operation remain.
    * - Audio
      - Missing
      - I2SMCC and Class-D controller with QEMU audio backends.
