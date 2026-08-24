@@ -44,12 +44,18 @@ typedef enum SAM9X75PAC1934Route {
     SAM9X75_PAC1934_ROUTE_OFF,
 } SAM9X75PAC1934Route;
 
+typedef enum SAM9X75M2Interface {
+    SAM9X75_M2_INTERFACE_SDIO,
+    SAM9X75_M2_INTERFACE_SPI,
+} SAM9X75M2Interface;
+
 struct SAM9X75CuriosityMachineState {
     MachineState parent_obj;
 
     bool nand_cs;
     bool qspi_cs;
     SAM9X75PAC1934Route pac1934_route;
+    SAM9X75M2Interface m2_interface;
     SAM9X7State *soc;
     struct arm_boot_info boot_info;
 };
@@ -250,7 +256,14 @@ static void sam9x75_curiosity_init(MachineState *machine)
         /* The Curiosity card-detect switch drives PA23 low when inserted. */
         qemu_set_irq(qdev_get_gpio_in(DEVICE(&soc->pio[0]), 23), 0);
     }
-    sam9x75_curiosity_attach_sd(soc, 1);
+    if (board->m2_interface == SAM9X75_M2_INTERFACE_SDIO) {
+        sam9x75_curiosity_attach_sd(soc, 1);
+    } else if (drive_get(IF_SD, 0, 1)) {
+        error_report("an SD drive at index 1 cannot be connected when "
+                     "J24 selects the M.2 SPI interface");
+        error_report("FLEXCOM4 SPI card attachment is not implemented yet");
+        exit(EXIT_FAILURE);
+    }
 
     /* The populated NAND drives its active-high ready signal onto PD14. */
     qemu_set_irq(qdev_get_gpio_in(DEVICE(&soc->pio[3]), 14), 1);
@@ -324,6 +337,38 @@ static void sam9x75_curiosity_set_pac1934_route(Object *obj,
     }
 }
 
+static char *sam9x75_curiosity_get_m2_interface(Object *obj, Error **errp)
+{
+    SAM9X75CuriosityMachineState *board =
+        SAM9X75_CURIOSITY_MACHINE(obj);
+
+    switch (board->m2_interface) {
+    case SAM9X75_M2_INTERFACE_SDIO:
+        return g_strdup("sdio");
+    case SAM9X75_M2_INTERFACE_SPI:
+        return g_strdup("spi");
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void sam9x75_curiosity_set_m2_interface(Object *obj,
+                                                const char *value,
+                                                Error **errp)
+{
+    SAM9X75CuriosityMachineState *board =
+        SAM9X75_CURIOSITY_MACHINE(obj);
+
+    if (!strcmp(value, "sdio")) {
+        board->m2_interface = SAM9X75_M2_INTERFACE_SDIO;
+    } else if (!strcmp(value, "spi")) {
+        board->m2_interface = SAM9X75_M2_INTERFACE_SPI;
+    } else {
+        error_setg(errp, "Invalid M.2 interface '%s'", value);
+        error_append_hint(errp, "Valid values are sdio and spi.\n");
+    }
+}
+
 static void sam9x75_curiosity_machine_instance_init(Object *obj)
 {
     SAM9X75CuriosityMachineState *board =
@@ -332,6 +377,7 @@ static void sam9x75_curiosity_machine_instance_init(Object *obj)
     board->nand_cs = true;
     board->qspi_cs = true;
     board->pac1934_route = SAM9X75_PAC1934_ROUTE_SOC;
+    board->m2_interface = SAM9X75_M2_INTERFACE_SDIO;
 }
 
 static void sam9x75_curiosity_machine_reset(MachineState *machine,
@@ -380,6 +426,11 @@ static void sam9x75_curiosity_machine_class_init(ObjectClass *oc,
                                   sam9x75_curiosity_set_pac1934_route);
     object_class_property_set_description(oc, "pac1934-route",
         "Route both J38/J39 PAC1934 I2C jumpers to soc, usb, or off");
+    object_class_property_add_str(oc, "m2-interface",
+                                  sam9x75_curiosity_get_m2_interface,
+                                  sam9x75_curiosity_set_m2_interface);
+    object_class_property_set_description(oc, "m2-interface",
+        "Route the J24 M.2 host-interface jumper to sdio or spi");
 }
 
 static const TypeInfo sam9x75_curiosity_machine_types[] = {

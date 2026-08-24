@@ -139,10 +139,13 @@ Support matrix
    * - SDMMC0 and SDMMC1
      - Initial
      - Both SAM9X7 hosts, removable-card attachment and PA23 card detect are
-       wired.  Host preset registers and the Linux ADMA descriptor form are
-       covered.  The unmodified AT91Bootstrap SD/ADMA path loads U-Boot, and
-       Linux mounts the SD root filesystem and reaches a shell.  Register,
-       command, DMA error and media-change completeness remains under audit.
+       wired.  J24 defaults to SDIO and routes an optional second SD drive to
+       the M.2 socket through SDMMC1; its SPI position electrically
+       disconnects that host.  Host preset registers and the Linux ADMA
+       descriptor form are covered.  The unmodified AT91Bootstrap SD/ADMA
+       path loads U-Boot, and Linux mounts the SD root filesystem and reaches
+       a shell.  SDIO I/O functions, FLEXCOM4 SPI card attachment, register,
+       command, DMA error and media-change completeness remain under audit.
    * - OSPI/QSPI NOR
      - Initial
      - Controller and XIP windows, SST26VF064BEUI identity, SFDP/EUI data,
@@ -266,10 +269,11 @@ Support matrix
        QSPI chip-select jumpers default closed and have machine options with
        functional disconnected states.  The default J38/J39 setting connects
        PAC1934 to FLEXCOM7; its SoC, USB-bridge and disconnected jumper routes
-       have a machine option and functional SoC-side NACK behavior.  The
-       remaining power, clock and interface-selection jumpers, mikroBUS,
-       Raspberry Pi header, M.2 and official Microchip overlay attachments
-       remain.
+       have a machine option and functional SoC-side NACK behavior.  J24
+       defaults to the M.2 SDIO route; its SPI position disconnects SDMMC1
+       pending FLEXCOM4 SPI support.  The remaining power, clock and
+       interface-selection jumpers, mikroBUS, Raspberry Pi header, M.2
+       peripherals and official Microchip overlay attachments remain.
 
 Execution roadmap
 -----------------
@@ -340,7 +344,7 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The 64-test board qtest baseline and this boot are clean of SAM9X75 model
+The 65-test board qtest baseline and this boot are clean of SAM9X75 model
 warnings with ``-d unimp,guest_errors``.  Generic SD diagnostics still report
 the expected failed MMC/SDIO probes against a memory-only SD card.  FLEXCOM
 USART children remain missing but are not the selected board console.
@@ -407,6 +411,17 @@ MCP2221A USB bridge on pins 1--2 or leave both open.  Select them with::
 Both alternatives disconnect the monitor from the SoC and therefore make
 FLEXCOM7 accesses to address ``0x10`` NACK.  The external MCP2221A host USB
 interface is not yet exposed by QEMU.
+
+J24 defaults to pins 1--2 and connects the M.2 host interface to SDMMC1.  A
+second legacy SD drive represents an SD/MMC storage-card adapter in that
+socket; the current card model does not implement SDIO I/O functions.  Move
+J24 to pins 2--3 with::
+
+  -M sam9x75-curiosity,m2-interface=spi
+
+This electrically disconnects the M.2 card from SDMMC1.  Attaching the second
+SD drive while selecting SPI is rejected explicitly because FLEXCOM4 SPI card
+attachment is not implemented yet.
 
 Completion gates
 ----------------

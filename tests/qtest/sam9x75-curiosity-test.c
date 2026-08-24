@@ -21,6 +21,7 @@
 #define SAM9X7_NAND_BASE        0x30000000
 #define SAM9X7_QSPI_MEM_BASE    0x60000000
 #define SAM9X7_SDMMC0_BASE      0x80000000
+#define SAM9X7_SDMMC1_BASE      0x90000000
 #define SAM9X7_XDMAC_BASE       0xf0008000
 #define SAM9X7_QSPI_BASE        0xf0014000
 #define SAM9X7_I2SMCC_BASE      0xf001c000
@@ -65,6 +66,7 @@
 #define SDHCI_TRNMOD            0x0c
 #define SDHCI_CMDREG            0x0e
 #define SDHCI_RSPREG0           0x10
+#define SDHCI_PRNSTS            0x24
 #define SDHCI_HOSTCTL           0x28
 #define SDHCI_CLKCON            0x2c
 #define SDHCI_SWRST             0x2f
@@ -88,6 +90,7 @@
 #define SDHCI_CTRL_ADMA2_32     BIT(4)
 #define SDHCI_CLOCK_ENABLE      (BIT(2) | BIT(1) | BIT(0))
 #define SDHCI_RESET_ALL         BIT(0)
+#define SDHCI_CARD_PRESENT      BIT(16)
 #define SDHCI_INT_CMD_COMPLETE  BIT(0)
 #define SDHCI_INT_XFER_COMPLETE BIT(1)
 #define SDHCI_INT_ERROR         BIT(15)
@@ -6382,6 +6385,50 @@ static void test_sdhci_preset_registers(void)
     qtest_quit(qts);
 }
 
+static void test_board_m2_interface_jumper(void)
+{
+    g_autofree char *sd_path = NULL;
+    QDict *response;
+    QTestState *qts;
+    GError *error = NULL;
+    int fd;
+    int ret;
+
+    fd = g_file_open_tmp("sam9x75-m2-sd-XXXXXX", &sd_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = ftruncate(fd, 1 << 20);
+    g_assert_cmpint(ret, ==, 0);
+    close(fd);
+
+    qts = qtest_initf(SAM9X75_MACHINE
+                      " -drive file=%s,if=sd,index=1,format=raw,"
+                      "auto-read-only=off", sd_path);
+    response = qtest_qmp(qts,
+        "{'execute':'qom-get','arguments':{'path':'/machine',"
+        "'property':'m2-interface'}}");
+    g_assert_false(qdict_haskey(response, "error"));
+    g_assert_cmpstr(qdict_get_str(response, "return"), ==, "sdio");
+    qobject_unref(response);
+    qtest_clock_step(qts, 1000);
+    g_assert_true(qtest_readl(qts, SAM9X7_SDMMC1_BASE + SDHCI_PRNSTS) &
+                  SDHCI_CARD_PRESENT);
+    qtest_quit(qts);
+
+    qts = qtest_init(SAM9X75_MACHINE ",m2-interface=spi");
+    response = qtest_qmp(qts,
+        "{'execute':'qom-get','arguments':{'path':'/machine',"
+        "'property':'m2-interface'}}");
+    g_assert_false(qdict_haskey(response, "error"));
+    g_assert_cmpstr(qdict_get_str(response, "return"), ==, "spi");
+    qobject_unref(response);
+    g_assert_false(qtest_readl(qts, SAM9X7_SDMMC1_BASE + SDHCI_PRNSTS) &
+                   SDHCI_CARD_PRESENT);
+    qtest_quit(qts);
+
+    unlink(sd_path);
+}
+
 static void nand_command(QTestState *qts, uint8_t command)
 {
     qtest_writeb(qts, NAND_CLE, command);
@@ -6835,6 +6882,8 @@ int main(int argc, char **argv)
                    test_sdhci_adma2_linux_nop_terminator);
     qtest_add_func("sam9x75/sdhci/preset-registers",
                    test_sdhci_preset_registers);
+    qtest_add_func("sam9x75/board/m2-interface-jumper",
+                   test_board_m2_interface_jumper);
     qtest_add_func("sam9x75/nand/identification-program-and-erase",
                    test_nand_identification_program_and_erase);
     qtest_add_func("sam9x75/board/memory-cs-jumpers",
