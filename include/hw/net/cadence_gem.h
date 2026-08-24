@@ -77,6 +77,8 @@ struct CadenceGEMState {
 
     /* PHY address */
     uint8_t phy_addr;
+    /* IEEE PHY identifier returned by MII_PHYSID1/MII_PHYSID2. */
+    uint32_t phy_id;
     /* PHY registers backing store */
     uint16_t phy_regs[32];
 

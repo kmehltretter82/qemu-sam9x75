@@ -1438,8 +1438,8 @@ static void gem_phy_reset(CadenceGEMState *s)
     memset(&s->phy_regs[0], 0, sizeof(s->phy_regs));
     s->phy_regs[PHY_REG_CONTROL] = 0x1140;
     s->phy_regs[PHY_REG_STATUS] = 0x7969;
-    s->phy_regs[PHY_REG_PHYID1] = 0x0141;
-    s->phy_regs[PHY_REG_PHYID2] = 0x0CC2;
+    s->phy_regs[PHY_REG_PHYID1] = s->phy_id >> 16;
+    s->phy_regs[PHY_REG_PHYID2] = s->phy_id;
     s->phy_regs[PHY_REG_ANEGADV] = 0x01E1;
     s->phy_regs[PHY_REG_LINKPABIL] = 0xCDE1;
     s->phy_regs[PHY_REG_ANEGEXP] = 0x000F;
@@ -1831,6 +1831,7 @@ static const Property gem_properties[] = {
     DEFINE_PROP_UINT32("revision", CadenceGEMState, revision,
                        GEM_MODID_VALUE),
     DEFINE_PROP_UINT8("phy-addr", CadenceGEMState, phy_addr, BOARD_PHY_ADDRESS),
+    DEFINE_PROP_UINT32("phy-id", CadenceGEMState, phy_id, 0x01410cc2),
     DEFINE_PROP_UINT8("num-priority-queues", CadenceGEMState,
                       num_priority_queues, 1),
     DEFINE_PROP_UINT8("num-type1-screeners", CadenceGEMState,
