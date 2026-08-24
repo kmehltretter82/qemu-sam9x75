@@ -124,9 +124,10 @@ Support matrix
        command, DMA error and media-change completeness remains under audit.
    * - OSPI/QSPI NOR
      - Initial
-     - Controller and XIP windows, SST26VF064BE identity, SFDP/EUI data,
-       program/erase and U-Boot probing are modeled.  Persistence with a drive,
-       all protocol widths and the ROM quad-mode erratum need further coverage.
+     - Controller and XIP windows, SST26VF064BEUI identity, SFDP/EUI data,
+       program/erase and U-Boot probing are modeled.  The EUI-48 follows the
+       configured GEM MAC address.  Persistence with a drive, all protocol
+       widths and the ROM quad-mode erratum need further coverage.
    * - EBI/SMC and raw NAND
      - Initial
      - The MX30LF4G28AD identity, ONFI parameter data, page program/read and
@@ -134,8 +135,13 @@ Support matrix
        present.  Real ECC generation/correction, OOB/bad-block behavior and DMA
        remain missing.
    * - GEM and LAN8840
-     - Missing
-     - Queues, MDIO/RGMII PHY, checksum, PTP/TSN and LAN Kit interrupts.
+     - Initial
+     - GEM0 has six priority queues, DMA transmit/receive, AIC sources 24 and
+       60--64, a Clause 22 PHY at address 1 with the LAN8840 identifier, and a
+       station address provisioned through the SST26VF064BEUI.  Unmodified
+       U-Boot obtains a DHCP lease and exchanges packets.  LAN8840 MMD/RGMII
+       delay registers, PHY reset-value fidelity, checksum corner cases,
+       filtering, PTP/TSN and hardware comparison remain.
    * - USB host and device
      - Missing
      - OHCI, EHCI, UDPHS, port power, hotplug, gadget mode and SAM-BA path.
@@ -175,20 +181,21 @@ boot path directly::
 
   qemu-system-arm -M sam9x75-curiosity \
     -kernel sam9x7-sdcardboot-uboot-4.0.13.elf \
-    -drive file=sam9x75-sdcard.img,if=sd,format=raw -nographic
+    -drive file=sam9x75-sdcard.img,if=sd,format=raw \
+    -nic user,mac=02:00:00:09:75:01 -nographic
 
 This currently loads unmodified U-Boot, initializes DDR, NAND, MMC and QSPI,
-then reaches Ethernet probing.  GEM0 is not implemented yet, so the next access
-at ``0xf802c0fc`` aborts in ``macb_is_gem()``.  RomBOOT itself is also still
-missing; ``-kernel`` is a development entry path and not a substitute for ROM
-media selection.
+discovers the LAN8840, and supports DHCP and packet exchange through GEM0.  It
+then loads and enters the Linux image from SD; Linux console bring-up is the
+next integration blocker.  RomBOOT itself is also still missing; ``-kernel``
+is a development entry path and not a substitute for ROM media selection.
 
 Completion gates
 ----------------
 
-Polling DBGU from SRAM, interrupt-driven bare metal and unmodified SD
-AT91Bootstrap into U-Boot are achieved.  The remaining integration gates are
-GEM/LAN8840 initialization, a Linux shell from SD, genuine QSPI and NAND boot,
-base-board I/O, USB, multimedia/security, migration and finally hardware
+Polling DBGU from SRAM, interrupt-driven bare metal, unmodified SD
+AT91Bootstrap into U-Boot, and GEM/LAN8840 packet exchange are achieved.  The
+remaining integration gates are a Linux shell from SD, genuine QSPI and NAND
+boot, base-board I/O, USB, multimedia/security, migration and finally hardware
 differential validation.  Normal supported boots must be clean with
 ``-d unimp,guest_errors``.

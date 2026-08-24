@@ -24,6 +24,7 @@
 #define SAM9X7_TWI6_BASE        (SAM9X7_FLEXCOM6_BASE + 0x600)
 #define SAM9X7_PIT64B0_BASE     0xf0028000
 #define SAM9X7_PIT64B1_BASE     0xf0040000
+#define SAM9X7_GMAC_BASE        0xf802c000
 #define SAM9X7_SFR_BASE         0xf8050000
 #define SAM9X7_PMECC_BASE       0xffffe000
 #define SAM9X7_PMERRLOC_BASE    0xffffe600
@@ -54,6 +55,7 @@
 #define AIC_ISR                 0x18
 #define AIC_IPR0                0x20
 #define AIC_IPR1                0x24
+#define AIC_IPR2                0x28
 #define AIC_IMR                 0x30
 #define AIC_CISR                0x34
 #define AIC_EOICR               0x38
@@ -77,6 +79,32 @@
 #define FLEX_MR                 0x00
 #define FLEX_MODE_USART         1
 #define FLEX_MODE_TWI           3
+
+#define GEM_NWCTRL              0x000
+#define GEM_TXQBASE             0x01c
+#define GEM_ISR                 0x024
+#define GEM_IER                 0x028
+#define GEM_PHYMNTNC            0x034
+#define GEM_SPADDR1LO           0x088
+#define GEM_SPADDR1HI           0x08c
+#define GEM_MODID               0x0fc
+#define GEM_DESCONF6            0x294
+#define GEM_INT_Q1_STATUS       0x400
+#define GEM_TRANSMIT_Q1_PTR     0x440
+#define GEM_INT_Q1_ENABLE       0x600
+
+#define GEM_NWCTRL_TXEN         BIT(3)
+#define GEM_NWCTRL_MPE          BIT(4)
+#define GEM_NWCTRL_TSTART       BIT(9)
+#define GEM_INT_XMIT_COMPLETE   BIT(7)
+#define GEM_TX_DESC_LAST        BIT(15)
+#define GEM_TX_DESC_WRAP        BIT(30)
+#define GEM_TX_DESC_USED        BIT(31)
+#define GEM_NUM_QUEUES          6
+
+#define GEM_MDIO_READ           (BIT(30) | (2U << 28) | (2U << 16))
+#define GEM_MDIO_PHY(addr)      ((addr) << 23)
+#define GEM_MDIO_REG(reg)       ((reg) << 18)
 
 #define TWI_CR                  0x00
 #define TWI_MMR                 0x04
@@ -537,6 +565,16 @@ static void aic_set_input(QTestState *qts, unsigned int source, int level)
                      source, level);
 }
 
+static uint16_t gem_mdio_read(QTestState *qts, unsigned int phy,
+                              unsigned int reg)
+{
+    uint32_t command = GEM_MDIO_READ | GEM_MDIO_PHY(phy) |
+                       GEM_MDIO_REG(reg);
+
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_PHYMNTNC, command);
+    return qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_PHYMNTNC);
+}
+
 static void twi6_enable_master(QTestState *qts)
 {
     qtest_writeb(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR, FLEX_MODE_TWI);
@@ -804,6 +842,82 @@ static void test_aic_fiq_mask_and_write_protection(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_WPSR), ==,
                     (AIC_SPU << 8) | 1);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_WPSR), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_gem_registers_mdio_dma_and_irqs(void)
+{
+    static const unsigned int irq_source[GEM_NUM_QUEUES] = {
+        24, 60, 61, 62, 63, 64,
+    };
+    const uint32_t descriptor_base = SAM9X7_DDR_BASE + 0x1000;
+    const uint32_t packet_base = SAM9X7_DDR_BASE + 0x2000;
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE " -nic user,mac=02:00:00:09:75:01");
+    unsigned int q;
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_MODID), ==,
+                    0x00020118);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_DESCONF6) &
+                    (BIT(23) | 0x7f), ==, BIT(23) | 0x3e);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_SPADDR1LO), ==,
+                    0x09000002);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_SPADDR1HI), ==,
+                    0x00000175);
+
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL, GEM_NWCTRL_MPE);
+    g_assert_cmphex(gem_mdio_read(qts, 1, 2), ==, 0x0022);
+    g_assert_cmphex(gem_mdio_read(qts, 1, 3), ==, 0x1650);
+    g_assert_cmphex(gem_mdio_read(qts, 0, 2), ==, 0xffff);
+
+    for (q = 0; q < GEM_NUM_QUEUES; q++) {
+        uint32_t descriptor = descriptor_base + q * 0x100;
+        uint32_t packet = packet_base + q * 0x100;
+
+        aic_configure(qts, irq_source[q], AIC_SMR_LEVEL_HIGH | 7,
+                      0x90000000 | q);
+        qtest_memset(qts, packet, 0xff, 64);
+        qtest_writel(qts, descriptor, packet);
+        qtest_writel(qts, descriptor + 4,
+                     GEM_TX_DESC_WRAP | GEM_TX_DESC_LAST | 64);
+
+        if (q == 0) {
+            qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TXQBASE, descriptor);
+            qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_IER,
+                         GEM_INT_XMIT_COMPLETE);
+        } else {
+            qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TRANSMIT_Q1_PTR +
+                         (q - 1) * 4, descriptor);
+            qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_INT_Q1_ENABLE +
+                         (q - 1) * 4, GEM_INT_XMIT_COMPLETE);
+        }
+    }
+
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL,
+                 GEM_NWCTRL_MPE | GEM_NWCTRL_TXEN | GEM_NWCTRL_TSTART);
+
+    for (q = 0; q < GEM_NUM_QUEUES; q++) {
+        g_assert_true(qtest_readl(qts, descriptor_base + q * 0x100 + 4) &
+                      GEM_TX_DESC_USED);
+    }
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(24));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) &
+                    (BIT(28) | BIT(29) | BIT(30) | BIT(31)), ==,
+                    BIT(28) | BIT(29) | BIT(30) | BIT(31));
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR2) & BIT(0));
+
+    g_assert_true(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_ISR) &
+                  GEM_INT_XMIT_COMPLETE);
+    for (q = 1; q < GEM_NUM_QUEUES; q++) {
+        g_assert_true(qtest_readl(qts, SAM9X7_GMAC_BASE +
+                      GEM_INT_Q1_STATUS + (q - 1) * 4) &
+                      GEM_INT_XMIT_COMPLETE);
+    }
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(24));
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) &
+                   (BIT(28) | BIT(29) | BIT(30) | BIT(31)));
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR2) & BIT(0));
 
     qtest_quit(qts);
 }
@@ -1700,7 +1814,8 @@ static void test_qspi_flash_read_program_and_erase(void)
                                     QSPI_IFR_TFRTYP_MEM;
     const uint32_t flash_offset = 0x1234;
     const uint32_t payload = 0xa55ac33c;
-    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE " -nic user,mac=02:00:00:09:75:01");
     uint32_t value;
 
     qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_MR, UINT32_MAX);
@@ -1744,6 +1859,8 @@ static void test_qspi_flash_read_program_and_erase(void)
                         addressed_data | QSPI_IFR_NBDUM(8));
     g_assert_cmphex(qtest_readl(qts, SAM9X7_QSPI_MEM_BASE), ==,
                     0x50444653);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_QSPI_MEM_BASE + 0x18), ==,
+                    0x1c0200bf);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_QSPI_MEM_BASE + 0x200), ==,
                     0xff4326bf);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_QSPI_MEM_BASE + 0x260), ==,
@@ -1792,6 +1909,8 @@ int main(int argc, char **argv)
                    test_aic_priority_and_nesting);
     qtest_add_func("sam9x75/aic/fiq-mask-and-write-protection",
                    test_aic_fiq_mask_and_write_protection);
+    qtest_add_func("sam9x75/gem/registers-mdio-dma-and-irqs",
+                   test_gem_registers_mdio_dma_and_irqs);
     qtest_add_func("sam9x75/flexcom-twi/registers-nack-and-protection",
                    test_flexcom_twi_registers_nack_and_protection);
     qtest_add_func("sam9x75/flexcom-twi/eeprom-fifo-and-access-width",

@@ -24,6 +24,7 @@
 #include "hw/misc/at91_sfr.h"
 #include "hw/misc/at91_smc.h"
 #include "hw/misc/at91_sysc.h"
+#include "hw/net/cadence_gem.h"
 #include "hw/sd/at91_sdhci.h"
 #include "hw/ssi/at91_ospi.h"
 #include "hw/timer/at91_pit64b.h"
@@ -39,6 +40,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_NUM_PIO              4
 #define SAM9X7_NUM_SDMMC            2
 #define SAM9X7_NUM_FLEXCOM          13
+#define SAM9X7_NUM_GMAC_QUEUES       6
 
 /* Internal memories and external-memory windows. */
 #define SAM9X7_BOOT_BASE             0x00000000
@@ -62,6 +64,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_PIT64B0_BASE          0xf0028000
 #define SAM9X7_PIT64B1_BASE          0xf0040000
 #define SAM9X7_SFR_BASE              0xf8050000
+#define SAM9X7_GMAC_BASE             0xf802c000
 
 /* System peripherals. */
 #define SAM9X7_MATRIX_BASE           0xffffde00
@@ -106,6 +109,7 @@ struct SAM9X7State {
     AT91SMCState smc;
     AT91NANDState nand;
     AT91OSPIState qspi;
+    CadenceGEMState gmac;
     AT91FlexcomState flexcom[SAM9X7_NUM_FLEXCOM];
     AT91TWIState twi[SAM9X7_NUM_FLEXCOM];
     AT91SDHCIState sdmmc[SAM9X7_NUM_SDMMC];

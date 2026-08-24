@@ -54,6 +54,9 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
         SAM9X7_SDMMC1_BASE,
     };
     static const unsigned int sdmmc_irq[] = { 12, 26 };
+    static const unsigned int gmac_irq[SAM9X7_NUM_GMAC_QUEUES] = {
+        24, 60, 61, 62, 63, 64,
+    };
     unsigned int i;
 
     if (!s->memory) {
@@ -174,6 +177,16 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(s->memory, SAM9X7_QSPI_MEM_BASE, mr);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->qspi), 0,
                        qdev_get_gpio_in(DEVICE(&s->aic), 35));
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->gmac), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->gmac), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_GMAC_BASE, mr);
+    for (i = 0; i < ARRAY_SIZE(gmac_irq); i++) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->gmac), i,
+                           qdev_get_gpio_in(DEVICE(&s->aic), gmac_irq[i]));
+    }
 
     for (i = 0; i < ARRAY_SIZE(s->flexcom); i++) {
         if (!sysbus_realize(SYS_BUS_DEVICE(&s->flexcom[i]), errp)) {
@@ -359,6 +372,12 @@ static void sam9x7_init(Object *obj)
                           qdev_get_clock_out(DEVICE(&s->pmc), "pclk[35]"));
     qdev_connect_clock_in(DEVICE(&s->qspi), "gclk",
                           qdev_get_clock_out(DEVICE(&s->pmc), "gclk[35]"));
+
+    object_initialize_child(obj, "gmac", &s->gmac, TYPE_CADENCE_GEM);
+    qdev_prop_set_uint8(DEVICE(&s->gmac), "phy-addr", 1);
+    qdev_prop_set_uint32(DEVICE(&s->gmac), "phy-id", 0x00221650);
+    qdev_prop_set_uint8(DEVICE(&s->gmac), "num-priority-queues",
+                       SAM9X7_NUM_GMAC_QUEUES);
 
     for (i = 0; i < ARRAY_SIZE(s->flexcom); i++) {
         g_autofree char *flexcom_name =

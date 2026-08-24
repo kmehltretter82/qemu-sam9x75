@@ -16,6 +16,7 @@
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/units.h"
+#include "net/net.h"
 #include "system/address-spaces.h"
 #include "system/block-backend.h"
 #include "system/blockdev.h"
@@ -70,6 +71,8 @@ static void sam9x75_curiosity_init(MachineState *machine)
     object_property_set_link(OBJECT(soc), "memory", OBJECT(sysmem),
                              &error_abort);
     qdev_prop_set_chr(DEVICE(&soc->dbgu), "chardev", serial_hd(0));
+    qemu_configure_nic_device(DEVICE(&soc->gmac), true, NULL);
+    qemu_macaddr_default_if_unset(&soc->gmac.conf.macaddr);
     nand_dinfo = drive_get(IF_MTD, 0, 0);
     if (nand_dinfo) {
         qdev_prop_set_drive_err(DEVICE(&soc->nand), "drive",
@@ -78,7 +81,8 @@ static void sam9x75_curiosity_init(MachineState *machine)
     }
 
     /* U6 is a Microchip SST26VF064BEUI 64-Mbit SQI NOR flash. */
-    qspi_flash = qdev_new("sst26vf064b");
+    qspi_flash = qdev_new("sst26vf064beui");
+    qdev_prop_set_macaddr(qspi_flash, "eui48", soc->gmac.conf.macaddr.a);
     qspi_dinfo = drive_get(IF_MTD, 0, 1);
     if (qspi_dinfo) {
         qdev_prop_set_drive_err(qspi_flash, "drive",
