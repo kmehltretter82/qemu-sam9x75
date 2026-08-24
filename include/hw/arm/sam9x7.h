@@ -7,6 +7,7 @@
 #ifndef HW_ARM_SAM9X7_H
 #define HW_ARM_SAM9X7_H
 
+#include "hw/audio/at91_i2smcc.h"
 #include "hw/block/at91_nand.h"
 #include "hw/char/at91_dbgu.h"
 #include "hw/core/clock.h"
@@ -72,6 +73,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 /* User peripherals. */
 #define SAM9X7_XDMAC_BASE            0xf0008000
 #define SAM9X7_QSPI_BASE             0xf0014000
+#define SAM9X7_I2SMCC_BASE           0xf001c000
 #define SAM9X7_PIT64B0_BASE          0xf0028000
 #define SAM9X7_SHA_BASE              0xf002c000
 #define SAM9X7_TRNG_BASE             0xf0030000
@@ -118,6 +120,7 @@ struct SAM9X7State {
     AT91SHAState sha;
     AT91TDESState tdes;
     AT91TRNGState trng;
+    AT91I2SMCCState i2smcc;
     AT91DBGUState dbgu;
     AT91PMCState pmc;
     AT91PMECCState pmecc;
