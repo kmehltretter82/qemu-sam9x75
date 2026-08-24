@@ -90,6 +90,9 @@ config AT91_SHDWC
 config AT91_AES
     bool
 
+config AT91_TRNG
+    bool
+
 config AT91_FLEXCOM
     bool
 

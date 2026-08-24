@@ -184,8 +184,14 @@ Support matrix
        driver probes version 0x700 and acquires both DMA channels.  The
        version value requires hardware confirmation; processing timing,
        double buffering, auto-padding, the AES/SHA protocol path, private-key
-       bus and security-event behavior remain incomplete.  SHA, TDES, TRNG,
-       OTP and PUF are missing.
+       bus and security-event behavior remain incomplete.  TRNG provides
+       guest-random 32-bit values after the clocked 84/168-cycle interval,
+       including HALFR and DIFF modes, PMC gating, AIC source 38, interrupt
+       masking and clear-on-read status, write protection, software-access
+       reports and migration state.  The unmodified Linux hwrng driver
+       completes its runtime-PM read path.  Private-key-bus data delivery,
+       fault injection and hardware entropy characteristics remain missing.
+       SHA, TDES, OTP and PUF are missing.
    * - Display and camera
      - Missing
      - XLCDC, GFX2D, LVDS, DSI/CSI, MIPI PHY, CSI2DC and ISC backends.
@@ -213,11 +219,12 @@ This currently loads unmodified U-Boot, initializes DDR, NAND, MMC and QSPI,
 discovers the LAN8840, and supports DHCP and packet exchange through GEM0.  It
 then loads and enters the Linux image from SD.  The in-memory Linux log reaches
 the RTC, RTT, reset, shutdown-controller and watchdog probes.  The AES driver
-probes version 0x700 and acquires both XDMAC channels; the next fatal probe is
-the unmodeled SHA engine at ``0xf002c000``.  The unmodeled TRNG at
-``0xf0030000`` also faults its hwrng worker, and the selected FLEXCOM USART
-console remains missing.  RomBOOT itself is also missing; ``-kernel`` is a
-development entry path and not a substitute for ROM media selection.
+probes version 0x700 and acquires both XDMAC channels, while the TRNG driver
+completes its clocked random-data path without an external abort.  The next
+fatal probe is the unmodeled SHA engine at ``0xf002c000``.  The selected
+FLEXCOM USART console remains missing.  RomBOOT itself is also missing;
+``-kernel`` is a development entry path and not a substitute for ROM media
+selection.
 
 By default a valid SHDWC shutdown command requests a normal QEMU guest
 shutdown.  Backup-domain wake-up experiments can leave the process running

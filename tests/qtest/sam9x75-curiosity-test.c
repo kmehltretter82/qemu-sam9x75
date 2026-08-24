@@ -24,6 +24,7 @@
 #define SAM9X7_FLEXCOM6_BASE    0xf8010000
 #define SAM9X7_TWI6_BASE        (SAM9X7_FLEXCOM6_BASE + 0x600)
 #define SAM9X7_PIT64B0_BASE     0xf0028000
+#define SAM9X7_TRNG_BASE        0xf0030000
 #define SAM9X7_AES_BASE         0xf0034000
 #define SAM9X7_PIT64B1_BASE     0xf0040000
 #define SAM9X7_TCB_BASE         0xf8008000
@@ -518,6 +519,34 @@
 #define AES_WPMR_WPCREN         BIT(2)
 #define AES_WPMR_KEY            0x41455300
 #define AES_WPSR_WPVS           BIT(0)
+
+#define TRNG_CR                 0x00
+#define TRNG_MR                 0x04
+#define TRNG_PKBCR              0x08
+#define TRNG_IER                0x10
+#define TRNG_IDR                0x14
+#define TRNG_IMR                0x18
+#define TRNG_ISR                0x1c
+#define TRNG_ODATA              0x50
+#define TRNG_WPMR               0xe4
+#define TRNG_WPSR               0xe8
+
+#define TRNG_CR_ENABLE          BIT(0)
+#define TRNG_CR_KEY             0x524e4700
+#define TRNG_MR_HALFR           BIT(0)
+#define TRNG_MR_DIFF            BIT(7)
+#define TRNG_INT_DATRDY         BIT(0)
+#define TRNG_INT_SECE           BIT(1)
+#define TRNG_WPMR_WPEN          BIT(0)
+#define TRNG_WPMR_WPITEN        BIT(1)
+#define TRNG_WPMR_WPCREN        BIT(2)
+#define TRNG_WPMR_KEY           0x524e4700
+#define TRNG_WPSR_WPVS          BIT(0)
+#define TRNG_WPSR_SWE           BIT(3)
+#define TRNG_WPSR_WPVSRC(offset) ((offset) << 8)
+#define TRNG_WPSR_SWETYP(type)  ((type) << 24)
+#define TRNG_WPSR_ECLASS        BIT(31)
+#define TRNG_SWE_TRNG_DIS       3
 
 #define PIO_PER                 0x000
 #define PIO_PDR                 0x004
@@ -2521,6 +2550,114 @@ static void test_aes_feedback_and_xts(void)
     qtest_quit(qts);
 }
 
+static void test_trng_timing_irq_and_protection(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE " -seed 1");
+    uint64_t period;
+    uint64_t duration;
+    uint64_t normal_duration;
+    uint32_t first;
+    uint32_t second;
+    uint32_t status;
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_MR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ISR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_WPMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_WPSR), ==, 0);
+
+    /* An enabled generator remains idle while its peripheral clock is gated. */
+    qtest_writel(qts, SAM9X7_TRNG_BASE + TRNG_CR,
+                 TRNG_CR_KEY | TRNG_CR_ENABLE);
+    qtest_clock_step(qts, 1000000);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ISR), ==, 0);
+    qtest_writel(qts, SAM9X7_TRNG_BASE + TRNG_CR, TRNG_CR_KEY);
+
+    pmc_write_pcr(qts, 38, PMC_PCR_EN);
+    period = get_clock_period(qts, "/machine/soc/pmc/pclk[38]");
+    g_assert_cmpuint(period, !=, 0);
+    duration = (period * 168) >> 32;
+    g_assert_cmpuint(duration, >, 1);
+
+    aic_configure(qts, 38, AIC_SMR_LEVEL_HIGH | 3, 0x38383838);
+    qtest_writel(qts, SAM9X7_TRNG_BASE + TRNG_MR,
+                 TRNG_MR_HALFR | TRNG_MR_DIFF);
+    qtest_writel(qts, SAM9X7_TRNG_BASE + TRNG_IER, TRNG_INT_DATRDY);
+
+    /* The ASCII key is mandatory, and HALFR doubles readiness to 168 ticks. */
+    qtest_writel(qts, SAM9X7_TRNG_BASE + TRNG_CR, TRNG_CR_ENABLE);
+    qtest_clock_step(qts, duration);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ISR), ==, 0);
+
+    qtest_writel(qts, SAM9X7_TRNG_BASE + TRNG_CR,
+                 TRNG_CR_KEY | TRNG_CR_ENABLE);
+    qtest_clock_step(qts, duration - 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ISR), ==, 0);
+    qtest_clock_step(qts, 1);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(6));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ISR), ==,
+                    TRNG_INT_DATRDY);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(6));
+    first = qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ODATA);
+
+    qtest_clock_step(qts, duration);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ISR), ==,
+                    TRNG_INT_DATRDY);
+    second = qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ODATA);
+    g_assert_cmphex(first, !=, second);
+
+    /* Clearing HALFR reschedules the pending value for the normal 84 ticks. */
+    normal_duration = (period * 84) >> 32;
+    g_assert_cmpuint(normal_duration, >, 1);
+    qtest_writel(qts, SAM9X7_TRNG_BASE + TRNG_MR, TRNG_MR_DIFF);
+    qtest_clock_step(qts, normal_duration - 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ISR), ==, 0);
+    qtest_clock_step(qts, 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ISR), ==,
+                    TRNG_INT_DATRDY);
+    qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ODATA);
+
+    qtest_writel(qts, SAM9X7_TRNG_BASE + TRNG_WPMR,
+                 TRNG_WPMR_KEY | TRNG_WPMR_WPEN |
+                 TRNG_WPMR_WPITEN | TRNG_WPMR_WPCREN);
+
+    qtest_writel(qts, SAM9X7_TRNG_BASE + TRNG_MR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_MR), ==,
+                    TRNG_MR_DIFF);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_WPSR), ==,
+                    TRNG_WPSR_WPVSRC(TRNG_MR) | TRNG_WPSR_WPVS);
+
+    qtest_writel(qts, SAM9X7_TRNG_BASE + TRNG_IDR, TRNG_INT_DATRDY);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_IMR), ==,
+                    TRNG_INT_DATRDY);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_WPSR), ==,
+                    TRNG_WPSR_WPVSRC(TRNG_IDR) | TRNG_WPSR_WPVS);
+
+    qtest_writel(qts, SAM9X7_TRNG_BASE + TRNG_CR, TRNG_CR_KEY);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_WPSR), ==,
+                    TRNG_WPSR_WPVSRC(TRNG_CR) | TRNG_WPSR_WPVS);
+    qtest_clock_step(qts, duration);
+    status = qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ISR);
+    g_assert_cmphex(status & (TRNG_INT_DATRDY | TRNG_INT_SECE), ==,
+                    TRNG_INT_DATRDY | TRNG_INT_SECE);
+    qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ODATA);
+
+    qtest_writel(qts, SAM9X7_TRNG_BASE + TRNG_WPMR, TRNG_WPMR_KEY);
+    qtest_writel(qts, SAM9X7_TRNG_BASE + TRNG_CR, TRNG_CR_KEY);
+
+    /* Invalid output reads are classified as critical security events. */
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ODATA), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_WPSR), ==,
+                    TRNG_WPSR_ECLASS |
+                    TRNG_WPSR_SWETYP(TRNG_SWE_TRNG_DIS) |
+                    TRNG_WPSR_WPVSRC(TRNG_ODATA) | TRNG_WPSR_SWE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ISR), ==,
+                    TRNG_INT_SECE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ISR), ==, 0);
+
+    qtest_quit(qts);
+}
+
 static void test_system_slowclock_pit_reset_and_protection(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -3752,6 +3889,8 @@ int main(int argc, char **argv)
                    test_aes_chaining_gcm_and_xdmac);
     qtest_add_func("sam9x75/aes/feedback-and-xts",
                    test_aes_feedback_and_xts);
+    qtest_add_func("sam9x75/trng/timing-irq-and-protection",
+                   test_trng_timing_irq_and_protection);
     qtest_add_func("sam9x75/system/slowclock-pit-reset-and-protection",
                    test_system_slowclock_pit_reset_and_protection);
     qtest_add_func("sam9x75/rtt/count-alarm-modulo-and-protection",

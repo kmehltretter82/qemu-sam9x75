@@ -178,6 +178,14 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->xdmac), 0,
                        qdev_get_gpio_in(DEVICE(&s->aic), 20));
 
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->trng), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->trng), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_TRNG_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->trng), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 38));
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->aes), errp)) {
         return;
     }
@@ -452,6 +460,10 @@ static void sam9x7_init(Object *obj)
     object_initialize_child(obj, "xdmac", &s->xdmac, TYPE_AT91_XDMAC);
     qdev_connect_clock_in(DEVICE(&s->xdmac), "pclk",
                           qdev_get_clock_out(DEVICE(&s->pmc), "pclk[20]"));
+
+    object_initialize_child(obj, "trng", &s->trng, TYPE_AT91_TRNG);
+    qdev_connect_clock_in(DEVICE(&s->trng), "pclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "pclk[38]"));
 
     object_initialize_child(obj, "aes", &s->aes, TYPE_AT91_AES);
     qdev_connect_clock_in(DEVICE(&s->aes), "pclk",
