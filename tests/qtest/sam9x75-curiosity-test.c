@@ -33,6 +33,7 @@
 #define SAM9X7_MPDDRC_BASE      0xffffe800
 #define SAM9X7_SMC_BASE         0xffffea00
 #define SAM9X7_RSTC_BASE        0xfffffe00
+#define SAM9X7_SHDWC_BASE       0xfffffe10
 #define SAM9X7_RTT_BASE         0xfffffe20
 #define SAM9X7_PIT_BASE         0xfffffe40
 #define SAM9X7_SCKC_BASE        0xfffffe50
@@ -275,6 +276,24 @@
 #define RSTC_MR_URSTIEN         BIT(4)
 #define RSTC_MR_ENGCLR          BIT(20)
 #define RSTC_KEY                0xa5000000
+
+#define SHDWC_CR                0x00
+#define SHDWC_MR                0x04
+#define SHDWC_SR                0x08
+#define SHDWC_WUIR              0x0c
+
+#define SHDWC_CR_SHDW           BIT(0)
+#define SHDWC_CR_KEY            0xa5000000
+#define SHDWC_MR_RTTWKEN        BIT(16)
+#define SHDWC_MR_RTCWKEN        BIT(17)
+#define SHDWC_MR_WKUPDBC(value) ((value) << 24)
+#define SHDWC_SR_WKUPS          BIT(0)
+#define SHDWC_SR_RTTWK          BIT(4)
+#define SHDWC_SR_RTCWK          BIT(5)
+#define SHDWC_SR_WKUPIS0        BIT(16)
+#define SHDWC_WUIR_WKUPEN0      BIT(0)
+#define SHDWC_WUIR_WKUPT0       BIT(16)
+#define SHDWC_SLCK_CYCLE_NS      31250LL
 
 #define RTT_MR                  0x00
 #define RTT_AR                  0x04
@@ -2122,6 +2141,190 @@ static void test_rtt_count_alarm_modulo_and_protection(void)
     qtest_quit(qts);
 }
 
+static void shdwc_expect_shutdown(QTestState *qts)
+{
+    QDict *event = qtest_qmp_eventwait_ref(qts, "SHUTDOWN");
+    QDict *data = qdict_get_qdict(event, "data");
+
+    g_assert_nonnull(data);
+    g_assert_true(qdict_get_bool(data, "guest"));
+    g_assert_cmpstr(qdict_get_str(data, "reason"), ==, "guest-shutdown");
+    qobject_unref(event);
+}
+
+static void test_shdwc_registers_shutdown_and_pin_wake(void)
+{
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -global at91-shdwc.request-system-shutdown=off");
+    uint32_t mode = SHDWC_MR_RTTWKEN | SHDWC_MR_RTCWKEN |
+                    SHDWC_MR_WKUPDBC(7);
+    uint32_t wakeup_inputs = SHDWC_WUIR_WKUPEN0 |
+                             SHDWC_WUIR_WKUPT0;
+
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_irq_intercept_out_named(qts, "/machine/soc/shdwc", "shdn");
+    qtest_system_reset(qts);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_CR), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_MR), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_SR), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_WUIR), ==,
+                    0);
+
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_MR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_WUIR, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_MR), ==,
+                    mode);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_WUIR), ==,
+                    wakeup_inputs);
+
+    qtest_writel(qts, SAM9X7_SYSCWP_BASE + SYSC_WPMR,
+                 SYSC_WPMR_KEY | SYSC_WPMR_WPEN);
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_MR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_MR), ==,
+                    mode);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SYSCWP_BASE + SYSC_WPSR), ==,
+                    0x00001401);
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_WUIR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_WUIR), ==,
+                    wakeup_inputs);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SYSCWP_BASE + SYSC_WPSR), ==,
+                    0x00001c01);
+    qtest_writel(qts, SAM9X7_SYSCWP_BASE + SYSC_WPMR, SYSC_WPMR_KEY);
+
+    /* The VDDBU-backed configuration survives an ordinary system reset. */
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_MR), ==,
+                    mode);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_WUIR), ==,
+                    wakeup_inputs);
+    qtest_set_irq_in(qts, "/machine/soc/shdwc", "vddbu-reset", 0, 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_MR), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_WUIR), ==,
+                    0);
+    qtest_set_irq_in(qts, "/machine/soc/shdwc", "vddbu-reset", 0, 0);
+
+    /* A missing key must not start the two-slow-clock shutdown delay. */
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_CR, SHDWC_CR_SHDW);
+    qtest_clock_step(qts, 2 * SHDWC_SLCK_CYCLE_NS);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_MR,
+                 SHDWC_MR_WKUPDBC(1));
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_WUIR, wakeup_inputs);
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_CR,
+                 SHDWC_CR_KEY | SHDWC_CR_SHDW);
+    qtest_clock_step(qts, 2 * SHDWC_SLCK_CYCLE_NS - 1);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, 1);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_set_irq_in(qts, "/machine/soc/shdwc", "wkup", 0, 1);
+    qtest_clock_step(qts, 3 * SHDWC_SLCK_CYCLE_NS - 1);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, 1);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_SR), ==,
+                    SHDWC_SR_WKUPS | SHDWC_SR_WKUPIS0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_SR), ==,
+                    0);
+
+    qtest_quit(qts);
+}
+
+static void test_shdwc_guest_shutdown(void)
+{
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE " -action shutdown=pause");
+
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_CR,
+                 SHDWC_CR_KEY | SHDWC_CR_SHDW);
+    qtest_clock_step(qts, 2 * SHDWC_SLCK_CYCLE_NS);
+    shdwc_expect_shutdown(qts);
+
+    qtest_quit(qts);
+}
+
+static void test_shdwc_rtc_alarm_wake(void)
+{
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -rtc base=2024-02-28T23:59:58,clock=vm"
+        " -global at91-shdwc.request-system-shutdown=off");
+
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_irq_intercept_out_named(qts, "/machine/soc/shdwc", "shdn");
+    qtest_system_reset(qts);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_IDR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_SCCR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_TIMALR,
+                 RTC_TIMALR_SECEN | 0x59);
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_MR,
+                 SHDWC_MR_RTCWKEN);
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_IMR), ==, 0);
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_CR,
+                 SHDWC_CR_KEY | SHDWC_CR_SHDW);
+    qtest_clock_step(qts, 2 * SHDWC_SLCK_CYCLE_NS);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_clock_step(qts,
+                     RTC_SECOND_NS - 2 * SHDWC_SLCK_CYCLE_NS);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, SHDWC_SLCK_CYCLE_NS);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_SR), ==,
+                    SHDWC_SR_RTCWK);
+    g_assert_true(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_SR) &
+                  RTC_SR_ALARM);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(1));
+
+    qtest_quit(qts);
+}
+
+static void test_shdwc_rtt_alarm_wake(void)
+{
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -global at91-shdwc.request-system-shutdown=off");
+
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_irq_intercept_out_named(qts, "/machine/soc/shdwc", "shdn");
+    qtest_system_reset(qts);
+    qtest_readl(qts, SAM9X7_RTT_BASE + RTT_SR);
+    qtest_writel(qts, SAM9X7_RTT_BASE + RTT_AR, 1);
+    qtest_writel(qts, SAM9X7_RTT_BASE + RTT_MR,
+                 RTT_MR_RTTRST | RTT_MR_RTC1HZ);
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_MR,
+                 SHDWC_MR_RTTWKEN);
+
+    g_assert_false(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_MR) &
+                   RTT_MR_ALMIEN);
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_CR,
+                 SHDWC_CR_KEY | SHDWC_CR_SHDW);
+    qtest_clock_step(qts, 2 * SHDWC_SLCK_CYCLE_NS);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_clock_step(qts,
+                     RTC_SECOND_NS - 2 * SHDWC_SLCK_CYCLE_NS);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, SHDWC_SLCK_CYCLE_NS);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_SR), ==,
+                    SHDWC_SR_RTTWK);
+    g_assert_true(qtest_readl(qts, SAM9X7_RTT_BASE + RTT_SR) & RTT_SR_ALMS);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(1));
+
+    qtest_quit(qts);
+}
+
 static void rtc_begin_update(QTestState *qts)
 {
     qtest_writel(qts, SAM9X7_RTC_BASE + RTC_CR,
@@ -2985,6 +3188,14 @@ int main(int argc, char **argv)
                    test_system_slowclock_pit_reset_and_protection);
     qtest_add_func("sam9x75/rtt/count-alarm-modulo-and-protection",
                    test_rtt_count_alarm_modulo_and_protection);
+    qtest_add_func("sam9x75/shdwc/registers-shutdown-and-pin-wake",
+                   test_shdwc_registers_shutdown_and_pin_wake);
+    qtest_add_func("sam9x75/shdwc/guest-shutdown",
+                   test_shdwc_guest_shutdown);
+    qtest_add_func("sam9x75/shdwc/rtc-alarm-wake",
+                   test_shdwc_rtc_alarm_wake);
+    qtest_add_func("sam9x75/shdwc/rtt-alarm-wake",
+                   test_shdwc_rtt_alarm_wake);
     qtest_add_func("sam9x75/gpbr/protection-and-retention",
                    test_gpbr_protection_and_retention);
     qtest_add_func("sam9x75/gpbr/tamper-clear",

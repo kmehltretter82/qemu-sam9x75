@@ -22,6 +22,7 @@ struct AT91RTTState {
 
     MemoryRegion mmio;
     qemu_irq irq;
+    qemu_irq alarm_out;
     Clock *slck;
     ptimer_state *prescaler_timer;
     ptimer_state *rtc_timer;

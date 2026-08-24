@@ -62,6 +62,7 @@ static void at91_rtt_update_irq(AT91RTTState *s)
                   (s->mr & RTT_MR_INC2AEN));
 
     qemu_set_irq(s->irq, level);
+    qemu_set_irq(s->alarm_out, !!(s->sr & RTT_SR_ALMS));
 }
 
 static void at91_rtt_increment_counter(AT91RTTState *s)
@@ -279,6 +280,7 @@ static void at91_rtt_init(Object *obj)
                           TYPE_AT91_RTT, RTT_MMIO_SIZE);
     sysbus_init_mmio(sbd, &s->mmio);
     sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_out_named(DEVICE(s), &s->alarm_out, "alarm", 1);
     s->slck = qdev_init_clock_in(DEVICE(s), "slck",
                                  at91_rtt_clock_changed, s, ClockUpdate);
 }

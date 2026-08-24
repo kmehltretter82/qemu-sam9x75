@@ -193,6 +193,7 @@ config SAM9X7
     select AT91_PMC
     select AT91_PMECC
     select AT91_RSTC
+    select AT91_SHDWC
     select AT91_SCKC
     select AT91_SDHCI
     select AT91_SFR

@@ -260,6 +260,7 @@ static void at91_rtc_update_irq(AT91RTCState *s)
         relevant &= ~(RTC_SR_TDERR | RTC_SR_CALEV | RTC_SR_TIMEV);
     }
     qemu_set_irq(s->irq, s->sr & s->imr & relevant);
+    qemu_set_irq(s->alarm_out, !!(s->sr & RTC_SR_ALARM));
 }
 
 static unsigned int at91_rtc_output_mode(const AT91RTCState *s,
@@ -1193,6 +1194,7 @@ static void at91_rtc_init(Object *obj)
                           TYPE_AT91_RTC, RTC_MMIO_SIZE);
     sysbus_init_mmio(sbd, &s->mmio);
     sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->alarm_out, "alarm", 1);
     qdev_init_gpio_out_named(DEVICE(obj), s->rtc_out, "rtc-out",
                              AT91_RTC_NUM_OUTPUTS);
     qdev_init_gpio_out_named(DEVICE(obj), &s->tamper_out,

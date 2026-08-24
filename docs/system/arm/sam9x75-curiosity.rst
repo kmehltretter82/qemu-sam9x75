@@ -102,12 +102,17 @@ Support matrix
      - WDT has its startup-enabled down-counter, window/level events,
        interrupts, lock and key rules, synchronization guard, reset policy and
        migration state.  RSTC has keyed user/external reset control, status and
-       interrupt behavior.  RTT has slow-clock prescaling, RTC 1 Hz selection,
-       alarm and modulo events, the shared system interrupt, write protection
-       and migration state.  SHDWC, RTC, GPBR and several wake/reset causes are
-       missing.  Both PIT64B instances have clocked one-shot/continuous
-       operation, interrupts, protection, sequence errors and migration
-       coverage.
+       interrupt behavior.  SHDWC has keyed two-slow-clock shutdown, SHDN,
+       programmable WKUP0 polarity/debounce, raw RTC/RTT alarm wake-up,
+       read-clear status, system write protection, VDDBU retention and
+       migration state.  The calendar/UTC RTC includes updates, alarms,
+       waveform outputs, correction, tamper timestamps, protection and
+       migration; RTT includes slow-clock prescaling, RTC 1 Hz selection,
+       alarm and modulo events.  GPBR models its eight retained words,
+       individual write-once protection and tamper clearing.  Both PIT64B
+       instances have clocked one-shot/continuous operation, interrupts,
+       protection, sequence errors and migration coverage.  Remaining reset
+       and wake causes need hardware comparison.
    * - FLEXCOM0--12
      - Initial
      - All thirteen wrappers expose mode ownership and uniquely named I2C buses.
@@ -117,8 +122,13 @@ Support matrix
        USART/SPI children, true asynchronous FIFOs, client mode, SMBus/PEC and
        timing/arbitration fidelity remain missing.
    * - XDMAC
-     - Missing
-     - 16 channels, descriptors, peripheral handshakes, errors and security.
+     - Initial
+     - All 16 channels expose global/channel control, clock gating, memory copy
+       and memset, byte/halfword/word widths, address modes and 2D strides,
+       software and external-request pacing, suspend/resume/flush/disable,
+       linked-list descriptor views, completion/error interrupts and migration
+       state.  Wiring to individual peripheral request lines, security policy,
+       microblock/burst timing and coherency effects remain missing.
    * - SDMMC0 and SDMMC1
      - Initial
      - Both SAM9X7 hosts, removable-card attachment and PA23 card detect are
@@ -193,9 +203,18 @@ boot path directly::
 
 This currently loads unmodified U-Boot, initializes DDR, NAND, MMC and QSPI,
 discovers the LAN8840, and supports DHCP and packet exchange through GEM0.  It
-then loads and enters the Linux image from SD; Linux console bring-up is the
-next integration blocker.  RomBOOT itself is also still missing; ``-kernel``
-is a development entry path and not a substitute for ROM media selection.
+then loads and enters the Linux image from SD.  The in-memory Linux log reaches
+the RTC, RTT, reset, shutdown-controller and watchdog probes; the next fatal
+probe is the unmodeled AES engine at ``0xf0034000``.  The unmodeled TRNG at
+``0xf0030000`` also faults its hwrng worker, and the selected FLEXCOM USART
+console remains missing.  RomBOOT itself is also missing; ``-kernel`` is a
+development entry path and not a substitute for ROM media selection.
+
+By default a valid SHDWC shutdown command requests a normal QEMU guest
+shutdown.  Backup-domain wake-up experiments can leave the process running
+while still modeling SHDN, timing and wake status by adding::
+
+  -global at91-shdwc.request-system-shutdown=off
 
 Completion gates
 ----------------

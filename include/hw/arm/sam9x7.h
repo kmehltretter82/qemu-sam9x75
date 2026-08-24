@@ -22,6 +22,7 @@
 #include "hw/misc/at91_mpddrc.h"
 #include "hw/misc/at91_pmecc.h"
 #include "hw/misc/at91_rstc.h"
+#include "hw/misc/at91_shdwc.h"
 #include "hw/misc/at91_sckc.h"
 #include "hw/misc/at91_sfr.h"
 #include "hw/misc/at91_smc.h"
@@ -112,6 +113,7 @@ struct SAM9X7State {
     AT91GPBRState gpbr;
     AT91SYSCWPState sysc;
     AT91RSTCState rstc;
+    AT91SHDWCState shdwc;
     AT91SCKCState sckc;
     AT91SFRState sfr;
     AT91SMCState smc;

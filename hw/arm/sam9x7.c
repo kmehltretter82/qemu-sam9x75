@@ -112,6 +112,12 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->rstc), 0,
                        qdev_get_gpio_in(DEVICE(&s->sys_irq), 1));
 
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->shdwc), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->shdwc), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_SHDWC_BASE, mr);
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->gpbr), errp)) {
         return;
     }
@@ -135,6 +141,8 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(s->memory, SAM9X7_RTT_BASE, mr);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->rtt), 0,
                        qdev_get_gpio_in(DEVICE(&s->sys_irq), 5));
+    qdev_connect_gpio_out_named(DEVICE(&s->rtt), "alarm", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->shdwc), "rtt-alarm", 0));
 
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->rtc), errp)) {
         return;
@@ -149,6 +157,8 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
                        qdev_get_gpio_in(DEVICE(&s->sys_irq), 6));
     qdev_connect_gpio_out_named(DEVICE(&s->rtc), "tamper-event", 0,
         qdev_get_gpio_in_named(DEVICE(&s->gpbr), "tamper-event", 0));
+    qdev_connect_gpio_out_named(DEVICE(&s->rtc), "alarm", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->shdwc), "rtc-alarm", 0));
 
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->tcb), errp)) {
         return;
@@ -391,6 +401,11 @@ static void sam9x7_init(Object *obj)
     qdev_connect_clock_in(DEVICE(&s->rstc), "slck",
                           qdev_get_clock_out(DEVICE(&s->sckc), "md-slck"));
     s->rstc.sysc = &s->sysc;
+
+    object_initialize_child(obj, "shdwc", &s->shdwc, TYPE_AT91_SHDWC);
+    qdev_connect_clock_in(DEVICE(&s->shdwc), "slck",
+                          qdev_get_clock_out(DEVICE(&s->sckc), "md-slck"));
+    s->shdwc.sysc = &s->sysc;
 
     object_initialize_child(obj, "gpbr", &s->gpbr, TYPE_AT91_GPBR);
     s->gpbr.sysc = &s->sysc;

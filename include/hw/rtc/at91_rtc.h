@@ -24,6 +24,7 @@ struct AT91RTCState {
 
     MemoryRegion mmio;
     qemu_irq irq;
+    qemu_irq alarm_out;
     qemu_irq rtc_out[AT91_RTC_NUM_OUTPUTS];
     qemu_irq tamper_out;
     AT91SYSCWPState *sysc;
