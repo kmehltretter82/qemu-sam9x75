@@ -20,6 +20,8 @@
 #define SAM9X7_NAND_BASE        0x30000000
 #define SAM9X7_QSPI_MEM_BASE    0x60000000
 #define SAM9X7_QSPI_BASE        0xf0014000
+#define SAM9X7_FLEXCOM6_BASE    0xf8010000
+#define SAM9X7_TWI6_BASE        (SAM9X7_FLEXCOM6_BASE + 0x600)
 #define SAM9X7_PIT64B0_BASE     0xf0028000
 #define SAM9X7_PIT64B1_BASE     0xf0040000
 #define SAM9X7_SFR_BASE         0xf8050000
@@ -71,6 +73,61 @@
 #define AIC_CISR_IRQ            BIT(1)
 #define AIC_DCR_GMSK            BIT(1)
 #define AIC_WPMR_KEY            0x41494300
+
+#define FLEX_MR                 0x00
+#define FLEX_MODE_USART         1
+#define FLEX_MODE_TWI           3
+
+#define TWI_CR                  0x00
+#define TWI_MMR                 0x04
+#define TWI_SMR                 0x08
+#define TWI_IADR                0x0c
+#define TWI_CWGR                0x10
+#define TWI_SR                  0x20
+#define TWI_IER                 0x24
+#define TWI_IDR                 0x28
+#define TWI_IMR                 0x2c
+#define TWI_RHR                 0x30
+#define TWI_THR                 0x34
+#define TWI_SMBTR               0x38
+#define TWI_HSR                 0x3c
+#define TWI_ACR                 0x40
+#define TWI_FILTR               0x44
+#define TWI_HSCWGR              0x48
+#define TWI_FMR                 0x50
+#define TWI_FIER                0x64
+#define TWI_FIDR                0x68
+#define TWI_FIMR                0x6c
+#define TWI_WPMR                0xe4
+#define TWI_WPSR                0xe8
+
+#define TWI_CR_START            BIT(0)
+#define TWI_CR_STOP             BIT(1)
+#define TWI_CR_MSEN             BIT(2)
+#define TWI_CR_SVDIS            BIT(5)
+#define TWI_CR_SWRST            BIT(7)
+#define TWI_CR_ACMEN            BIT(16)
+#define TWI_CR_FIFOEN           BIT(28)
+
+#define TWI_MMR_IADRSZ_1        BIT(8)
+#define TWI_MMR_MREAD           BIT(12)
+#define TWI_MMR_DADR(addr)      ((addr) << 16)
+
+#define TWI_SR_TXCOMP           BIT(0)
+#define TWI_SR_RXRDY            BIT(1)
+#define TWI_SR_TXRDY            BIT(2)
+#define TWI_SR_SVREAD           BIT(3)
+#define TWI_SR_NACK             BIT(8)
+#define TWI_SR_SCL              BIT(24)
+#define TWI_SR_SDA              BIT(25)
+
+#define TWI_ACR_DATAL(len)      (len)
+#define TWI_ACR_DIR             BIT(8)
+
+#define TWI_WPMR_WPEN           BIT(0)
+#define TWI_WPMR_WPITEN         BIT(1)
+#define TWI_WPMR_WPCREN         BIT(2)
+#define TWI_WPMR_KEY            0x54574900
 
 #define DBGU_CR                 0x00
 #define DBGU_MR                 0x04
@@ -478,6 +535,187 @@ static void aic_set_input(QTestState *qts, unsigned int source, int level)
 {
     qtest_set_irq_in(qts, "/machine/soc/aic", "unnamed-gpio-in",
                      source, level);
+}
+
+static void twi6_enable_master(QTestState *qts)
+{
+    qtest_writeb(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR, FLEX_MODE_TWI);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR, TWI_CR_SWRST);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR,
+                 TWI_CR_MSEN | TWI_CR_SVDIS);
+}
+
+static void test_flexcom_twi_registers_nack_and_protection(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t status;
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR), ==,
+                    FLEX_MODE_USART);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR), ==, 0);
+
+    qtest_writeb(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR, FLEX_MODE_TWI);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR), ==,
+                    FLEX_MODE_TWI);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR), ==,
+                    0x03000009);
+
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_MMR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_SMR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IADR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CWGR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_SMBTR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_HSR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_ACR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_FILTR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_HSCWGR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_FMR, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_MMR), ==,
+                    0x017f7300);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SMR), ==,
+                    0x007f7ffd);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_IADR), ==,
+                    0x00ffffff);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_CWGR), ==,
+                    0x7f17ffff);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SMBTR), ==,
+                    0xffffff0f);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_HSR), ==,
+                    0x000000ff);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_ACR), ==,
+                    0x03ff03ff);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_FILTR), ==,
+                    0x00000703);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_HSCWGR), ==,
+                    0x0007ffff);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_FMR), ==, 0);
+
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR, TWI_CR_FIFOEN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_FMR), ==,
+                    0x3f3f0033);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_FIER, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_FIMR), ==,
+                    0x000000ff);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_FIDR, 0x5a);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_FIMR), ==,
+                    0x000000a5);
+
+    twi6_enable_master(qts);
+    status = qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR);
+    g_assert_cmphex(status, ==, TWI_SR_SDA | TWI_SR_SCL | TWI_SR_SVREAD |
+                    TWI_SR_TXRDY | TWI_SR_TXCOMP);
+
+    aic_configure(qts, 9, AIC_SMR_LEVEL_HIGH | 3, 0x90090009);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IER, TWI_SR_NACK);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_IMR), ==,
+                    TWI_SR_NACK);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_MMR,
+                 TWI_MMR_DADR(0x53) | TWI_MMR_MREAD |
+                 TWI_MMR_IADRSZ_1);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IADR, 0x42);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR,
+                 TWI_CR_START | TWI_CR_STOP);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(9));
+    status = qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR);
+    g_assert_cmphex(status & (TWI_SR_NACK | TWI_SR_TXRDY | TWI_SR_TXCOMP),
+                    ==, TWI_SR_NACK | TWI_SR_TXRDY | TWI_SR_TXCOMP);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(9));
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IDR, TWI_SR_NACK);
+
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CWGR, 0x12345);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_WPMR,
+                 TWI_WPMR_KEY | TWI_WPMR_WPEN | TWI_WPMR_WPITEN |
+                 TWI_WPMR_WPCREN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_WPMR), ==, 7);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_WPMR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_WPMR), ==, 7);
+
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CWGR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_CWGR), ==,
+                    0x12345);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_WPSR), ==,
+                    (0x610U << 8) | 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_WPSR), ==, 0);
+
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IER, TWI_SR_NACK);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_WPSR), ==,
+                    (0x624U << 8) | 1);
+
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR, TWI_CR_SWRST);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_WPSR), ==,
+                    (0x600U << 8) | 1);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_WPMR, TWI_WPMR_KEY);
+
+    qtest_writeb(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR, FLEX_MODE_USART);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR), ==, 0);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_MMR, 0);
+    qtest_writeb(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR, FLEX_MODE_TWI);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_MMR), ==,
+                    TWI_MMR_DADR(0x53) | TWI_MMR_MREAD |
+                    TWI_MMR_IADRSZ_1);
+
+    qtest_quit(qts);
+}
+
+static void test_twi_eeprom_transfers_fifo_and_access_width(void)
+{
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at24c-eeprom,bus=i2c6,address=0x53,rom-size=256");
+    uint32_t status;
+
+    twi6_enable_master(qts);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_MMR,
+                 TWI_MMR_DADR(0x53) | TWI_MMR_IADRSZ_1);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IADR, 0x20);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_THR, 0x5a);
+    g_assert_true(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR) &
+                  TWI_SR_TXRDY);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_THR, 0xa5);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR, TWI_CR_STOP);
+    g_assert_true(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR) &
+                  TWI_SR_TXCOMP);
+
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_MMR,
+                 TWI_MMR_DADR(0x53) | TWI_MMR_MREAD |
+                 TWI_MMR_IADRSZ_1);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IADR, 0x20);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR, TWI_CR_START);
+    g_assert_true(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR) &
+                  TWI_SR_RXRDY);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_RHR), ==,
+                    0x5a);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR, TWI_CR_STOP);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_RHR), ==,
+                    0xa5);
+    status = qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR);
+    g_assert_true(status & TWI_SR_TXCOMP);
+    g_assert_false(status & TWI_SR_RXRDY);
+
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR,
+                 TWI_CR_FIFOEN | TWI_CR_ACMEN);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_ACR, TWI_ACR_DATAL(2));
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_MMR,
+                 TWI_MMR_DADR(0x53) | TWI_MMR_IADRSZ_1);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IADR, 0x40);
+    qtest_writew(qts, SAM9X7_TWI6_BASE + TWI_THR, 0xbbaa);
+    g_assert_true(qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR) &
+                  TWI_SR_TXCOMP);
+
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_ACR,
+                 TWI_ACR_DIR | TWI_ACR_DATAL(2));
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_MMR,
+                 TWI_MMR_DADR(0x53) | TWI_MMR_IADRSZ_1);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_IADR, 0x40);
+    qtest_writel(qts, SAM9X7_TWI6_BASE + TWI_CR, TWI_CR_START);
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_TWI6_BASE + TWI_RHR), ==,
+                    0xbbaa);
+    status = qtest_readl(qts, SAM9X7_TWI6_BASE + TWI_SR);
+    g_assert_true(status & TWI_SR_TXCOMP);
+    g_assert_false(status & TWI_SR_RXRDY);
+
+    qtest_quit(qts);
 }
 
 static void test_aic_dbgu_integration(void)
@@ -1554,6 +1792,10 @@ int main(int argc, char **argv)
                    test_aic_priority_and_nesting);
     qtest_add_func("sam9x75/aic/fiq-mask-and-write-protection",
                    test_aic_fiq_mask_and_write_protection);
+    qtest_add_func("sam9x75/flexcom-twi/registers-nack-and-protection",
+                   test_flexcom_twi_registers_nack_and_protection);
+    qtest_add_func("sam9x75/flexcom-twi/eeprom-fifo-and-access-width",
+                   test_twi_eeprom_transfers_fifo_and_access_width);
     qtest_add_func("sam9x75/pmc/clock-tree-and-protection",
                    test_pmc_clock_tree_and_protection);
     qtest_add_func("sam9x75/pio/reset-gpio-mux-and-protection",

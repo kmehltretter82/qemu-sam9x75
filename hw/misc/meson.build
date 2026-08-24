@@ -18,6 +18,7 @@ system_ss.add(when: 'CONFIG_AT91_SFR', if_true: files('at91_sfr.c'))
 system_ss.add(when: 'CONFIG_AT91_SCKC', if_true: files('at91_sckc.c'))
 system_ss.add(when: 'CONFIG_AT91_MPDDRC', if_true: files('at91_mpddrc.c'))
 system_ss.add(when: 'CONFIG_AT91_RSTC', if_true: files('at91_rstc.c'))
+system_ss.add(when: 'CONFIG_AT91_FLEXCOM', if_true: files('at91_flexcom.c'))
 
 # ARM devices
 system_ss.add(when: 'CONFIG_PL310', if_true: files('arm_l2x0.c'))

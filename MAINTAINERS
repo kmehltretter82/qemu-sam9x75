@@ -1059,6 +1059,17 @@ F: include/hw/arm/fsl-imx6.h
 F: include/hw/misc/imx6_*.h
 F: include/hw/ssi/imx_spi.h
 
+SAM9X75 Curiosity
+M: Karl Mehltretter <kmehltretter@gmail.com>
+L: qemu-arm@nongnu.org
+S: Maintained
+F: hw/arm/sam9x7.c
+F: hw/arm/sam9x75_curiosity.c
+F: hw/*/at91_*.c
+F: include/hw/*/at91_*.h
+F: docs/system/arm/sam9x75-curiosity.rst
+F: tests/qtest/sam9x75-curiosity-test.c
+
 SBSA-REF
 M: Peter Maydell <peter.maydell@linaro.org>
 R: Leif Lindholm <leif.lindholm@oss.qualcomm.com>

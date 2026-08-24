@@ -70,8 +70,10 @@ Support matrix
        remap and revision errata remain missing.
    * - SRAM and DDR3L
      - Initial
-     - 64 KiB SRAM0, 4 KiB SRAM1 and fixed 256 MiB DDR mapped; OTP emulation
-       control and MPDDRC behavior are missing.
+     - 64 KiB SRAM0, 4 KiB SRAM1 and fixed 256 MiB DDR mapped.  MPDDRC
+       configuration, refresh, error reporting, interrupts and write
+       protection have an initial register model; DDR timing/training and OTP
+       emulation control remain missing.
    * - DBGU and chip identification
      - Initial
      - Polling TX/RX, masks, local loopback, CIDR and EXID implemented;
@@ -85,8 +87,9 @@ Support matrix
      - Initial
      - Main and slow oscillators, five SAM9X7 PLL clock entries, master,
        programmable, generated and peripheral clocks, gating, interrupts and
-       write protection are modeled.  SCKC, failure-monitor timing and the
-       remaining revision-erratum cases are missing.
+       write protection are modeled.  SCKC selects the modeled RC/crystal slow
+       clocks; oscillator start-up/failure-monitor timing and the remaining
+       revision-erratum cases are missing.
    * - PIOA--PIOD and pinctrl
      - Initial
      - SiP-specific valid lines and reset pulls, GPIO and open-drain drive,
@@ -98,26 +101,38 @@ Support matrix
      - Initial
      - WDT has its startup-enabled down-counter, window/level events,
        interrupts, lock and key rules, synchronization guard, reset policy and
-       migration state.  RSTC, SHDWC, RTT, RTC, GPBR and wake/reset causes are
-       missing.  Both PIT64B instances already have clocked one-shot/continuous
+       migration state.  RSTC has keyed user/external reset control, status and
+       interrupt behavior.  SHDWC, RTT, RTC, GPBR and several wake/reset causes
+       are missing.  Both PIT64B instances have clocked one-shot/continuous
        operation, interrupts, protection, sequence errors and migration
        coverage.
    * - FLEXCOM0--12
-     - Missing
-     - Mode ownership and USART, SPI and TWI register interfaces.
+     - Initial
+     - All thirteen wrappers expose mode ownership and uniquely named I2C buses.
+       The TWI host path covers polled byte transfers, internal addresses,
+       repeated starts, NACK and AIC signaling, alternative-command mode,
+       FIFO-width accesses, masks, write protection, reset and migration.
+       USART/SPI children, true asynchronous FIFOs, client mode, SMBus/PEC and
+       timing/arbitration fidelity remain missing.
    * - XDMAC
      - Missing
      - 16 channels, descriptors, peripheral handshakes, errors and security.
    * - SDMMC0 and SDMMC1
-     - Missing
-     - SAM9X7 SDHCI quirks, removable-card signals, DMA and boot operation.
+     - Initial
+     - Both SAM9X7 hosts, removable-card attachment and PA23 card detect are
+       wired.  The unmodified AT91Bootstrap SD/ADMA path loads U-Boot; register,
+       command, DMA error and media-change completeness remains under audit.
    * - OSPI/QSPI NOR
-     - Missing
-     - Controller, XIP window, SST26VF064BE, persistence and ROM quad-mode
-       erratum.
+     - Initial
+     - Controller and XIP windows, SST26VF064BE identity, SFDP/EUI data,
+       program/erase and U-Boot probing are modeled.  Persistence with a drive,
+       all protocol widths and the ROM quad-mode erratum need further coverage.
    * - EBI/SMC and raw NAND
-     - Missing
-     - MX30LF4G28AD, ONFI, OOB/bad blocks, PMECC and PMERRLOC.
+     - Initial
+     - The MX30LF4G28AD identity, ONFI parameter data, page program/read and
+       erase paths, SMC registers, and initial PMECC/PMERRLOC control/status are
+       present.  Real ECC generation/correction, OOB/bad-block behavior and DMA
+       remain missing.
    * - GEM and LAN8840
      - Missing
      - Queues, MDIO/RGMII PHY, checksum, PTP/TSN and LAN Kit interrupts.
@@ -155,15 +170,25 @@ The initial machine can be inspected with qtest or started without firmware::
 
   qemu-system-arm -M sam9x75-curiosity -nographic
 
-Until RomBOOT and media controllers exist, a bare-metal image should be loaded
-into SRAM with the generic loader and its entry point assigned to CPU 0.  This
-is a development path only, not a substitute for the real boot flow.
+An unmodified AT91Bootstrap ELF and SD image can exercise the current media
+boot path directly::
+
+  qemu-system-arm -M sam9x75-curiosity \
+    -kernel sam9x7-sdcardboot-uboot-4.0.13.elf \
+    -drive file=sam9x75-sdcard.img,if=sd,format=raw -nographic
+
+This currently loads unmodified U-Boot, initializes DDR, NAND, MMC and QSPI,
+then reaches Ethernet probing.  GEM0 is not implemented yet, so the next access
+at ``0xf802c0fc`` aborts in ``macb_is_gem()``.  RomBOOT itself is also still
+missing; ``-kernel`` is a development entry path and not a substitute for ROM
+media selection.
 
 Completion gates
 ----------------
 
-The integration gates, in order, are polling DBGU from SRAM, interrupt-driven
-bare metal, unmodified SD AT91Bootstrap to U-Boot, Linux shell from SD, genuine
-QSPI and NAND boot, base-board I/O, LAN/USB, multimedia/security, migration and
-finally hardware differential validation.  Normal supported boots must be
-clean with ``-d unimp,guest_errors``.
+Polling DBGU from SRAM, interrupt-driven bare metal and unmodified SD
+AT91Bootstrap into U-Boot are achieved.  The remaining integration gates are
+GEM/LAN8840 initialization, a Linux shell from SD, genuine QSPI and NAND boot,
+base-board I/O, USB, multimedia/security, migration and finally hardware
+differential validation.  Normal supported boots must be clean with
+``-d unimp,guest_errors``.

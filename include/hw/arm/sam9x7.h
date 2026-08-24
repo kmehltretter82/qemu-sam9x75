@@ -13,7 +13,9 @@
 #include "hw/core/or-irq.h"
 #include "hw/core/sysbus.h"
 #include "hw/gpio/at91_pio.h"
+#include "hw/i2c/at91_twi.h"
 #include "hw/intc/at91_aic.h"
+#include "hw/misc/at91_flexcom.h"
 #include "hw/misc/at91_pmc.h"
 #include "hw/misc/at91_mpddrc.h"
 #include "hw/misc/at91_pmecc.h"
@@ -36,6 +38,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 
 #define SAM9X7_NUM_PIO              4
 #define SAM9X7_NUM_SDMMC            2
+#define SAM9X7_NUM_FLEXCOM          13
 
 /* Internal memories and external-memory windows. */
 #define SAM9X7_BOOT_BASE             0x00000000
@@ -103,6 +106,8 @@ struct SAM9X7State {
     AT91SMCState smc;
     AT91NANDState nand;
     AT91OSPIState qspi;
+    AT91FlexcomState flexcom[SAM9X7_NUM_FLEXCOM];
+    AT91TWIState twi[SAM9X7_NUM_FLEXCOM];
     AT91SDHCIState sdmmc[SAM9X7_NUM_SDMMC];
     AT91PIOState pio[SAM9X7_NUM_PIO];
     AT91PIT64BState pit64b[2];

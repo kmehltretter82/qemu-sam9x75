@@ -78,6 +78,9 @@ config AT91_RSTC
     bool
     select AT91_SYSC
 
+config AT91_FLEXCOM
+    bool
+
 config MAX78000_AES
     bool
 
