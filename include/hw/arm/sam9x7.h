@@ -38,6 +38,7 @@
 #include "hw/rtc/at91_rtc.h"
 #include "hw/sd/at91_sdhci.h"
 #include "hw/ssi/at91_ospi.h"
+#include "hw/ssi/at91_spi.h"
 #include "hw/timer/at91_pit64b.h"
 #include "hw/timer/at91_pit.h"
 #include "hw/timer/at91_rtt.h"
@@ -146,6 +147,7 @@ struct SAM9X7State {
     CadenceGEMState gmac;
     AT91FlexcomState flexcom[SAM9X7_NUM_FLEXCOM];
     AT91USARTState usart[SAM9X7_NUM_FLEXCOM];
+    AT91SPIState spi[SAM9X7_NUM_FLEXCOM];
     AT91TWIState twi[SAM9X7_NUM_FLEXCOM];
     AT91SDHCIState sdmmc[SAM9X7_NUM_SDMMC];
     AT91PIOState pio[SAM9X7_NUM_PIO];

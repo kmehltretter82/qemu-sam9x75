@@ -10,6 +10,7 @@
 #include "hw/core/irq.h"
 #include "hw/i2c/at91_twi.h"
 #include "hw/misc/at91_flexcom.h"
+#include "hw/ssi/at91_spi.h"
 #include "migration/vmstate.h"
 #include "qemu/bitops.h"
 #include "qemu/module.h"
@@ -39,12 +40,38 @@ static void at91_flexcom_update_irq(AT91FlexcomState *s)
     qemu_set_irq(s->irq, level);
 }
 
+static void at91_flexcom_update_dma(AT91FlexcomState *s)
+{
+    bool tx = false;
+    bool rx = false;
+
+    switch (s->mr) {
+    case AT91_FLEXCOM_MODE_USART:
+        tx = s->usart_tx_request_level;
+        rx = s->usart_rx_request_level;
+        break;
+    case AT91_FLEXCOM_MODE_SPI:
+        tx = s->spi_tx_request_level;
+        rx = s->spi_rx_request_level;
+        break;
+    case AT91_FLEXCOM_MODE_TWI:
+        tx = s->twi_tx_request_level;
+        rx = s->twi_rx_request_level;
+        break;
+    default:
+        break;
+    }
+    qemu_set_irq(s->tx_request, tx);
+    qemu_set_irq(s->rx_request, rx);
+}
+
 static void at91_flexcom_update_mode(AT91FlexcomState *s)
 {
     qemu_set_irq(s->usart_enabled, s->mr == AT91_FLEXCOM_MODE_USART);
     qemu_set_irq(s->spi_enabled, s->mr == AT91_FLEXCOM_MODE_SPI);
     qemu_set_irq(s->twi_enabled, s->mr == AT91_FLEXCOM_MODE_TWI);
     at91_flexcom_update_irq(s);
+    at91_flexcom_update_dma(s);
 }
 
 static uint32_t at91_flexcom_merge_write(uint32_t old, hwaddr offset,
@@ -68,6 +95,9 @@ static uint64_t at91_flexcom_read(void *opaque, hwaddr offset,
     case FLEX_RHR:
         if (s->mr == AT91_FLEXCOM_MODE_USART && s->usart) {
             return at91_usart_flexcom_read(s->usart, size);
+        }
+        if (s->mr == AT91_FLEXCOM_MODE_SPI && s->spi) {
+            return at91_spi_flexcom_read(s->spi, size);
         }
         if (s->mr == AT91_FLEXCOM_MODE_TWI && s->twi) {
             return at91_twi_flexcom_read(s->twi, size);
@@ -96,6 +126,8 @@ static void at91_flexcom_write(void *opaque, hwaddr offset, uint64_t value,
                  0xffff;
         if (s->mr == AT91_FLEXCOM_MODE_USART && s->usart) {
             at91_usart_flexcom_write(s->usart, value, size);
+        } else if (s->mr == AT91_FLEXCOM_MODE_SPI && s->spi) {
+            at91_spi_flexcom_write(s->spi, value, size);
         } else if (s->mr == AT91_FLEXCOM_MODE_TWI && s->twi) {
             at91_twi_flexcom_write(s->twi, value, size);
         }
@@ -140,6 +172,54 @@ static void at91_flexcom_set_twi_irq(void *opaque, int n, int level)
     at91_flexcom_update_irq(s);
 }
 
+static void at91_flexcom_set_usart_tx_request(void *opaque, int n, int level)
+{
+    AT91FlexcomState *s = opaque;
+
+    s->usart_tx_request_level = level;
+    at91_flexcom_update_dma(s);
+}
+
+static void at91_flexcom_set_usart_rx_request(void *opaque, int n, int level)
+{
+    AT91FlexcomState *s = opaque;
+
+    s->usart_rx_request_level = level;
+    at91_flexcom_update_dma(s);
+}
+
+static void at91_flexcom_set_spi_tx_request(void *opaque, int n, int level)
+{
+    AT91FlexcomState *s = opaque;
+
+    s->spi_tx_request_level = level;
+    at91_flexcom_update_dma(s);
+}
+
+static void at91_flexcom_set_spi_rx_request(void *opaque, int n, int level)
+{
+    AT91FlexcomState *s = opaque;
+
+    s->spi_rx_request_level = level;
+    at91_flexcom_update_dma(s);
+}
+
+static void at91_flexcom_set_twi_tx_request(void *opaque, int n, int level)
+{
+    AT91FlexcomState *s = opaque;
+
+    s->twi_tx_request_level = level;
+    at91_flexcom_update_dma(s);
+}
+
+static void at91_flexcom_set_twi_rx_request(void *opaque, int n, int level)
+{
+    AT91FlexcomState *s = opaque;
+
+    s->twi_rx_request_level = level;
+    at91_flexcom_update_dma(s);
+}
+
 static void at91_flexcom_reset(DeviceState *dev)
 {
     AT91FlexcomState *s = AT91_FLEXCOM(dev);
@@ -150,6 +230,12 @@ static void at91_flexcom_reset(DeviceState *dev)
     s->usart_irq_level = false;
     s->spi_irq_level = false;
     s->twi_irq_level = false;
+    s->usart_tx_request_level = false;
+    s->usart_rx_request_level = false;
+    s->spi_tx_request_level = false;
+    s->spi_rx_request_level = false;
+    s->twi_tx_request_level = false;
+    s->twi_rx_request_level = false;
     at91_flexcom_update_mode(s);
 }
 
@@ -161,7 +247,7 @@ static int at91_flexcom_post_load(void *opaque, int version_id)
 
 static const VMStateDescription at91_flexcom_vmstate = {
     .name = TYPE_AT91_FLEXCOM,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = at91_flexcom_post_load,
     .fields = (const VMStateField[]) {
@@ -170,6 +256,12 @@ static const VMStateDescription at91_flexcom_vmstate = {
         VMSTATE_BOOL_V(usart_irq_level, AT91FlexcomState, 2),
         VMSTATE_BOOL_V(spi_irq_level, AT91FlexcomState, 2),
         VMSTATE_BOOL_V(twi_irq_level, AT91FlexcomState, 2),
+        VMSTATE_BOOL_V(usart_tx_request_level, AT91FlexcomState, 3),
+        VMSTATE_BOOL_V(usart_rx_request_level, AT91FlexcomState, 3),
+        VMSTATE_BOOL_V(spi_tx_request_level, AT91FlexcomState, 3),
+        VMSTATE_BOOL_V(spi_rx_request_level, AT91FlexcomState, 3),
+        VMSTATE_BOOL_V(twi_tx_request_level, AT91FlexcomState, 3),
+        VMSTATE_BOOL_V(twi_rx_request_level, AT91FlexcomState, 3),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -186,16 +278,31 @@ static void at91_flexcom_init(Object *obj)
     qdev_init_gpio_out_named(dev, &s->usart_enabled, "usart-enabled", 1);
     qdev_init_gpio_out_named(dev, &s->spi_enabled, "spi-enabled", 1);
     qdev_init_gpio_out_named(dev, &s->twi_enabled, "twi-enabled", 1);
+    qdev_init_gpio_out_named(dev, &s->tx_request, "tx-request", 1);
+    qdev_init_gpio_out_named(dev, &s->rx_request, "rx-request", 1);
     qdev_init_gpio_in_named(dev, at91_flexcom_set_usart_irq,
                             "usart-irq", 1);
     qdev_init_gpio_in_named(dev, at91_flexcom_set_spi_irq, "spi-irq", 1);
     qdev_init_gpio_in_named(dev, at91_flexcom_set_twi_irq, "twi-irq", 1);
+    qdev_init_gpio_in_named(dev, at91_flexcom_set_usart_tx_request,
+                            "usart-tx-request", 1);
+    qdev_init_gpio_in_named(dev, at91_flexcom_set_usart_rx_request,
+                            "usart-rx-request", 1);
+    qdev_init_gpio_in_named(dev, at91_flexcom_set_spi_tx_request,
+                            "spi-tx-request", 1);
+    qdev_init_gpio_in_named(dev, at91_flexcom_set_spi_rx_request,
+                            "spi-rx-request", 1);
+    qdev_init_gpio_in_named(dev, at91_flexcom_set_twi_tx_request,
+                            "twi-tx-request", 1);
+    qdev_init_gpio_in_named(dev, at91_flexcom_set_twi_rx_request,
+                            "twi-rx-request", 1);
 }
 
 void at91_flexcom_set_children(AT91FlexcomState *s, AT91USARTState *usart,
-                               AT91TWIState *twi)
+                               AT91SPIState *spi, AT91TWIState *twi)
 {
     s->usart = usart;
+    s->spi = spi;
     s->twi = twi;
 }
 

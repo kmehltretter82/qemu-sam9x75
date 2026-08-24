@@ -122,37 +122,51 @@ Support matrix
    * - FLEXCOM0--12
      - Initial
      - All thirteen wrappers expose mode ownership, shared AIC routing and
-       uniquely named I2C buses.  Each USART personality has the SAM9X7
+       shared XDMAC request routing, uniquely named I2C buses and SSI buses.
+       Each USART personality has the SAM9X7
        register masks and reset values, a 16-byte FIFO, byte/halfword/word
        transfers, clocked character-backend transmission and reception,
        local/automatic/remote loopback, timeout and comparison events, write
        protection, migration and its documented XDMAC transmit/receive pair.
+       Each SPI personality has the SAM9X7 register layout, masks and write
+       protection, 16-entry transmit/receive FIFOs, 8--16-bit host transfers,
+       fixed and variable peripheral selection, direct and decoded chip
+       selects, PCLK/GCLK bit-rate selection, programmable chip-select and
+       transfer delays, local loopback, comparison, interrupts, migration and
+       its documented XDMAC pair.  The host data path uses a normal QEMU SSI
+       bus, and FLEXCOM4 NPCS1 reaches the M.2 socket through J24.
        The TWI host path covers polled byte transfers, internal addresses,
        repeated starts, NACK and AIC signaling, alternative-command mode,
        FIFO-width accesses, masks, write protection, reset and migration.
-       SPI personalities, bit-level USART framing and synchronous/protocol
-       engines, complete flow-control endpoints, TWI client mode, SMBus/PEC
-       and timing/arbitration fidelity remain missing.
+       SPI client mode and pin-level mode-fault/framing input, CRC and two-pin
+       engines, bit-level USART framing and synchronous/protocol engines,
+       complete flow-control endpoints, TWI client mode, SMBus/PEC and
+       timing/arbitration fidelity remain missing.  SAM9X7 documentation and
+       its device pack do not define the legacy SPI version word at offset
+       ``0xfc``; the model conservatively returns zero until the reserved read
+       and Linux capability-detection behavior can be measured on hardware.
    * - XDMAC
      - Initial
      - All 16 channels expose global/channel control, clock gating, memory copy
        and memset, byte/halfword/word widths, address modes and 2D strides,
        software and external-request pacing, suspend/resume/flush/disable,
        linked-list descriptor views, completion/error interrupts and migration
-       state.  DBGU, every FLEXCOM USART, I2SMCC, Class-D, AES, SHA and TDES
-       request lines are wired; the remaining peripheral request lines,
-       security policy, microblock/burst timing and coherency effects remain
-       missing.
+       state.  DBGU, every FLEXCOM USART and SPI personality, I2SMCC, Class-D,
+       AES, SHA and TDES request lines are wired; the remaining peripheral
+       request lines, security policy, microblock/burst timing and coherency
+       effects remain missing.
    * - SDMMC0 and SDMMC1
      - Initial
      - Both SAM9X7 hosts, removable-card attachment and PA23 card detect are
        wired.  J24 defaults to SDIO and routes an optional second SD drive to
-       the M.2 socket through SDMMC1; its SPI position electrically
-       disconnects that host.  Host preset registers and the Linux ADMA
-       descriptor form are covered.  The unmodified AT91Bootstrap SD/ADMA
-       path loads U-Boot, and Linux mounts the SD root filesystem and reaches
-       a shell.  SDIO I/O functions, FLEXCOM4 SPI card attachment, register,
-       command, DMA error and media-change completeness remain under audit.
+       the M.2 socket through SDMMC1.  Its SPI position electrically
+       disconnects that host and attaches the same drive to FLEXCOM4 NPCS1;
+       a board qtest clocks the card and receives its SPI-mode CMD0 response.
+       Host preset registers and the Linux ADMA descriptor form are covered.
+       The unmodified AT91Bootstrap SD/ADMA path loads U-Boot, and Linux mounts
+       the SD root filesystem and reaches a shell.  SDIO I/O functions,
+       full M.2 ``mmc_spi`` guest integration, register, command, DMA error and
+       media-change completeness remain under audit.
    * - OSPI/QSPI NOR
      - Initial
      - Controller and XIP windows, SST26VF064BEUI identity, SFDP/EUI data,
@@ -280,12 +294,12 @@ Support matrix
        functional disconnected states.  The default J38/J39 setting connects
        PAC1934 to FLEXCOM7; its SoC, USB-bridge and disconnected jumper routes
        have a machine option and functional SoC-side NACK behavior.  J24
-       defaults to the M.2 SDIO route; its SPI position disconnects SDMMC1
-       pending FLEXCOM4 SPI support.  J12 controls the LAN8840 daughterboard's
-       required 25 MHz clock, with functional MDIO and traffic loss when
-       open.  The remaining power, clock and interface-selection jumpers,
-       mikroBUS, Raspberry Pi header, M.2 peripherals and official Microchip
-       overlay attachments remain.
+       defaults to the M.2 SDIO route; its SPI position disconnects SDMMC1 and
+       routes the card to FLEXCOM4 NPCS1.  J12 controls the LAN8840
+       daughterboard's required 25 MHz clock, with functional MDIO and traffic
+       loss when open.  The remaining power, clock and interface-selection
+       jumpers, mikroBUS, Raspberry Pi header, non-storage M.2 peripherals and
+       official Microchip overlay attachments remain.
 
 Execution roadmap
 -----------------
@@ -307,12 +321,13 @@ phase green merely by avoiding it in the device tree.
    PMIC nRSTO/NRST handoff
    now distinguishes VDDCORE resets from the retained VDDBU domain.  Next
    complete the remaining meaningful jumper/mux selections.
-#. **Complete reusable data paths.**  Finish synchronous and protocol-specific
-   USART behavior, add the SPI personality to all applicable FLEXCOM
-   instances, complete TWI client/SMBus/PEC/FIFO behavior, and wire every
-   documented XDMAC request.  Complete SSC, TC1, external timer pins, PWM and
-   ADC so expansion-board drivers can use normal QEMU chardev, SSI, I2C and
-   analog/digital endpoint abstractions.
+#. **Complete reusable data paths.**  The SPI personality and SSI host path now
+   exist on all FLEXCOM instances.  Finish its client, CRC and two-pin modes;
+   finish synchronous and protocol-specific USART behavior; complete TWI
+   client/SMBus/PEC/FIFO behavior; and wire every remaining documented XDMAC
+   request.  Complete SSC, TC1, external timer pins, PWM and ADC so expansion-
+   board drivers can use normal QEMU chardev, SSI, I2C and analog/digital
+   endpoint abstractions.
 #. **Close storage and memory-controller fidelity.**  Complete SDHCI command,
    error, media-change and migration behavior; implement NAND OOB, bad-block,
    PMECC generation/correction and DMA; finish SMC, matrix and MPDDRC-visible
@@ -363,7 +378,7 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The 71-test board qtest baseline and this boot are clean of SAM9X75 model
+The 75-test board qtest baseline and this boot are clean of SAM9X75 model
 warnings with ``-d unimp,guest_errors``.  Generic SD diagnostics still report
 the expected failed MMC/SDIO probes against a memory-only SD card.  RomBOOT
 itself is still missing; ``-kernel`` is a development entry path and not a
@@ -447,8 +462,9 @@ J24 to pins 2--3 with::
   -M sam9x75-curiosity,m2-interface=spi
 
 This electrically disconnects the M.2 card from SDMMC1.  Attaching the second
-SD drive while selecting SPI is rejected explicitly because FLEXCOM4 SPI card
-attachment is not implemented yet.
+SD drive attaches an SPI-mode SD card to FLEXCOM4 NPCS1 instead.  The same
+``if=sd,index=1`` drive syntax is used for both jumper positions; only the
+electrical route changes.
 
 Completion gates
 ----------------
@@ -456,8 +472,8 @@ Completion gates
 Polling DBGU from SRAM, interrupt-driven bare metal, unmodified SD
 AT91Bootstrap into U-Boot, a Linux shell from SD, and GEM/LAN8840 packet
 exchange and the populated LED/button paths are achieved.  The remaining
-integration gates are the remaining board jumper and mux behavior, genuine
-QSPI and NAND RomBOOT, USB, CAN, expansion buses, multimedia/security,
-whole-machine migration and finally hardware differential validation.  Normal
-supported boots must be clean with
+integration gates include full guest ``mmc_spi`` operation through J24, the
+remaining board jumper and mux behavior, genuine QSPI and NAND RomBOOT, USB,
+CAN, expansion buses, multimedia/security, whole-machine migration and finally
+hardware differential validation.  Normal supported boots must be clean with
 ``-d unimp,guest_errors``.

@@ -78,6 +78,32 @@ static bool sam9x75_curiosity_attach_sd(SAM9X7State *soc,
     return true;
 }
 
+static bool sam9x75_curiosity_attach_spi_sd(SAM9X7State *soc,
+                                            unsigned int unit)
+{
+    DriveInfo *dinfo = drive_get(IF_SD, 0, unit);
+    DeviceState *adapter;
+    DeviceState *card;
+
+    if (!dinfo) {
+        return false;
+    }
+
+    /* J24 pins 2-3 route FLEXCOM4 IO4/NPCS1 to M.2 pin 15. */
+    adapter = qdev_new("ssi-sd");
+    qdev_prop_set_uint8(adapter, "cs", 1);
+    qdev_realize_and_unref(adapter, BUS(soc->spi[4].bus), &error_fatal);
+    qdev_connect_gpio_out_named(DEVICE(&soc->spi[4]), "cs", 1,
+        qdev_get_gpio_in_named(adapter, SSI_GPIO_CS, 0));
+
+    card = qdev_new(TYPE_SD_CARD_SPI);
+    qdev_prop_set_drive_err(card, "drive", blk_by_legacy_dinfo(dinfo),
+                            &error_fatal);
+    qdev_realize_and_unref(card, qdev_get_child_bus(adapter, "sd-bus"),
+                           &error_fatal);
+    return true;
+}
+
 static void sam9x75_curiosity_create_controls(MachineState *machine,
                                                SAM9X7State *soc,
                                                I2CSlave *pmic)
@@ -266,11 +292,8 @@ static void sam9x75_curiosity_init(MachineState *machine)
     }
     if (board->m2_interface == SAM9X75_M2_INTERFACE_SDIO) {
         sam9x75_curiosity_attach_sd(soc, 1);
-    } else if (drive_get(IF_SD, 0, 1)) {
-        error_report("an SD drive at index 1 cannot be connected when "
-                     "J24 selects the M.2 SPI interface");
-        error_report("FLEXCOM4 SPI card attachment is not implemented yet");
-        exit(EXIT_FAILURE);
+    } else {
+        sam9x75_curiosity_attach_spi_sd(soc, 1);
     }
 
     /* The populated NAND drives its active-high ready signal onto PD14. */
