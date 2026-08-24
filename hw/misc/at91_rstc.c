@@ -8,6 +8,7 @@
 
 #include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/resettable.h"
 #include "hw/misc/at91_rstc.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
@@ -55,6 +56,11 @@ bool at91_rstc_gpbr_clear_enabled(const AT91RSTCState *s)
     return s && (s->mode & RSTC_MR_ENGCLR);
 }
 
+bool at91_rstc_watchdog_reset_pending(const AT91RSTCState *s)
+{
+    return s && s->pending_reset_type == RSTC_TYPE_WATCHDOG;
+}
+
 static void at91_rstc_update_irq(AT91RSTCState *s)
 {
     bool asserted = s->ursts && !(s->mode & RSTC_MR_URSTEN) &&
@@ -95,15 +101,25 @@ static void at91_rstc_assert_external(AT91RSTCState *s)
               at91_rstc_slow_clock_delay(s, cycles));
 }
 
+static void at91_rstc_request_reset(AT91RSTCState *s)
+{
+    s->reset_request_level = true;
+    qemu_set_irq(s->reset_request, 1);
+    qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+}
+
 static void at91_rstc_user_event(AT91RSTCState *s)
 {
     s->ursts = true;
     at91_rstc_update_irq(s);
 
     if (s->mode & RSTC_MR_URSTEN) {
+        if (s->power_reset_level) {
+            return;
+        }
         s->pending_reset_type = RSTC_TYPE_USER;
         at91_rstc_assert_external(s);
-        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+        at91_rstc_request_reset(s);
     }
 }
 
@@ -132,6 +148,32 @@ static void at91_rstc_set_nrst(void *opaque, int n, int level)
         }
     } else if (!old_level && s->nrst_level) {
         timer_del(s->sample_timer);
+        if (!s->power_reset_level &&
+            s->pending_reset_type == RSTC_TYPE_BACKUP) {
+            at91_rstc_request_reset(s);
+        }
+    }
+}
+
+static void at91_rstc_set_power_reset(void *opaque, int n, int level)
+{
+    AT91RSTCState *s = AT91_RSTC(opaque);
+    bool asserted = !!level;
+
+    if (s->power_reset_level == asserted) {
+        return;
+    }
+
+    s->power_reset_level = asserted;
+    if (asserted) {
+        s->ursts = true;
+        s->pending_reset_type = RSTC_TYPE_BACKUP;
+        at91_rstc_update_irq(s);
+        at91_rstc_assert_external(s);
+    } else if (s->nrst_level &&
+               s->pending_reset_type == RSTC_TYPE_BACKUP &&
+               !resettable_is_in_reset(OBJECT(s))) {
+        at91_rstc_request_reset(s);
     }
 }
 
@@ -142,7 +184,8 @@ static void at91_rstc_set_wdt_reset(void *opaque, int n, int level)
     if (level) {
         s->pending_reset_type = RSTC_TYPE_WATCHDOG;
         at91_rstc_assert_external(s);
-    } else if (s->pending_reset_type == RSTC_TYPE_WATCHDOG) {
+    } else if (s->pending_reset_type == RSTC_TYPE_WATCHDOG &&
+               !resettable_is_in_reset(OBJECT(s))) {
         /* A non-reset QEMU watchdog policy ends the physical pulse. */
         s->pending_reset_type = RSTC_TYPE_NONE;
         timer_del(s->external_timer);
@@ -158,7 +201,7 @@ static uint32_t at91_rstc_status(AT91RSTCState *s)
     if (s->ursts) {
         value |= RSTC_SR_URSTS;
     }
-    if (s->nrst_level) {
+    if (s->nrst_level && !s->power_reset_level) {
         value |= RSTC_SR_NRSTL;
     }
     if (s->srcmp) {
@@ -208,10 +251,12 @@ static void at91_rstc_write(void *opaque, hwaddr offset, uint64_t value,
         }
 
         s->srcmp = true;
-        at91_rstc_assert_external(s);
+        if (command & RSTC_CR_EXTRST) {
+            at91_rstc_assert_external(s);
+        }
         if (command & RSTC_CR_PROCRST) {
             s->pending_reset_type = RSTC_TYPE_SOFTWARE;
-            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+            at91_rstc_request_reset(s);
         }
         break;
     case RSTC_MR:
@@ -247,10 +292,11 @@ static const MemoryRegionOps at91_rstc_ops = {
     },
 };
 
-static void at91_rstc_reset(DeviceState *dev)
+static void at91_rstc_reset_hold(Object *obj, ResetType type)
 {
-    AT91RSTCState *s = AT91_RSTC(dev);
-    bool warm_reset = s->pending_reset_type != RSTC_TYPE_NONE;
+    AT91RSTCState *s = AT91_RSTC(obj);
+    bool warm_reset = type == RESET_TYPE_WAKEUP &&
+                      s->pending_reset_type != RSTC_TYPE_NONE;
     uint32_t saved_mode = s->mode;
 
     timer_del(s->external_timer);
@@ -259,17 +305,20 @@ static void at91_rstc_reset(DeviceState *dev)
     if (warm_reset) {
         s->reset_type = s->pending_reset_type;
         s->mode = saved_mode;
-        s->ursts = s->reset_type == RSTC_TYPE_USER;
+        s->ursts |= s->reset_type == RSTC_TYPE_USER;
     } else {
         s->reset_type = RSTC_TYPE_GENERAL;
         s->mode = RSTC_MR_URSTEN;
         s->ursts = true;
         s->nrst_level = true;
+        s->power_reset_level = false;
     }
     s->pending_reset_type = RSTC_TYPE_NONE;
     s->srcmp = false;
     s->nrst_out_level = true;
+    s->reset_request_level = false;
     qemu_set_irq(s->nrst_out, 1);
+    qemu_set_irq(s->reset_request, 0);
     at91_rstc_update_irq(s);
 }
 
@@ -283,8 +332,11 @@ static void at91_rstc_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
     qdev_init_gpio_in_named(dev, at91_rstc_set_nrst, "nrst", 1);
+    qdev_init_gpio_in_named(dev, at91_rstc_set_power_reset,
+                            "power-reset", 1);
     qdev_init_gpio_in_named(dev, at91_rstc_set_wdt_reset, "wdt-reset", 1);
     qdev_init_gpio_out_named(dev, &s->nrst_out, "nrst-out", 1);
+    qdev_init_gpio_out_named(dev, &s->reset_request, "reset-request", 1);
     s->slck = qdev_init_clock_in(dev, "slck", NULL, s, ClockUpdate);
     s->pending_reset_type = RSTC_TYPE_NONE;
     s->nrst_level = true;
@@ -323,13 +375,14 @@ static int at91_rstc_post_load(void *opaque, int version_id)
     AT91RSTCState *s = AT91_RSTC(opaque);
 
     qemu_set_irq(s->nrst_out, s->nrst_out_level);
+    qemu_set_irq(s->reset_request, s->reset_request_level);
     at91_rstc_update_irq(s);
     return 0;
 }
 
 static const VMStateDescription at91_rstc_vmstate = {
     .name = TYPE_AT91_RSTC,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = at91_rstc_post_load,
     .fields = (const VMStateField[]) {
@@ -343,6 +396,8 @@ static const VMStateDescription at91_rstc_vmstate = {
         VMSTATE_BOOL(srcmp, AT91RSTCState),
         VMSTATE_BOOL(nrst_level, AT91RSTCState),
         VMSTATE_BOOL(nrst_out_level, AT91RSTCState),
+        VMSTATE_BOOL_V(power_reset_level, AT91RSTCState, 2),
+        VMSTATE_BOOL_V(reset_request_level, AT91RSTCState, 2),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -355,12 +410,13 @@ static const Property at91_rstc_properties[] = {
 static void at91_rstc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->desc = "Microchip AT91 reset controller";
     dc->realize = at91_rstc_realize;
     dc->vmsd = &at91_rstc_vmstate;
     device_class_set_props(dc, at91_rstc_properties);
-    device_class_set_legacy_reset(dc, at91_rstc_reset);
+    rc->phases.hold = at91_rstc_reset_hold;
 }
 
 static const TypeInfo at91_rstc_info = {

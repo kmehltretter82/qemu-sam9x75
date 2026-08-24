@@ -29,6 +29,7 @@
 #include "system/block-backend.h"
 #include "system/blockdev.h"
 #include "system/qtest.h"
+#include "system/reset.h"
 #include "system/system.h"
 #include "target/arm/cpu-qom.h"
 
@@ -42,6 +43,7 @@ struct SAM9X75CuriosityMachineState {
 
     bool nand_cs;
     bool qspi_cs;
+    SAM9X7State *soc;
     struct arm_boot_info boot_info;
 };
 
@@ -163,6 +165,7 @@ static void sam9x75_curiosity_init(MachineState *machine)
     soc = SAM9X7(object_new(TYPE_SAM9X7));
     object_property_add_child(OBJECT(machine), "soc", OBJECT(soc));
     object_unref(OBJECT(soc));
+    board->soc = soc;
 
     object_property_set_link(OBJECT(soc), "memory", OBJECT(sysmem),
                              &error_abort);
@@ -202,6 +205,9 @@ static void sam9x75_curiosity_init(MachineState *machine)
     pmic = i2c_slave_new(TYPE_MCP16502_AB, 0x5b);
     object_property_add_child(OBJECT(machine), "mcp16502", OBJECT(pmic));
     i2c_slave_realize_and_unref(pmic, soc->twi[6].bus, &error_fatal);
+    qdev_connect_gpio_out_named(DEVICE(pmic), "nrsto", 0,
+        qdev_get_gpio_in_named(DEVICE(soc), SAM9X7_GPIO_RESET,
+                               SAM9X7_RESET_POWER));
 
     /* U12 measures the four main rails through 10-milliohm shunts. */
     power_monitor = i2c_slave_new(TYPE_PAC1934, 0x10);
@@ -277,6 +283,18 @@ static void sam9x75_curiosity_machine_instance_init(Object *obj)
     board->qspi_cs = true;
 }
 
+static void sam9x75_curiosity_machine_reset(MachineState *machine,
+                                             ResetType type)
+{
+    SAM9X75CuriosityMachineState *board =
+        SAM9X75_CURIOSITY_MACHINE(machine);
+    bool core_reset = type == RESET_TYPE_COLD && board->soc &&
+        (sam9x7_core_reset_requested(board->soc) ||
+         at91_rstc_watchdog_reset_pending(&board->soc->rstc));
+
+    qemu_devices_reset(core_reset ? RESET_TYPE_WAKEUP : type);
+}
+
 static void sam9x75_curiosity_machine_class_init(ObjectClass *oc,
                                                   const void *data)
 {
@@ -288,6 +306,7 @@ static void sam9x75_curiosity_machine_class_init(ObjectClass *oc,
 
     mc->desc = "Microchip SAM9X75 Curiosity (ARM926EJ-S)";
     mc->init = sam9x75_curiosity_init;
+    mc->reset = sam9x75_curiosity_machine_reset;
     mc->default_cpu_type = ARM_CPU_TYPE_NAME("arm926");
     mc->valid_cpu_types = valid_cpu_types;
     mc->default_ram_size = 256 * MiB;

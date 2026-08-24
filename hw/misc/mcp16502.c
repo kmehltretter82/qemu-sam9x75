@@ -616,6 +616,10 @@ static void mcp16502_reset_enter(Object *obj, ResetType type)
 {
     MCP16502State *s = MCP16502_AB(obj);
 
+    if (type == RESET_TYPE_WAKEUP) {
+        return;
+    }
+
     memcpy(s->regs, mcp16502ab_reset_regs, sizeof(s->regs));
     s->pointer = 0;
     s->count = 0;

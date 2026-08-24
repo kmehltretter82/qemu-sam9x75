@@ -103,8 +103,12 @@ Support matrix
      - Initial
      - WDT has its startup-enabled down-counter, window/level events,
        interrupts, lock and key rules, synchronization guard, reset policy and
-       migration state.  RSTC has keyed user/external reset control, status and
-       interrupt behavior.  SHDWC has keyed two-slow-clock shutdown, SHDN,
+       migration state.  RSTC has keyed user/external reset control, status,
+       interrupt behavior and General/Backup/Watchdog/Software/User reset
+       causes.  MCP16502 nRSTO drives the SoC NRST power-reset input: backup
+       exit and warm reset reset VDDCORE devices while the VDDBU-powered
+       SYSCWP, GPBR, RSTC, RTT, RTC, SHDWC and SCKC retain state.  SHDWC has
+       keyed two-slow-clock shutdown, SHDN,
        programmable WKUP0 polarity/debounce, raw RTC/RTT alarm wake-up,
        read-clear status, system write protection, VDDBU retention and
        migration state.  The calendar/UTC RTC includes updates, alarms,
@@ -171,7 +175,8 @@ Support matrix
        six programmable rail start-up paths.  Per-rail delay and soft-start
        completion drive ENS/SSD/POK before the programmable nRSTO release;
        hibernate-preserved rails and every pending deadline migrate.  nINTO
-       drives PA12, while nRSTO is exposed by the PMIC model.  FLEXCOM7 carries
+       drives PA12, while nRSTO drives the SAM9X75 NRST power-reset input after
+       all selected rails become valid.  FLEXCOM7 carries
        the PAC1934 with its sparse variable-width register loops, delayed
        REFRESH/REFRESH_V activation, channel skipping, four voltage inputs,
        virtual-time power accumulation, overflow signaling, migration state
@@ -192,7 +197,6 @@ Support matrix
        enters the PMIC through nSTRT.  START implements both programmable
        SYS-TMG timeout stages, reset-on-read servicing and oscillator timing
        displacement.  LED intensity and every switch path have board qtests.
-       The nRSTO-to-NRST reset-domain handoff remains.
    * - Timers, ADC, PWM and SSC
      - Initial
      - TC0 has three 32-bit channels, GCLK/MCK-divided/slow-clock selection,
@@ -277,10 +281,11 @@ phase green merely by avoiding it in the device tree.
 #. **Finish the populated base board.**  The MCP16502 regulators, PAC1934
    power monitor, RGB LED and four push buttons are modeled with their board
    wiring.  The two boot-memory chip-select jumpers are modeled, and the board
-   has been verified not to contain an EEPROM.  Next complete the PMIC
-   reset-domain handoff and the remaining meaningful jumper/mux selections.
-   Exercise the exact upstream board DT without QEMU-only changes, including
-   regulator state, IIO telemetry and suspend/resume.
+   has been verified not to contain an EEPROM.  The PMIC nRSTO/NRST handoff
+   now distinguishes VDDCORE resets from the retained VDDBU domain.  Next
+   complete the remaining meaningful jumper/mux selections and exercise the
+   exact upstream board DT without QEMU-only changes, including regulator
+   state, IIO telemetry and suspend/resume.
 #. **Complete reusable data paths.**  Add the USART and SPI personalities to
    all applicable FLEXCOM instances, complete TWI client/SMBus/PEC/FIFO
    behavior, and wire every documented XDMAC request.  Complete SSC, TC1,
@@ -330,7 +335,7 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The 61-test board qtest baseline and this boot are clean of SAM9X75 model
+The 62-test board qtest baseline and this boot are clean of SAM9X75 model
 warnings with ``-d unimp,guest_errors``.  Generic SD diagnostics still report
 the expected failed MMC/SDIO probes against a memory-only SD card.  FLEXCOM
 USART children remain missing but are not the selected board console.
@@ -393,8 +398,8 @@ Completion gates
 Polling DBGU from SRAM, interrupt-driven bare metal, unmodified SD
 AT91Bootstrap into U-Boot, a Linux shell from SD, and GEM/LAN8840 packet
 exchange and the populated LED/button paths are achieved.  The remaining
-integration gates are the PMIC reset-domain handoff, remaining board jumper
-and mux behavior, genuine QSPI and NAND RomBOOT, USB, CAN, expansion buses,
-multimedia/security, whole-machine migration and finally hardware differential
-validation.  Normal supported boots must be clean with
+integration gates are the remaining board jumper and mux behavior, genuine
+QSPI and NAND RomBOOT, USB, CAN, expansion buses, multimedia/security,
+whole-machine migration and finally hardware differential validation.  Normal
+supported boots must be clean with
 ``-d unimp,guest_errors``.

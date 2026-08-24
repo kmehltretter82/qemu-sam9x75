@@ -54,6 +54,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_NUM_FLEXCOM          13
 #define SAM9X7_NUM_GMAC_QUEUES       6
 
+#define SAM9X7_GPIO_RESET            "reset"
+#define SAM9X7_RESET_POWER           0
+#define SAM9X7_RESET_REQUEST         1
+
 /* Internal memories and external-memory windows. */
 #define SAM9X7_BOOT_BASE             0x00000000
 #define SAM9X7_ROM_BASE              0x00100000
@@ -155,11 +159,15 @@ struct SAM9X7State {
     Clock *slow_rc;
     Clock *slow_xtal;
 
+    bool core_reset_requested;
+
     MemoryRegion rom;
     MemoryRegion boot_alias;
     MemoryRegion sram0;
     MemoryRegion sram1;
     MemoryRegion *memory;
 };
+
+bool sam9x7_core_reset_requested(const SAM9X7State *s);
 
 #endif /* HW_ARM_SAM9X7_H */

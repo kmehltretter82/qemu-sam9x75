@@ -23,6 +23,7 @@ struct AT91RSTCState {
     MemoryRegion mmio;
     qemu_irq irq;
     qemu_irq nrst_out;
+    qemu_irq reset_request;
     Clock *slck;
     AT91SYSCWPState *sysc;
     QEMUTimer *external_timer;
@@ -34,9 +35,12 @@ struct AT91RSTCState {
     bool ursts;
     bool srcmp;
     bool nrst_level;
+    bool power_reset_level;
     bool nrst_out_level;
+    bool reset_request_level;
 };
 
 bool at91_rstc_gpbr_clear_enabled(const AT91RSTCState *s);
+bool at91_rstc_watchdog_reset_pending(const AT91RSTCState *s);
 
 #endif /* HW_MISC_AT91_RSTC_H */

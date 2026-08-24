@@ -6,6 +6,7 @@
 
 #include "qemu/osdep.h"
 
+#include "exec/cpu-interrupt.h"
 #include "hw/arm/sam9x7.h"
 #include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
@@ -32,6 +33,31 @@ static const hwaddr sam9x7_flexcom_base[SAM9X7_NUM_FLEXCOM] = {
 static const unsigned int sam9x7_flexcom_pid[SAM9X7_NUM_FLEXCOM] = {
     5, 6, 7, 8, 13, 14, 9, 10, 11, 15, 16, 32, 33,
 };
+
+bool sam9x7_core_reset_requested(const SAM9X7State *s)
+{
+    return s && s->core_reset_requested;
+}
+
+static void sam9x7_set_reset(void *opaque, int n, int level)
+{
+    SAM9X7State *s = SAM9X7(opaque);
+
+    switch (n) {
+    case SAM9X7_RESET_POWER:
+        qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&s->rstc),
+                                            "power-reset", 0), level);
+        if (level) {
+            cpu_interrupt(CPU(&s->cpu), CPU_INTERRUPT_HALT);
+        }
+        break;
+    case SAM9X7_RESET_REQUEST:
+        s->core_reset_requested = !!level;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
 
 static void sam9x7_realize(DeviceState *dev, Error **errp)
 {
@@ -111,6 +137,9 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(s->memory, SAM9X7_RSTC_BASE, mr);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->rstc), 0,
                        qdev_get_gpio_in(DEVICE(&s->sys_irq), 1));
+    qdev_connect_gpio_out_named(DEVICE(&s->rstc), "reset-request", 0,
+        qdev_get_gpio_in_named(dev, SAM9X7_GPIO_RESET,
+                               SAM9X7_RESET_REQUEST));
 
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->shdwc), errp)) {
         return;
@@ -429,6 +458,9 @@ static void sam9x7_init(Object *obj)
         0x0000000c,
     };
     unsigned int i;
+
+    qdev_init_gpio_in_named(DEVICE(s), sam9x7_set_reset,
+                            SAM9X7_GPIO_RESET, 2);
 
     object_initialize_child(obj, "cpu", &s->cpu,
                             ARM_CPU_TYPE_NAME("arm926"));

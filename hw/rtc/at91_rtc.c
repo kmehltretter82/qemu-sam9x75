@@ -1143,10 +1143,14 @@ static void at91_rtc_initialize_time(AT91RTCState *s)
     s->time_initialized = true;
 }
 
-static void at91_rtc_reset(DeviceState *dev)
+static void at91_rtc_reset_hold(Object *obj, ResetType type)
 {
-    AT91RTCState *s = AT91_RTC(dev);
+    AT91RTCState *s = AT91_RTC(obj);
     unsigned int i;
+
+    if (type == RESET_TYPE_WAKEUP) {
+        return;
+    }
 
     if (!s->time_initialized) {
         at91_rtc_initialize_time(s);
@@ -1326,12 +1330,13 @@ static const Property at91_rtc_properties[] = {
 static void at91_rtc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->desc = "Microchip AT91 real-time clock";
     dc->realize = at91_rtc_realize;
     dc->vmsd = &at91_rtc_vmstate;
     device_class_set_props(dc, at91_rtc_properties);
-    device_class_set_legacy_reset(dc, at91_rtc_reset);
+    rc->phases.hold = at91_rtc_reset_hold;
 }
 
 static const TypeInfo at91_rtc_info = {

@@ -95,9 +95,13 @@ static const MemoryRegionOps at91_sysc_ops = {
     },
 };
 
-static void at91_sysc_reset(DeviceState *dev)
+static void at91_sysc_reset_hold(Object *obj, ResetType type)
 {
-    AT91SYSCWPState *s = AT91_SYSCWP(dev);
+    AT91SYSCWPState *s = AT91_SYSCWP(obj);
+
+    if (type == RESET_TYPE_WAKEUP) {
+        return;
+    }
 
     s->wpmr = 0;
     s->wpsr = 0;
@@ -126,10 +130,11 @@ static const VMStateDescription at91_sysc_vmstate = {
 static void at91_sysc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->desc = "Microchip AT91 system-controller write protection";
     dc->vmsd = &at91_sysc_vmstate;
-    device_class_set_legacy_reset(dc, at91_sysc_reset);
+    rc->phases.hold = at91_sysc_reset_hold;
 }
 
 static const TypeInfo at91_sysc_info = {

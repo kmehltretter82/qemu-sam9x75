@@ -152,9 +152,13 @@ static void at91_gpbr_set_tamper_event(void *opaque, int n, int level)
     s->tamper_event_level = !!level;
 }
 
-static void at91_gpbr_reset(DeviceState *dev)
+static void at91_gpbr_reset_hold(Object *obj, ResetType type)
 {
-    AT91GPBRState *s = AT91_GPBR(dev);
+    AT91GPBRState *s = AT91_GPBR(obj);
+
+    if (type == RESET_TYPE_WAKEUP) {
+        return;
+    }
 
     /* The backup registers survive processor and peripheral resets. */
     if (!s->initialized) {
@@ -217,12 +221,13 @@ static const Property at91_gpbr_properties[] = {
 static void at91_gpbr_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->desc = "Microchip AT91 general-purpose backup registers";
     dc->realize = at91_gpbr_realize;
     dc->vmsd = &at91_gpbr_vmstate;
     device_class_set_props(dc, at91_gpbr_properties);
-    device_class_set_legacy_reset(dc, at91_gpbr_reset);
+    rc->phases.hold = at91_gpbr_reset_hold;
 }
 
 static const TypeInfo at91_gpbr_info = {

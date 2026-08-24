@@ -11,6 +11,7 @@
 #include "qemu/bitops.h"
 
 #define SAM9X75_MACHINE         "-machine sam9x75-curiosity"
+#define SOC_RESET_POWER_IRQ     0
 
 #define SAM9X7_BOOT_BASE        0x00000000
 #define SAM9X7_ROM_BASE         0x00100000
@@ -411,15 +412,24 @@
 #define PMC_WPMR_WPEN           BIT(0)
 #define PMC_WPMR_KEY            0x504d4300
 
+#define RSTC_CR                 0x00
 #define RSTC_SR                 0x04
 #define RSTC_MR                 0x08
 
+#define RSTC_CR_PROCRST         BIT(0)
+#define RSTC_CR_EXTRST          BIT(3)
 #define RSTC_SR_URSTS           BIT(0)
+#define RSTC_SR_RSTTYP_MASK     (7U << 8)
+#define RSTC_SR_RSTTYP(value)   ((value) << 8)
 #define RSTC_SR_NRSTL           BIT(16)
+#define RSTC_SR_SRCMP           BIT(17)
 #define RSTC_MR_URSTEN          BIT(0)
 #define RSTC_MR_URSTIEN         BIT(4)
 #define RSTC_MR_ENGCLR          BIT(20)
 #define RSTC_KEY                0xa5000000
+#define RSTC_TYPE_BACKUP        1
+#define RSTC_TYPE_WATCHDOG      2
+#define RSTC_TYPE_SOFTWARE      3
 
 #define SHDWC_CR                0x00
 #define SHDWC_MR                0x04
@@ -1377,6 +1387,8 @@ static void test_board_wakeup_start_reset_and_pmic_modes(void)
         g_assert_cmphex(twi6_read_reg(qts, 0x5b, reg), ==, 0);
     }
     qtest_clock_step(qts, 22 * 1000000LL);
+    qtest_qmp_eventwait(qts, "RESET");
+    twi6_enable_master(qts);
     for (reg = 0x05; reg <= 0x09; reg++) {
         g_assert_cmphex(twi6_read_reg(qts, 0x5b, reg), ==, 0x07);
     }
@@ -1395,6 +1407,8 @@ static void test_board_wakeup_start_reset_and_pmic_modes(void)
     send_input_key(qts, "w", false);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
     qtest_clock_step(qts, 31 * 1000000LL);
+    qtest_qmp_eventwait(qts, "RESET");
+    twi6_enable_master(qts);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0x07);
 
     /* HPM is ignored until HPMPEN is set, then selects register x3. */
@@ -1419,6 +1433,117 @@ static void test_board_wakeup_start_reset_and_pmic_modes(void)
     qtest_quit(qts);
 }
 
+static void test_board_power_reset_domains(void)
+{
+    const uint32_t gpbr_marker = 0x9a750001;
+    const uint32_t slow_clock_config = SCKC_CR_TD_OSCSEL |
+                                       SCKC_CR_OSC32EN | 1;
+    const uint32_t shdwc_mode = SHDWC_MR_WKUPDBC(1);
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -global at91-shdwc.request-system-shutdown=off");
+    uint32_t value;
+
+    qtest_irq_intercept_in(qts, "/machine/soc");
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    twi6_enable_master(qts);
+
+    /* Seed one external, three backup-domain and two core-domain blocks. */
+    twi6_write_reg(qts, 0x5b, 0x13, 0x77);
+    qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_REG(0), gpbr_marker);
+    qtest_writel(qts, SAM9X7_SCKC_BASE + SCKC_CR, slow_clock_config);
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_MR, shdwc_mode);
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_WUIR,
+                 SHDWC_WUIR_WKUPEN0);
+    qtest_writel(qts, SAM9X7_PIOA_BASE + PIO_OER, BIT(0));
+    qtest_writel(qts, SAM9X7_MPDDRC_BASE + MPDDRC_CR, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_OSR), ==,
+                    BIT(0));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MPDDRC_BASE + MPDDRC_CR), ==,
+                    0x1cf1f3ff);
+
+    /* SHDN makes the PMIC assert board NRST before removing core rails. */
+    qtest_set_irq_in(qts, "/machine/mcp16502", "lpm", 0, 1);
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_CR,
+                 SHDWC_CR_KEY | SHDWC_CR_SHDW);
+    qtest_clock_step(qts, 2 * SHDWC_SLCK_CYCLE_NS);
+    g_assert_true(qtest_get_irq(qts, SOC_RESET_POWER_IRQ));
+
+    /* START wakes WKUP0; nRSTO releases only after rail sequencing. */
+    send_input_key(qts, "s", true);
+    qtest_clock_step(qts, 3 * SHDWC_SLCK_CYCLE_NS);
+    qtest_clock_step(qts, 22 * 1000000LL);
+    qtest_qmp_eventwait(qts, "RESET");
+    send_input_key(qts, "s", false);
+    g_assert_false(qtest_get_irq(qts, SOC_RESET_POWER_IRQ));
+
+    value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_BACKUP));
+    g_assert_true(value & RSTC_SR_URSTS);
+    g_assert_true(value & RSTC_SR_NRSTL);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_OSR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MPDDRC_BASE + MPDDRC_CR), ==,
+                    0x00207024);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(0)), ==,
+                    gpbr_marker);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SCKC_BASE + SCKC_CR), ==,
+                    slow_clock_config);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_MR), ==,
+                    shdwc_mode);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_WUIR), ==,
+                    SHDWC_WUIR_WKUPEN0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_SR), ==,
+                    SHDWC_SR_WKUPS | SHDWC_SR_WKUPIS0);
+    twi6_enable_master(qts);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x13), ==, 0x77);
+
+    /* PROCRST uses the same core domain without disturbing backup power. */
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_writel(qts, SAM9X7_PIOA_BASE + PIO_OER, BIT(0));
+    qtest_writel(qts, SAM9X7_MPDDRC_BASE + MPDDRC_CR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_RSTC_BASE + RSTC_CR,
+                 RSTC_KEY | RSTC_CR_PROCRST);
+    qtest_qmp_eventwait(qts, "RESET");
+
+    value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_SOFTWARE));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_OSR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MPDDRC_BASE + MPDDRC_CR), ==,
+                    0x00207024);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(0)), ==,
+                    gpbr_marker);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SCKC_BASE + SCKC_CR), ==,
+                    slow_clock_config);
+    twi6_enable_master(qts);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x13), ==, 0x77);
+
+    /* WDT reset also targets VDDCORE and records its distinct cause. */
+    qtest_writel(qts, SAM9X7_PIOA_BASE + PIO_OER, BIT(0));
+    qtest_writel(qts, SAM9X7_MPDDRC_BASE + MPDDRC_CR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_WLR, 0);
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_PERIODRST);
+    qtest_clock_step(qts, 4 * 1000000LL);
+    qtest_qmp_eventwait(qts, "WATCHDOG");
+    qtest_qmp_eventwait(qts, "RESET");
+
+    value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_WATCHDOG));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_OSR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MPDDRC_BASE + MPDDRC_CR), ==,
+                    0x00207024);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(0)), ==,
+                    gpbr_marker);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SCKC_BASE + SCKC_CR), ==,
+                    slow_clock_config);
+    twi6_enable_master(qts);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x13), ==, 0x77);
+
+    qtest_quit(qts);
+}
+
 static void test_mcp16502_push_button_timeouts(void)
 {
     const int64_t short_push_timeout = 2 * RTC_SECOND_NS;
@@ -1432,7 +1557,7 @@ static void test_mcp16502_push_button_timeouts(void)
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PCR,
                  PMC_PCR_CMD | PMC_PCR_EN | 2);
     twi6_enable_master(qts);
-    qtest_irq_intercept_out_named(qts, "/machine/mcp16502", "nrsto");
+    qtest_irq_intercept_in(qts, "/machine/soc");
 
     g_assert_false(qtest_get_irq(qts, 0));
     g_assert_true(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_PDSR) & BIT(12));
@@ -1485,6 +1610,8 @@ static void test_mcp16502_push_button_timeouts(void)
     send_input_key(qts, "s", false);
     qtest_clock_step(qts, 30 * 1000000LL);
     g_assert_false(qtest_get_irq(qts, 0));
+    qtest_qmp_eventwait(qts, "RESET");
+    twi6_enable_master(qts);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0x07);
 
     /* FSD=10 slows the timing oscillator by 16.5 percent. */
@@ -1542,7 +1669,7 @@ static void test_mcp16502_startup_sequence(void)
 
     qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
     twi6_enable_master(qts);
-    qtest_irq_intercept_out_named(qts, "/machine/mcp16502", "nrsto");
+    qtest_irq_intercept_in(qts, "/machine/soc");
 
     /* Build a two-rail step 1 with distinct delay and soft-start rates. */
     qtest_set_irq_in(qts, "/machine/mcp16502", "pwrhld", 0, 0);
@@ -1576,6 +1703,8 @@ static void test_mcp16502_startup_sequence(void)
     g_assert_true(qtest_get_irq(qts, 0));
     qtest_clock_step(qts, 1);
     g_assert_false(qtest_get_irq(qts, 0));
+    qtest_qmp_eventwait(qts, "RESET");
+    twi6_enable_master(qts);
 
     /* SEQEN=0 rails adopt their Active register only after nRSTO release. */
     for (reg = 0x05; reg <= 0x09; reg++) {
@@ -1615,6 +1744,7 @@ static void test_mcp16502_startup_sequence(void)
     g_assert_true(qtest_get_irq(qts, 0));
     qtest_clock_step(qts, 1);
     g_assert_false(qtest_get_irq(qts, 0));
+    qtest_qmp_eventwait(qts, "RESET");
 
     qtest_quit(qts);
 }
@@ -5234,6 +5364,22 @@ static void test_system_slowclock_pit_reset_and_protection(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_SYSCWP_BASE + SYSC_WPSR), ==,
                     (RSTC_MR << 8) | 1);
 
+    /* EXTRST alone pulses NRST_OUT without resetting the processor. */
+    qtest_irq_intercept_out_named(qts, "/machine/soc/rstc", "nrst-out");
+    qtest_system_reset(qts);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_writel(qts, SAM9X7_RSTC_BASE + RSTC_CR, RSTC_CR_EXTRST);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_writel(qts, SAM9X7_RSTC_BASE + RSTC_CR,
+                 RSTC_KEY | RSTC_CR_EXTRST);
+    g_assert_false(qtest_get_irq(qts, 0));
+    g_assert_true(qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR) &
+                  RSTC_SR_SRCMP);
+    qtest_clock_step(qts, 2 * SHDWC_SLCK_CYCLE_NS);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_false(qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR) &
+                   RSTC_SR_SRCMP);
+
     qtest_quit(qts);
 }
 
@@ -6554,6 +6700,8 @@ int main(int argc, char **argv)
                    test_board_rgb_led_and_user_button);
     qtest_add_func("sam9x75/board/wakeup-start-reset-and-pmic-modes",
                    test_board_wakeup_start_reset_and_pmic_modes);
+    qtest_add_func("sam9x75/board/power-reset-domains",
+                   test_board_power_reset_domains);
     qtest_add_func("sam9x75/board/mcp16502-push-button-timeouts",
                    test_mcp16502_push_button_timeouts);
     qtest_add_func("sam9x75/board/mcp16502-push-button-shutdown-request",

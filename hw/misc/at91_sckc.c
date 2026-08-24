@@ -93,9 +93,13 @@ static const MemoryRegionOps at91_sckc_ops = {
     },
 };
 
-static void at91_sckc_reset(DeviceState *dev)
+static void at91_sckc_reset_hold(Object *obj, ResetType type)
 {
-    AT91SCKCState *s = AT91_SCKC(dev);
+    AT91SCKCState *s = AT91_SCKC(obj);
+
+    if (type == RESET_TYPE_WAKEUP) {
+        return;
+    }
 
     s->cr = 0x00000001;
     at91_sckc_update_clocks(s);
@@ -164,11 +168,12 @@ static const Property at91_sckc_properties[] = {
 static void at91_sckc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->desc = "Microchip SAM9X7 slow clock controller";
     dc->realize = at91_sckc_realize;
     dc->vmsd = &at91_sckc_vmstate;
-    device_class_set_legacy_reset(dc, at91_sckc_reset);
+    rc->phases.hold = at91_sckc_reset_hold;
     device_class_set_props(dc, at91_sckc_properties);
 }
 

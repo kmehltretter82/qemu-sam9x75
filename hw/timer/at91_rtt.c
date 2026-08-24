@@ -254,9 +254,13 @@ static void at91_rtt_clock_changed(void *opaque, ClockEvent event)
     at91_rtt_update_prescaler_timer(s, false);
 }
 
-static void at91_rtt_reset(DeviceState *dev)
+static void at91_rtt_reset_hold(Object *obj, ResetType type)
 {
-    AT91RTTState *s = AT91_RTT(dev);
+    AT91RTTState *s = AT91_RTT(obj);
+
+    if (type == RESET_TYPE_WAKEUP) {
+        return;
+    }
 
     s->mr = RTT_RESET_PRESCALER;
     s->ar = UINT32_MAX;
@@ -352,12 +356,13 @@ static const Property at91_rtt_properties[] = {
 static void at91_rtt_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->desc = "Microchip AT91 real-time timer";
     dc->realize = at91_rtt_realize;
     dc->vmsd = &at91_rtt_vmstate;
     device_class_set_props(dc, at91_rtt_properties);
-    device_class_set_legacy_reset(dc, at91_rtt_reset);
+    rc->phases.hold = at91_rtt_reset_hold;
 }
 
 static const TypeInfo at91_rtt_info = {

@@ -761,6 +761,10 @@ static void pac1934_reset_enter(Object *obj, ResetType type)
 {
     PAC1934State *s = PAC1934(obj);
 
+    if (type == RESET_TYPE_WAKEUP) {
+        return;
+    }
+
     timer_del(s->refresh_timer);
     s->ctrl = 0;
     s->channel_dis = 0;
