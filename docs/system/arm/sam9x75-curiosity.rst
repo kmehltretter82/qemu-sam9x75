@@ -135,7 +135,9 @@ Support matrix
    * - SDMMC0 and SDMMC1
      - Initial
      - Both SAM9X7 hosts, removable-card attachment and PA23 card detect are
-       wired.  The unmodified AT91Bootstrap SD/ADMA path loads U-Boot; register,
+       wired.  Host preset registers and the Linux ADMA descriptor form are
+       covered.  The unmodified AT91Bootstrap SD/ADMA path loads U-Boot, and
+       Linux mounts the SD root filesystem and reaches a shell.  Register,
        command, DMA error and media-change completeness remains under audit.
    * - OSPI/QSPI NOR
      - Initial
@@ -172,8 +174,13 @@ Support matrix
        External TCLK/TIO capture and waveform routing, up/down modes, QDEC,
        TC1, ADC inputs, PWM outputs and synchronous serial operation remain.
    * - Audio
-     - Missing
-     - I2SMCC and Class-D controller with QEMU audio backends.
+     - Initial
+     - I2SMCC register state, clocking, mono/compact/TDM framing, interrupts,
+       loopback and bidirectional XDMAC requests are modeled.  Class-D has
+       FIFO, clocked sample consumption, interrupt, write-protection, XDMAC and
+       sample-sink paths.  The unmodified Linux drivers probe both controllers.
+       QEMU audio-backend output, exact serial framing, underrun behavior and
+       the analog output path remain.
    * - CAN FD
      - Missing
      - Two Bosch M_CAN instances, shared message RAM and CAN bus backends.
@@ -223,6 +230,51 @@ Support matrix
      - LEDs, buttons, jumpers, mikroBUS, Raspberry Pi header, M.2 and official
        Microchip overlay attachments.
 
+Execution roadmap
+-----------------
+
+Work proceeds in the following order.  A later phase does not turn an earlier
+phase green merely by avoiding it in the device tree.
+
+#. **Keep a reproducible baseline.**  Maintain this matrix against the pinned
+   data sheet, errata, board guide, firmware and Linux revisions.  Every model
+   must have reset/mask/access, clock/reset-domain, interrupt, migration and
+   negative-path coverage where those concepts apply.  The full board qtest
+   suite and a boot with ``-d unimp,guest_errors`` are mandatory regression
+   gates after every slice.
+#. **Finish the populated base board.**  Model the MCP16502 regulators and
+   PAC1934 power monitor on FLEXCOM6/7, then expose the RGB LED, user button,
+   reset/start controls and the board's fixed straps.  Exercise the exact
+   upstream board DT without QEMU-only changes, including regulator state,
+   IIO telemetry and suspend/resume.
+#. **Complete reusable data paths.**  Add the USART and SPI personalities to
+   all applicable FLEXCOM instances, complete TWI client/SMBus/PEC/FIFO
+   behavior, and wire every documented XDMAC request.  Complete SSC, TC1,
+   external timer pins, PWM and ADC so expansion-board drivers can use normal
+   QEMU chardev, SSI, I2C and analog/digital endpoint abstractions.
+#. **Close storage and memory-controller fidelity.**  Complete SDHCI command,
+   error, media-change and migration behavior; implement NAND OOB, bad-block,
+   PMECC generation/correction and DMA; finish SMC, matrix and MPDDRC-visible
+   behavior; and cover persistent QSPI protocol widths and errata.
+#. **Boot like the board.**  Implement the mask-ROM media-selection state
+   machine, straps, reset alias/remap, authentication/error fallbacks and the
+   documented QSPI erratum.  Prove cold boot from SD, QSPI NOR and raw NAND
+   without using ``-kernel`` as a ROM substitute.
+#. **Add major external interfaces.**  Implement OHCI/EHCI/UDPHS with board
+   power and hotplug wiring, then both M_CAN instances and their shared SRAM.
+   Prove host storage/input, gadget/SAM-BA and CAN-FD traffic with existing
+   QEMU USB and CAN backends.
+#. **Complete high-bandwidth and security blocks.**  Add XLCDC, GFX2D, ISC,
+   CSI2DC, MIPI CSI/DSI PHY and LVDS endpoints, followed by OTPC and PUF.
+   Close documented crypto, TRNG, audio and GEM/PTP/TSN corner cases rather
+   than treating successful driver probes as completion.
+#. **Differentially validate on hardware.**  Run the same bare-metal probes,
+   firmware, DTB and Linux tests on the Curiosity LAN Kit and QEMU.  Compare
+   reset values, reserved-bit behavior, interrupt timing, DMA ordering,
+   clocks, error paths and board I/O.  Record unavoidable nondeterminism,
+   resolve every actionable difference, rerun migration and integration
+   tests, and split the result into reviewable upstream QEMU series.
+
 Current invocation
 ------------------
 
@@ -238,18 +290,16 @@ boot path directly::
     -drive file=sam9x75-sdcard.img,if=sd,format=raw \
     -nic user,mac=02:00:00:09:75:01 -nographic
 
-This currently loads unmodified U-Boot, initializes DDR, NAND, MMC and QSPI,
-discovers the LAN8840, and supports DHCP and packet exchange through GEM0.  It
-then loads and enters the Linux image from SD.  The in-memory Linux log reaches
-the RTC, RTT, reset, shutdown-controller and watchdog probes.  The AES driver
-probes version 0x700 and acquires two XDMAC channels, the SHA driver probes
-version 0x700 and acquires a third channel, the TDES driver probes version
-0x700 and acquires two more channels, and the TRNG driver completes its
-clocked random-data path.  Linux now registers ``ttyS0`` and switches to the
-DBGU console.  The next fatal access is an I2S/MCC version read at
-``0xf001c0fc``; that controller is not modeled yet.  SD initialization also
-reaches an ADMA descriptor failure before the root filesystem can mount.
-FLEXCOM USART children remain missing but are not the selected board console.
+This loads unmodified U-Boot, initializes DDR, NAND, MMC and QSPI, discovers
+the LAN8840, and supports DHCP and packet exchange through GEM0.  It then
+loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
+reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
+AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
+hardware; the crypto and audio paths acquire their documented XDMAC requests.
+The 51-test board qtest baseline and this boot are clean of SAM9X75 model
+warnings with ``-d unimp,guest_errors``.  Generic SD diagnostics still report
+the expected failed MMC/SDIO probes against a memory-only SD card.  FLEXCOM
+USART children remain missing but are not the selected board console.
 RomBOOT itself is also missing; ``-kernel`` is a development entry path and
 not a substitute for ROM media selection.
 
@@ -263,8 +313,9 @@ Completion gates
 ----------------
 
 Polling DBGU from SRAM, interrupt-driven bare metal, unmodified SD
-AT91Bootstrap into U-Boot, and GEM/LAN8840 packet exchange are achieved.  The
-remaining integration gates are a Linux shell from SD, genuine QSPI and NAND
-boot, base-board I/O, USB, multimedia/security, migration and finally hardware
-differential validation.  Normal supported boots must be clean with
+AT91Bootstrap into U-Boot, a Linux shell from SD, and GEM/LAN8840 packet
+exchange are achieved.  The remaining integration gates are populated
+base-board I/O, genuine QSPI and NAND RomBOOT, USB, CAN, expansion buses,
+multimedia/security, whole-machine migration and finally hardware differential
+validation.  Normal supported boots must be clean with
 ``-d unimp,guest_errors``.
