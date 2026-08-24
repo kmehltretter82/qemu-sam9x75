@@ -93,6 +93,9 @@ config AT91_AES
 config AT91_SHA
     bool
 
+config AT91_TDES
+    bool
+
 config AT91_TRNG
     bool
 

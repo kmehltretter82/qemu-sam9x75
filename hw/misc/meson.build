@@ -22,6 +22,7 @@ system_ss.add(when: 'CONFIG_AT91_RSTC', if_true: files('at91_rstc.c'))
 system_ss.add(when: 'CONFIG_AT91_SHDWC', if_true: files('at91_shdwc.c'))
 system_ss.add(when: 'CONFIG_AT91_AES', if_true: files('at91_aes.c'))
 system_ss.add(when: 'CONFIG_AT91_SHA', if_true: files('at91_sha.c'))
+system_ss.add(when: 'CONFIG_AT91_TDES', if_true: files('at91_tdes.c'))
 system_ss.add(when: 'CONFIG_AT91_TRNG', if_true: files('at91_trng.c'))
 system_ss.add(when: 'CONFIG_AT91_FLEXCOM', if_true: files('at91_flexcom.c'))
 

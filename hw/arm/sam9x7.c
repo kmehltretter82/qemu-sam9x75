@@ -208,6 +208,18 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     qdev_connect_gpio_out_named(DEVICE(&s->sha), "tx-request", 0,
         qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 34));
 
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->tdes), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->tdes), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_TDES_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->tdes), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 40));
+    qdev_connect_gpio_out_named(DEVICE(&s->tdes), "tx-request", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 31));
+    qdev_connect_gpio_out_named(DEVICE(&s->tdes), "rx-request", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 30));
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->pit), errp)) {
         return;
     }
@@ -482,6 +494,10 @@ static void sam9x7_init(Object *obj)
     object_initialize_child(obj, "sha", &s->sha, TYPE_AT91_SHA);
     qdev_connect_clock_in(DEVICE(&s->sha), "pclk",
                           qdev_get_clock_out(DEVICE(&s->pmc), "pclk[41]"));
+
+    object_initialize_child(obj, "tdes", &s->tdes, TYPE_AT91_TDES);
+    qdev_connect_clock_in(DEVICE(&s->tdes), "pclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "pclk[40]"));
 
     object_initialize_child(obj, "sfr", &s->sfr, TYPE_AT91_SFR);
 

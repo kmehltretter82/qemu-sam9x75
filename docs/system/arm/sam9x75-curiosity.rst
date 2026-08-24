@@ -127,8 +127,9 @@ Support matrix
        and memset, byte/halfword/word widths, address modes and 2D strides,
        software and external-request pacing, suspend/resume/flush/disable,
        linked-list descriptor views, completion/error interrupts and migration
-       state.  Wiring to individual peripheral request lines, security policy,
-       microblock/burst timing and coherency effects remain missing.
+       state.  AES, SHA and TDES request lines are wired; the remaining
+       peripheral request lines, security policy, microblock/burst timing and
+       coherency effects remain missing.
    * - SDMMC0 and SDMMC1
      - Initial
      - Both SAM9X7 hosts, removable-card attachment and PA23 card detect are
@@ -201,7 +202,17 @@ Support matrix
        DMA channel.  SHA double-buffer performance, Always-On dummy processing,
        exact check latency, tamper/fault injection and the AES/SHA protocol path
        remain incomplete; version and timing values require hardware
-       confirmation.  TDES, OTP and PUF are missing.
+       confirmation.  TDES supports DES, two- and three-key TDES and XTEA;
+       ECB, CBC, OFB and CFB8/16/32/64; manual, automatic and DMA start modes;
+       the CBC-MAC last-output path; clocked 18/50-cycle DES/TDES processing;
+       AIC source 40; XDMAC requests 31/30; write protection, security-access
+       reports and migration.  Known-answer tests cover encryption and
+       decryption for every algorithm and mode, exact DES/TDES completion
+       timing, paired DMA and TX-only CBC-MAC.  The unmodified Linux driver
+       probes version 0x700 and acquires both DMA channels.  XTEA register-word
+       ordering and timing, the version value, private-key bus, tamper and
+       fault-injection behavior require hardware confirmation.  OTP and PUF
+       are missing.
    * - Display and camera
      - Missing
      - XLCDC, GFX2D, LVDS, DSI/CSI, MIPI PHY, CSI2DC and ISC backends.
@@ -230,11 +241,13 @@ discovers the LAN8840, and supports DHCP and packet exchange through GEM0.  It
 then loads and enters the Linux image from SD.  The in-memory Linux log reaches
 the RTC, RTT, reset, shutdown-controller and watchdog probes.  The AES driver
 probes version 0x700 and acquires two XDMAC channels, the SHA driver probes
-version 0x700 and acquires a third channel, and the TRNG driver completes its
-clocked random-data path.  The next fatal probe is the unmodeled TDES engine at
-``0xf0038000``.  The selected FLEXCOM USART console remains missing.  RomBOOT
-itself is also missing; ``-kernel`` is a development entry path and not a
-substitute for ROM media selection.
+version 0x700 and acquires a third channel, the TDES driver probes version
+0x700 and acquires two more channels, and the TRNG driver completes its
+clocked random-data path.  The next fatal access is the Linux console driver's
+DBGU FIFO write at ``0xfffff324``; polling DBGU works, but its extended FIFO
+registers are not modeled yet.  FLEXCOM USART children remain missing but are
+not the selected board console.  RomBOOT itself is also missing; ``-kernel``
+is a development entry path and not a substitute for ROM media selection.
 
 By default a valid SHDWC shutdown command requests a normal QEMU guest
 shutdown.  Backup-domain wake-up experiments can leave the process running

@@ -27,6 +27,7 @@
 #define SAM9X7_PIT64B0_BASE     0xf0028000
 #define SAM9X7_TRNG_BASE        0xf0030000
 #define SAM9X7_AES_BASE         0xf0034000
+#define SAM9X7_TDES_BASE        0xf0038000
 #define SAM9X7_PIT64B1_BASE     0xf0040000
 #define SAM9X7_TCB_BASE         0xf8008000
 #define SAM9X7_GMAC_BASE        0xf802c000
@@ -521,6 +522,54 @@
 #define AES_WPMR_WPCREN         BIT(2)
 #define AES_WPMR_KEY            0x41455300
 #define AES_WPSR_WPVS           BIT(0)
+
+#define TDES_CR                 0x00
+#define TDES_MR                 0x04
+#define TDES_IER                0x10
+#define TDES_IDR                0x14
+#define TDES_IMR                0x18
+#define TDES_ISR                0x1c
+#define TDES_KEYWR(index)       (0x20 + (index) * 4)
+#define TDES_IDATAR(index)      (0x40 + (index) * 4)
+#define TDES_ODATAR(index)      (0x50 + (index) * 4)
+#define TDES_IVR(index)         (0x60 + (index) * 4)
+#define TDES_XTEA_RNDR          0x70
+#define TDES_WPMR               0xe4
+#define TDES_WPSR               0xe8
+#define TDES_VERSION            0xfc
+
+#define TDES_CR_START           BIT(0)
+#define TDES_CR_SWRST           BIT(8)
+#define TDES_CR_UNLOCK          BIT(24)
+#define TDES_MR_CIPHER          BIT(0)
+#define TDES_MR_ALGO_TDES       (1U << 1)
+#define TDES_MR_ALGO_XTEA       (2U << 1)
+#define TDES_MR_KEYMOD_2KEY     BIT(4)
+#define TDES_MR_SMOD_AUTO       (1U << 8)
+#define TDES_MR_SMOD_DMA        (2U << 8)
+#define TDES_MR_OPMODE_CBC      (1U << 12)
+#define TDES_MR_OPMODE_OFB      (2U << 12)
+#define TDES_MR_OPMODE_CFB      (3U << 12)
+#define TDES_MR_LOD             BIT(15)
+#define TDES_MR_CFBS_32         (1U << 16)
+#define TDES_MR_CFBS_16         (2U << 16)
+#define TDES_MR_CFBS_8          (3U << 16)
+#define TDES_INT_DATRDY         BIT(0)
+#define TDES_INT_URAD           BIT(8)
+#define TDES_INT_SECE           BIT(16)
+#define TDES_WPMR_WPEN          BIT(0)
+#define TDES_WPMR_WPITEN        BIT(1)
+#define TDES_WPMR_WPCREN        BIT(2)
+#define TDES_WPMR_ACTION_LOCK   (1U << 5)
+#define TDES_WPMR_KEY           0x44455300
+#define TDES_WPSR_WPVS          BIT(0)
+#define TDES_WPSR_SWE           BIT(3)
+#define TDES_WPSR_WPVSRC(offset) ((offset) << 8)
+#define TDES_WPSR_SWETYP(type)  ((type) << 24)
+#define TDES_WPSR_ECLASS        BIT(31)
+#define TDES_SWE_READ_WO        0
+#define TDES_SWE_WEIRD_ACTION   4
+#define TDES_SWE_INCOMPLETE_KEY 5
 
 #define SHA_CR                  0x00
 #define SHA_MR                  0x04
@@ -2594,6 +2643,518 @@ static void test_aes_feedback_and_xts(void)
     qtest_quit(qts);
 }
 
+static void tdes_write_words(QTestState *qts, uint64_t offset,
+                             const uint8_t *data, size_t length)
+{
+    size_t i;
+
+    g_assert_cmpuint(length % sizeof(uint32_t), ==, 0);
+    for (i = 0; i < length; i += sizeof(uint32_t)) {
+        qtest_writel(qts, SAM9X7_TDES_BASE + offset + i,
+                     ldl_le_p(data + i));
+    }
+}
+
+static void tdes_read_words(QTestState *qts, uint64_t offset,
+                            uint8_t *data, size_t length)
+{
+    size_t i;
+
+    g_assert_cmpuint(length % sizeof(uint32_t), ==, 0);
+    for (i = 0; i < length; i += sizeof(uint32_t)) {
+        stl_le_p(data + i,
+                 qtest_readl(qts, SAM9X7_TDES_BASE + offset + i));
+    }
+}
+
+static uint64_t tdes_duration(QTestState *qts, unsigned int cycles)
+{
+    uint64_t period = get_clock_period(qts, "/machine/soc/pmc/pclk[40]");
+
+    g_assert_cmpuint(period, !=, 0);
+    return (period * cycles) >> 32;
+}
+
+static void tdes_configure(QTestState *qts, uint32_t mode,
+                           const uint8_t *key, size_t key_length,
+                           const uint8_t *iv)
+{
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_CR, TDES_CR_SWRST);
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_MR, mode);
+    tdes_write_words(qts, TDES_KEYWR(0), key, key_length);
+    if (iv) {
+        tdes_write_words(qts, TDES_IVR(0), iv, 8);
+    }
+}
+
+static void tdes_write_segment(QTestState *qts, const uint8_t *input,
+                               size_t length)
+{
+    switch (length) {
+    case 1:
+        qtest_writeb(qts, SAM9X7_TDES_BASE + TDES_IDATAR(0), input[0]);
+        break;
+    case 2:
+        qtest_writew(qts, SAM9X7_TDES_BASE + TDES_IDATAR(0),
+                     lduw_le_p(input));
+        break;
+    case 4:
+        qtest_writel(qts, SAM9X7_TDES_BASE + TDES_IDATAR(0),
+                     ldl_le_p(input));
+        break;
+    case 8:
+        tdes_write_words(qts, TDES_IDATAR(0), input, length);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void tdes_read_segment(QTestState *qts, uint8_t *output,
+                              size_t length)
+{
+    switch (length) {
+    case 1:
+        output[0] = qtest_readb(qts,
+                                SAM9X7_TDES_BASE + TDES_ODATAR(0));
+        break;
+    case 2:
+        stw_le_p(output, qtest_readw(qts,
+                                     SAM9X7_TDES_BASE + TDES_ODATAR(0)));
+        break;
+    case 4:
+        stl_le_p(output, qtest_readl(qts,
+                                     SAM9X7_TDES_BASE + TDES_ODATAR(0)));
+        break;
+    case 8:
+        tdes_read_words(qts, TDES_ODATAR(0), output, length);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void tdes_process_cpu(QTestState *qts, const uint8_t *input,
+                             uint8_t *output, size_t length,
+                             uint64_t duration)
+{
+    tdes_write_segment(qts, input, length);
+    qtest_clock_step(qts, duration);
+    g_assert_true(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_ISR) &
+                  TDES_INT_DATRDY);
+    tdes_read_segment(qts, output, length);
+}
+
+static void test_tdes_vectors_timing_irq_and_protection(void)
+{
+    static const uint8_t des_key[8] = {
+        0x13, 0x34, 0x57, 0x79, 0x9b, 0xbc, 0xdf, 0xf1,
+    };
+    static const uint8_t des_plaintext[8] = {
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+    };
+    static const uint8_t des_ciphertext[8] = {
+        0x85, 0xe8, 0x13, 0x54, 0x0f, 0x0a, 0xb4, 0x05,
+    };
+    static const uint8_t tdes_key[24] = {
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+        0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
+    };
+    static const uint8_t tdes_plaintext[8] = {
+        0x73, 0x6f, 0x6d, 0x65, 0x64, 0x61, 0x74, 0x61,
+    };
+    static const uint8_t tdes_ciphertext[8] = {
+        0x18, 0xd7, 0x48, 0xe5, 0x63, 0x62, 0x05, 0x72,
+    };
+    static const uint8_t two_key[16] = {
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
+    };
+    static const uint8_t two_key_plaintext[8] = {
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+    };
+    static const uint8_t two_key_ciphertext[8] = {
+        0x31, 0xa7, 0x36, 0x4c, 0xac, 0x91, 0xca, 0x39,
+    };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint8_t result[8];
+    uint64_t duration;
+    uint32_t status;
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_MR), ==, 2);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_ISR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_WPMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_VERSION), ==,
+                    0x700);
+
+    aic_configure(qts, 40, AIC_SMR_LEVEL_HIGH | 3, 0x40404040);
+    tdes_configure(qts, TDES_MR_SMOD_AUTO | TDES_MR_CIPHER,
+                   des_key, sizeof(des_key), NULL);
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_IER, TDES_INT_DATRDY);
+    tdes_write_segment(qts, des_plaintext, sizeof(des_plaintext));
+
+    /* A transaction already accepted by TDES remains frozen while gated. */
+    qtest_clock_step(qts, 1000000);
+    g_assert_false(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_ISR) &
+                   TDES_INT_DATRDY);
+    pmc_write_pcr(qts, 40, PMC_PCR_EN);
+    duration = tdes_duration(qts, 18);
+    g_assert_cmpuint(duration, >, 1);
+    qtest_clock_step(qts, duration - 1);
+    g_assert_false(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_ISR) &
+                   TDES_INT_DATRDY);
+    qtest_clock_step(qts, 1);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(8));
+    tdes_read_segment(qts, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), des_ciphertext,
+                    sizeof(des_ciphertext));
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(8));
+
+    tdes_configure(qts, TDES_MR_SMOD_AUTO,
+                   des_key, sizeof(des_key), NULL);
+    tdes_process_cpu(qts, des_ciphertext, result, sizeof(result), duration);
+    g_assert_cmpmem(result, sizeof(result), des_plaintext,
+                    sizeof(des_plaintext));
+
+    duration = tdes_duration(qts, 50);
+    tdes_configure(qts, TDES_MR_SMOD_AUTO | TDES_MR_ALGO_TDES |
+                        TDES_MR_CIPHER,
+                   tdes_key, sizeof(tdes_key), NULL);
+    tdes_write_segment(qts, tdes_plaintext, sizeof(tdes_plaintext));
+    qtest_clock_step(qts, duration - 1);
+    g_assert_false(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_ISR) &
+                   TDES_INT_DATRDY);
+    qtest_clock_step(qts, 1);
+    tdes_read_segment(qts, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), tdes_ciphertext,
+                    sizeof(tdes_ciphertext));
+
+    tdes_configure(qts, TDES_MR_SMOD_AUTO | TDES_MR_ALGO_TDES |
+                        TDES_MR_KEYMOD_2KEY | TDES_MR_CIPHER,
+                   two_key, sizeof(two_key), NULL);
+    tdes_process_cpu(qts, two_key_plaintext, result, sizeof(result),
+                     duration);
+    g_assert_cmpmem(result, sizeof(result), two_key_ciphertext,
+                    sizeof(two_key_ciphertext));
+
+    duration = tdes_duration(qts, 18);
+    tdes_configure(qts, TDES_MR_CIPHER,
+                   des_key, sizeof(des_key), NULL);
+    tdes_write_segment(qts, des_plaintext, sizeof(des_plaintext));
+    qtest_clock_step(qts, duration);
+    g_assert_false(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_ISR) &
+                   TDES_INT_DATRDY);
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_CR, TDES_CR_START);
+    qtest_clock_step(qts, duration);
+    tdes_read_segment(qts, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), des_ciphertext,
+                    sizeof(des_ciphertext));
+
+    /* A configured software-event action locks new work until UNLOCK. */
+    tdes_configure(qts, TDES_MR_SMOD_AUTO | TDES_MR_CIPHER,
+                   des_key, sizeof(des_key), NULL);
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_WPMR,
+                 TDES_WPMR_KEY | TDES_WPMR_ACTION_LOCK);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_CR), ==, 0);
+    status = qtest_readl(qts, SAM9X7_TDES_BASE + TDES_ISR);
+    g_assert_cmphex(status & (TDES_INT_URAD | TDES_INT_SECE), ==,
+                    TDES_INT_URAD | TDES_INT_SECE);
+    status = qtest_readl(qts, SAM9X7_TDES_BASE + TDES_WPSR);
+    g_assert_cmphex(status & (TDES_WPSR_SWETYP(0xf) | TDES_WPSR_SWE), ==,
+                    TDES_WPSR_SWETYP(TDES_SWE_READ_WO) |
+                    TDES_WPSR_SWE);
+    tdes_write_segment(qts, des_plaintext, sizeof(des_plaintext));
+    qtest_clock_step(qts, duration);
+    g_assert_false(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_ISR) &
+                   TDES_INT_DATRDY);
+    status = qtest_readl(qts, SAM9X7_TDES_BASE + TDES_WPSR);
+    g_assert_cmphex(status & (TDES_WPSR_SWETYP(0xf) | TDES_WPSR_SWE), ==,
+                    TDES_WPSR_SWETYP(TDES_SWE_WEIRD_ACTION) |
+                    TDES_WPSR_SWE);
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_CR, TDES_CR_UNLOCK);
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_WPMR, TDES_WPMR_KEY);
+    tdes_configure(qts, TDES_MR_SMOD_AUTO | TDES_MR_CIPHER,
+                   des_key, sizeof(des_key), NULL);
+    tdes_process_cpu(qts, des_plaintext, result, sizeof(result), duration);
+    g_assert_cmpmem(result, sizeof(result), des_ciphertext,
+                    sizeof(des_ciphertext));
+
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_CR, TDES_CR_SWRST);
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_MR,
+                 TDES_MR_SMOD_AUTO | TDES_MR_CIPHER);
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_KEYWR(0),
+                 ldl_le_p(des_key));
+    tdes_write_segment(qts, des_plaintext, sizeof(des_plaintext));
+    status = qtest_readl(qts, SAM9X7_TDES_BASE + TDES_WPSR);
+    g_assert_cmphex(status, ==,
+                    TDES_WPSR_ECLASS |
+                    TDES_WPSR_SWETYP(TDES_SWE_INCOMPLETE_KEY) |
+                    TDES_WPSR_WPVSRC(TDES_CR) | TDES_WPSR_SWE);
+    g_assert_true(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_ISR) &
+                  TDES_INT_SECE);
+
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_CR, TDES_CR_SWRST);
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_WPMR,
+                 TDES_WPMR_KEY | TDES_WPMR_WPEN |
+                 TDES_WPMR_WPITEN | TDES_WPMR_WPCREN);
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_MR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_MR), ==, 2);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_WPSR), ==,
+                    TDES_WPSR_WPVSRC(TDES_MR) | TDES_WPSR_WPVS);
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_IER, TDES_INT_DATRDY);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_WPSR), ==,
+                    TDES_WPSR_WPVSRC(TDES_IER) | TDES_WPSR_WPVS);
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_CR, TDES_CR_SWRST);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_MR), ==, 2);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_WPSR), ==,
+                    TDES_WPSR_WPVSRC(TDES_CR) | TDES_WPSR_WPVS);
+
+    qtest_quit(qts);
+}
+
+static void test_tdes_chaining_feedback_and_xtea(void)
+{
+    static const uint8_t key[24] = {
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
+        0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
+    };
+    static const uint8_t iv[8] = {
+        0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef,
+    };
+    static const uint8_t plaintext[16] = {
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    };
+    static const uint8_t cbc_ciphertext[16] = {
+        0xdf, 0x1c, 0x83, 0x92, 0x4e, 0x00, 0xa5, 0x18,
+        0x22, 0x34, 0xbf, 0xd6, 0xb2, 0x7d, 0x2d, 0xd7,
+    };
+    static const uint8_t ofb_ciphertext[16] = {
+        0x8e, 0xbf, 0x93, 0xd9, 0x3b, 0x72, 0x33, 0xd2,
+        0xbe, 0xe7, 0x02, 0xc4, 0xe7, 0x1f, 0x32, 0x0e,
+    };
+    static const uint8_t cfb_ciphertext[4][16] = {
+        {
+            0x8e, 0xbf, 0x93, 0xd9, 0x3b, 0x72, 0x33, 0xd2,
+            0xf5, 0x03, 0x0c, 0x62, 0x3d, 0x7e, 0x9d, 0xc6,
+        }, {
+            0x8e, 0xbf, 0x93, 0xd9, 0x15, 0xb3, 0xc7, 0xa2,
+            0x73, 0xfa, 0x90, 0xc0, 0xd0, 0xc5, 0x2b, 0x1a,
+        }, {
+            0x8e, 0xbf, 0xa9, 0xa3, 0x63, 0xdc, 0x28, 0x68,
+            0x54, 0x95, 0x72, 0x1d, 0xb7, 0x08, 0x56, 0x24,
+        }, {
+            0x8e, 0x45, 0x4b, 0x5c, 0x83, 0xe1, 0x8f, 0x69,
+            0x5f, 0x79, 0x26, 0xec, 0xa3, 0x16, 0x02, 0xd5,
+        },
+    };
+    static const uint32_t cfb_mode[4] = {
+        0, TDES_MR_CFBS_32, TDES_MR_CFBS_16, TDES_MR_CFBS_8,
+    };
+    static const size_t cfb_size[4] = { 8, 4, 2, 1 };
+    static const uint8_t zero_key[16] = { 0 };
+    static const uint8_t zero[8] = { 0 };
+    static const uint8_t xtea_ciphertext[8] = {
+        0xd8, 0xd4, 0xe9, 0xde, 0xd9, 0x1e, 0x13, 0xf7,
+    };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint8_t result[16];
+    uint64_t duration;
+    unsigned int i;
+    unsigned int j;
+
+    pmc_write_pcr(qts, 40, PMC_PCR_EN);
+    duration = tdes_duration(qts, 50);
+
+    tdes_configure(qts, TDES_MR_SMOD_AUTO | TDES_MR_ALGO_TDES |
+                        TDES_MR_OPMODE_CBC | TDES_MR_CIPHER,
+                   key, sizeof(key), iv);
+    for (i = 0; i < 2; i++) {
+        tdes_process_cpu(qts, plaintext + i * 8, result + i * 8, 8,
+                         duration);
+    }
+    g_assert_cmpmem(result, sizeof(result), cbc_ciphertext,
+                    sizeof(cbc_ciphertext));
+
+    tdes_configure(qts, TDES_MR_SMOD_AUTO | TDES_MR_ALGO_TDES |
+                        TDES_MR_OPMODE_CBC,
+                   key, sizeof(key), iv);
+    for (i = 0; i < 2; i++) {
+        tdes_process_cpu(qts, cbc_ciphertext + i * 8, result + i * 8, 8,
+                         duration);
+    }
+    g_assert_cmpmem(result, sizeof(result), plaintext, sizeof(plaintext));
+
+    tdes_configure(qts, TDES_MR_SMOD_AUTO | TDES_MR_ALGO_TDES |
+                        TDES_MR_OPMODE_OFB | TDES_MR_CIPHER,
+                   key, sizeof(key), iv);
+    for (i = 0; i < 2; i++) {
+        tdes_process_cpu(qts, plaintext + i * 8, result + i * 8, 8,
+                         duration);
+    }
+    g_assert_cmpmem(result, sizeof(result), ofb_ciphertext,
+                    sizeof(ofb_ciphertext));
+
+    for (i = 0; i < G_N_ELEMENTS(cfb_size); i++) {
+        tdes_configure(qts, TDES_MR_SMOD_AUTO | TDES_MR_ALGO_TDES |
+                            TDES_MR_OPMODE_CFB | cfb_mode[i] |
+                            TDES_MR_CIPHER,
+                       key, sizeof(key), iv);
+        for (j = 0; j < sizeof(plaintext); j += cfb_size[i]) {
+            tdes_process_cpu(qts, plaintext + j, result + j, cfb_size[i],
+                             duration);
+        }
+        g_assert_cmpmem(result, sizeof(result), cfb_ciphertext[i],
+                        sizeof(cfb_ciphertext[i]));
+
+        tdes_configure(qts, TDES_MR_SMOD_AUTO | TDES_MR_ALGO_TDES |
+                            TDES_MR_OPMODE_CFB | cfb_mode[i],
+                       key, sizeof(key), iv);
+        for (j = 0; j < sizeof(plaintext); j += cfb_size[i]) {
+            tdes_process_cpu(qts, cfb_ciphertext[i] + j, result + j,
+                             cfb_size[i], duration);
+        }
+        g_assert_cmpmem(result, sizeof(result), plaintext,
+                        sizeof(plaintext));
+    }
+
+    /* XTEA uses 32-bit little-endian register words; validate 32 rounds. */
+    duration = tdes_duration(qts, 66);
+    tdes_configure(qts, TDES_MR_SMOD_AUTO | TDES_MR_ALGO_XTEA |
+                        TDES_MR_CIPHER,
+                   zero_key, sizeof(zero_key), NULL);
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_XTEA_RNDR, 31);
+    tdes_process_cpu(qts, zero, result, sizeof(zero), duration);
+    g_assert_cmpmem(result, sizeof(zero), xtea_ciphertext,
+                    sizeof(xtea_ciphertext));
+
+    tdes_configure(qts, TDES_MR_SMOD_AUTO | TDES_MR_ALGO_XTEA,
+                   zero_key, sizeof(zero_key), NULL);
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_XTEA_RNDR, 31);
+    tdes_process_cpu(qts, xtea_ciphertext, result, sizeof(zero), duration);
+    g_assert_cmpmem(result, sizeof(zero), zero, sizeof(zero));
+
+    qtest_quit(qts);
+}
+
+static void tdes_process_dma(QTestState *qts, uint32_t source,
+                             uint32_t destination, size_t length,
+                             bool receive)
+{
+    uint64_t tx_channel = XDMAC_CHANNEL(0);
+    uint64_t rx_channel = XDMAC_CHANNEL(1);
+    uint64_t duration = tdes_duration(qts, 50);
+    uint32_t channels = BIT(0);
+    unsigned int blocks;
+    unsigned int i;
+
+    g_assert_cmpuint(length % sizeof(uint32_t), ==, 0);
+    g_assert_cmpuint(length % 8, ==, 0);
+    blocks = length / 8;
+    if (receive) {
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CSA,
+                     SAM9X7_TDES_BASE + TDES_ODATAR(0));
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CDA,
+                     destination);
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CUBC,
+                     length / sizeof(uint32_t));
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CC,
+                     XDMAC_CC_TYPE_PER | XDMAC_CC_PERID(30) |
+                     XDMAC_CC_DWIDTH_WORD | XDMAC_CC_DAM_INC);
+        channels |= BIT(1);
+    }
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CSA, source);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CDA,
+                 SAM9X7_TDES_BASE + TDES_IDATAR(0));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CUBC,
+                 length / sizeof(uint32_t));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_DSYNC_MEM2PER |
+                 XDMAC_CC_PERID(31) | XDMAC_CC_DWIDTH_WORD |
+                 XDMAC_CC_SAM_INC);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, channels);
+
+    /*
+     * Let each completed cipher block generate the next pair of DMA
+     * handshakes.  With LOD, leave the final block in flight so its DATRDY
+     * timing can be checked independently below.
+     */
+    for (i = 0; i < blocks - !receive; i++) {
+        qtest_clock_step(qts, duration);
+    }
+    xdmac_waitl(qts, XDMAC_GS, channels, 0);
+}
+
+static void test_tdes_xdmac_and_last_output(void)
+{
+    static const uint8_t key[24] = {
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
+        0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
+    };
+    static const uint8_t iv[8] = {
+        0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef,
+    };
+    static const uint8_t plaintext[16] = {
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    };
+    static const uint8_t ciphertext[16] = {
+        0xdf, 0x1c, 0x83, 0x92, 0x4e, 0x00, 0xa5, 0x18,
+        0x22, 0x34, 0xbf, 0xd6, 0xb2, 0x7d, 0x2d, 0xd7,
+    };
+    const uint32_t dma_src = SAM9X7_DDR_BASE + 0x11a00;
+    const uint32_t dma_dst = SAM9X7_DDR_BASE + 0x11b00;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint8_t result[16] = { 0 };
+    uint64_t duration;
+
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    pmc_write_pcr(qts, 40, PMC_PCR_EN);
+    duration = tdes_duration(qts, 50);
+
+    qtest_memwrite(qts, dma_src, plaintext, sizeof(plaintext));
+    qtest_memwrite(qts, dma_dst, result, sizeof(result));
+    tdes_configure(qts, TDES_MR_SMOD_DMA | TDES_MR_ALGO_TDES |
+                        TDES_MR_OPMODE_CBC | TDES_MR_CIPHER,
+                   key, sizeof(key), iv);
+    tdes_process_dma(qts, dma_src, dma_dst, sizeof(plaintext), true);
+    qtest_memread(qts, dma_dst, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), ciphertext, sizeof(ciphertext));
+
+    /* CBC-MAC uses only TX DMA and leaves the final block in ODATAR. */
+    tdes_configure(qts, TDES_MR_SMOD_DMA | TDES_MR_ALGO_TDES |
+                        TDES_MR_OPMODE_CBC | TDES_MR_LOD |
+                        TDES_MR_CIPHER,
+                   key, sizeof(key), iv);
+    tdes_process_dma(qts, dma_src, 0, sizeof(plaintext), false);
+    g_assert_false(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_ISR) &
+                   TDES_INT_DATRDY);
+    qtest_clock_step(qts, duration - 1);
+    g_assert_false(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_ISR) &
+                   TDES_INT_DATRDY);
+    qtest_clock_step(qts, 1);
+    g_assert_true(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_ISR) &
+                  TDES_INT_DATRDY);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_TDES_BASE + TDES_ODATAR(0)), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_WPSR), ==,
+                    TDES_WPSR_SWETYP(TDES_SWE_WEIRD_ACTION) |
+                    TDES_WPSR_WPVSRC(TDES_ODATAR(0)) | TDES_WPSR_SWE);
+    qtest_writel(qts, SAM9X7_TDES_BASE + TDES_MR,
+                 TDES_MR_ALGO_TDES | TDES_MR_OPMODE_CBC |
+                 TDES_MR_LOD | TDES_MR_CIPHER);
+    tdes_read_segment(qts, result, 8);
+    g_assert_cmpmem(result, 8, ciphertext + 8, 8);
+
+    qtest_quit(qts);
+}
+
 static unsigned int sha_processing_cycles(unsigned int algorithm)
 {
     switch (algorithm) {
@@ -4300,6 +4861,12 @@ int main(int argc, char **argv)
                    test_aes_chaining_gcm_and_xdmac);
     qtest_add_func("sam9x75/aes/feedback-and-xts",
                    test_aes_feedback_and_xts);
+    qtest_add_func("sam9x75/tdes/vectors-timing-irq-and-protection",
+                   test_tdes_vectors_timing_irq_and_protection);
+    qtest_add_func("sam9x75/tdes/chaining-feedback-and-xtea",
+                   test_tdes_chaining_feedback_and_xtea);
+    qtest_add_func("sam9x75/tdes/xdmac-and-last-output",
+                   test_tdes_xdmac_and_last_output);
     qtest_add_func("sam9x75/sha/vectors-timing-irq-and-protection",
                    test_sha_vectors_timing_irq_and_protection);
     qtest_add_func("sam9x75/sha/hmac-check-and-manual-padding",
