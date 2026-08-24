@@ -36,6 +36,7 @@
 #define SAM9X7_RTT_BASE         0xfffffe20
 #define SAM9X7_PIT_BASE         0xfffffe40
 #define SAM9X7_SCKC_BASE        0xfffffe50
+#define SAM9X7_RTC_BASE         0xfffffea8
 #define SAM9X7_SYSCWP_BASE      0xfffffedc
 #define SAM9X7_AIC_BASE         0xfffff100
 #define SAM9X7_DBGU_BASE        0xfffff200
@@ -179,6 +180,46 @@
 #define DBGU_INT_TXRDY          BIT(1)
 #define DBGU_INT_TXEMPTY        BIT(9)
 
+#define RTC_CR                  0x00
+#define RTC_MR                  0x04
+#define RTC_TIMR                0x08
+#define RTC_CALR                0x0c
+#define RTC_TIMALR              0x10
+#define RTC_CALALR              0x14
+#define RTC_SR                  0x18
+#define RTC_SCCR                0x1c
+#define RTC_IER                 0x20
+#define RTC_IDR                 0x24
+#define RTC_IMR                 0x28
+#define RTC_VER                 0x2c
+#define RTC_TMR                 0x58
+#define RTC_TDPR                0x5c
+#define RTC_TSTR0               0xb0
+#define RTC_TSDR0               0xb4
+#define RTC_TSSR0               0xb8
+#define RTC_TSTR1               0xbc
+#define RTC_TSDR1               0xc0
+#define RTC_TSSR1               0xc4
+
+#define RTC_CR_UPDTIM           BIT(0)
+#define RTC_CR_UPDCAL           BIT(1)
+#define RTC_MR_HRMOD            BIT(0)
+#define RTC_MR_UTC              BIT(2)
+#define RTC_MR_HIGHPPM          BIT(15)
+#define RTC_SR_ACKUPD           BIT(0)
+#define RTC_SR_ALARM            BIT(1)
+#define RTC_SR_SEC              BIT(2)
+#define RTC_TIMALR_SECEN        BIT(7)
+#define RTC_TIMALR_MINEN        BIT(15)
+#define RTC_TIMALR_HOUREN       BIT(23)
+#define RTC_CALALR_UTCEN        BIT(0)
+#define RTC_CALALR_MTHEN        BIT(23)
+#define RTC_CALALR_DATEEN       BIT(31)
+#define RTC_VER_NVTIM           BIT(0)
+#define RTC_VER_NVCALALR        BIT(3)
+#define RTC_TMR_LOCK            BIT(31)
+#define RTC_SECOND_NS           1000000000LL
+
 #define PMC_PLL_CTRL0           0x0c
 #define PMC_PLL_CTRL1           0x10
 #define PMC_PLL_ACR             0x18
@@ -259,6 +300,7 @@
 #define SYSC_WPMR               0x00
 #define SYSC_WPSR               0x04
 #define SYSC_WPMR_WPEN          BIT(0)
+#define SYSC_WPMR_WPITEN        BIT(1)
 #define SYSC_WPMR_KEY           0x53594300
 
 #define SFR_CCFG_EBICSA         0x004
@@ -2071,6 +2113,178 @@ static void test_rtt_count_alarm_modulo_and_protection(void)
     qtest_quit(qts);
 }
 
+static void rtc_begin_update(QTestState *qts)
+{
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_CR,
+                 RTC_CR_UPDTIM | RTC_CR_UPDCAL);
+    qtest_clock_step(qts, RTC_SECOND_NS);
+    g_assert_true(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_SR) &
+                  RTC_SR_ACKUPD);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_SCCR, RTC_SR_ACKUPD);
+}
+
+static void test_rtc_calendar_alarm_irq_and_protection(void)
+{
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -rtc base=2024-02-28T23:59:58,clock=vm");
+    uint32_t value;
+
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_WDT_BASE + WDT_MR), ==,
+                    WDT_MR_WDDIS);
+    aic_configure(qts, 1, AIC_SMR_LEVEL_HIGH | 3, 0x1111ca1e);
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_CR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_MR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TIMR), ==,
+                    0x00235958);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_CALR), ==,
+                    0x28822420);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_SR), ==,
+                    RTC_SR_SEC);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_CALALR), ==,
+                    0x01010000);
+
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_SCCR, RTC_SR_SEC);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_IER, RTC_SR_SEC);
+    qtest_clock_step(qts, RTC_SECOND_NS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TIMR), ==,
+                    0x00235959);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(1));
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_SCCR, RTC_SR_SEC);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(1));
+
+    qtest_clock_step(qts, RTC_SECOND_NS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TIMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_CALR), ==,
+                    0x29a22420);
+
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_IER, RTC_SR_ACKUPD);
+    rtc_begin_update(qts);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_TIMR, 0x00123456);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_CALR, 0x30462520);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TIMR), ==,
+                    0x00123456);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_CALR), ==,
+                    0x30462520);
+
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_TIMR, 0x0012347a);
+    g_assert_true(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_VER) &
+                  RTC_VER_NVTIM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TIMR), ==,
+                    0x00123456);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_TIMR, 0x00123456);
+    g_assert_false(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_VER) &
+                   RTC_VER_NVTIM);
+
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_CR, 0);
+    qtest_clock_step(qts, RTC_SECOND_NS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TIMR), ==,
+                    0x00123457);
+
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_IDR, 0x3f);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_SCCR, 0x3f);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_TIMALR,
+                 RTC_TIMALR_SECEN | 0x59);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_IER, RTC_SR_ALARM);
+    qtest_clock_step(qts, 2 * RTC_SECOND_NS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TIMR), ==,
+                    0x00123459);
+    g_assert_true(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_SR) &
+                  RTC_SR_ALARM);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(1));
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_SCCR, RTC_SR_ALARM);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(1));
+
+    value = RTC_CALALR_MTHEN | RTC_CALALR_DATEEN |
+            (0x13U << 16) | (0x31U << 24);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_CALALR, value);
+    g_assert_true(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_VER) &
+                  RTC_VER_NVCALALR);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_CALALR), ==,
+                    0x01010000);
+
+    qtest_writel(qts, SAM9X7_SYSCWP_BASE + SYSC_WPMR,
+                 SYSC_WPMR_KEY | SYSC_WPMR_WPEN);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_MR, RTC_MR_HRMOD);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_MR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SYSCWP_BASE + SYSC_WPSR), ==,
+                    0x0000ac01);
+
+    qtest_writel(qts, SAM9X7_SYSCWP_BASE + SYSC_WPMR,
+                 SYSC_WPMR_KEY | SYSC_WPMR_WPITEN);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_IER, RTC_SR_SEC);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_IMR), ==,
+                    RTC_SR_ALARM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SYSCWP_BASE + SYSC_WPSR), ==,
+                    0);
+
+    qtest_quit(qts);
+}
+
+static void test_rtc_utc_tamper_and_lock(void)
+{
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -rtc base=2024-02-28T23:59:58,clock=vm");
+
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_set_irq_in(qts, "/machine/soc/rtc", "tamper", 0, 1);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_TDPR, 0);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_TMR, BIT(0));
+    qtest_set_irq_in(qts, "/machine/soc/rtc", "tamper", 0, 0);
+    qtest_clock_step(qts, 61035);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TSTR0), ==, 0);
+    qtest_clock_step(qts, 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TSTR0), ==,
+                    0x01235958);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TSDR0), ==,
+                    0x28822420);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TSSR0), ==,
+                    BIT(0));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TSTR0), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TSTR1), ==,
+                    0x00235958);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TSSR1), ==,
+                    BIT(0));
+
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_TMR, BIT(0) | RTC_TMR_LOCK);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_TMR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TMR), ==,
+                    BIT(0));
+
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_MR, RTC_MR_UTC);
+    rtc_begin_update(qts);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_TIMR, 100);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_CR, 0);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_TIMALR, 102);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_CALALR, RTC_CALALR_UTCEN);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_SCCR, 0x3f);
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_IER, RTC_SR_ALARM);
+    qtest_clock_step(qts, 2 * RTC_SECOND_NS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TIMR), ==, 102);
+    g_assert_true(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_SR) &
+                  RTC_SR_ALARM);
+
+    qtest_set_irq_in(qts, "/machine/soc/rtc", "tamper", 0, 1);
+    qtest_set_irq_in(qts, "/machine/soc/rtc", "tamper", 0, 0);
+    qtest_clock_step(qts, 61036);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TSTR0), ==,
+                    0x01000000);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TSDR0), ==,
+                    102);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_TSSR0), ==,
+                    BIT(0));
+
+    qtest_writel(qts, SAM9X7_RTC_BASE + RTC_MR,
+                 RTC_MR_UTC | RTC_MR_HIGHPPM | (1U << 8));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_RTC_BASE + RTC_MR), ==,
+                    RTC_MR_UTC | RTC_MR_HIGHPPM | (1U << 8));
+
+    qtest_quit(qts);
+}
+
 static void test_sfr_registers_resume_and_protection(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -2605,6 +2819,10 @@ int main(int argc, char **argv)
                    test_system_slowclock_pit_reset_and_protection);
     qtest_add_func("sam9x75/rtt/count-alarm-modulo-and-protection",
                    test_rtt_count_alarm_modulo_and_protection);
+    qtest_add_func("sam9x75/rtc/calendar-alarm-irq-and-protection",
+                   test_rtc_calendar_alarm_irq_and_protection);
+    qtest_add_func("sam9x75/rtc/utc-tamper-and-lock",
+                   test_rtc_utc_tamper_and_lock);
     qtest_add_func("sam9x75/sfr/registers-resume-and-protection",
                    test_sfr_registers_resume_and_protection);
     qtest_add_func("sam9x75/mpddrc/registers-errors-and-irq",

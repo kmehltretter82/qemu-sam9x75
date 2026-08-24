@@ -26,6 +26,7 @@
 #include "hw/misc/at91_smc.h"
 #include "hw/misc/at91_sysc.h"
 #include "hw/net/cadence_gem.h"
+#include "hw/rtc/at91_rtc.h"
 #include "hw/sd/at91_sdhci.h"
 #include "hw/ssi/at91_ospi.h"
 #include "hw/timer/at91_pit64b.h"
@@ -123,6 +124,7 @@ struct SAM9X7State {
     AT91PIT64BState pit64b[2];
     AT91PITState pit;
     AT91RTTState rtt;
+    AT91RTCState rtc;
     AT91TCBState tcb;
     AT91WDTState wdt;
     OrIRQState sys_irq;

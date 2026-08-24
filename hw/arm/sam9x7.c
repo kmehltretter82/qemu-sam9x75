@@ -130,6 +130,18 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->rtt), 0,
                        qdev_get_gpio_in(DEVICE(&s->sys_irq), 5));
 
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->rtc), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->rtc), 0);
+    /*
+     * The RTC's 0x100-byte register aperture has holes occupied by other
+     * system-controller blocks, including SYSCWP and WDT.
+     */
+    memory_region_add_subregion_overlap(s->memory, SAM9X7_RTC_BASE, mr, -1);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->rtc), 0,
+                       qdev_get_gpio_in(DEVICE(&s->sys_irq), 6));
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->tcb), errp)) {
         return;
     }
@@ -386,6 +398,9 @@ static void sam9x7_init(Object *obj)
     qdev_connect_clock_in(DEVICE(&s->rtt), "slck",
                           qdev_get_clock_out(DEVICE(&s->sckc), "md-slck"));
     s->rtt.sysc = &s->sysc;
+
+    object_initialize_child(obj, "rtc", &s->rtc, TYPE_AT91_RTC);
+    s->rtc.sysc = &s->sysc;
 
     object_initialize_child(obj, "tcb", &s->tcb, TYPE_AT91_TCB);
     qdev_connect_clock_in(DEVICE(&s->tcb), "pclk",
