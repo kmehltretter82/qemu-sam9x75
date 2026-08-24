@@ -32,8 +32,12 @@ struct AT91PIT64BState {
     uint32_t wpmr;
     uint32_t wpsr;
     uint32_t latched_msb;
+    uint64_t counter_base;
+    uint64_t counter_period;
+    int64_t counter_base_ns;
     bool running;
     bool clock_suspended;
+    bool counter_epoch;
 };
 
 #endif /* HW_TIMER_AT91_PIT64B_H */

@@ -292,6 +292,7 @@
 #define PIT64B_IMR              0x18
 #define PIT64B_ISR              0x1c
 #define PIT64B_TLSBR            0x20
+#define PIT64B_TMSBR            0x24
 #define PIT64B_WPMR             0xe4
 #define PIT64B_WPSR             0xe8
 
@@ -1332,6 +1333,32 @@ static void test_pit64b_timing_gating_and_irq(void)
                     (PIT64B_MR << 8) | 1);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_PIT64B0_BASE + PIT64B_WPSR), ==,
                     0);
+
+    /* Linux uses a full-range continuous PIT64B as its clocksource. */
+    pmc_write_pcr(qts, 58, PMC_PCR_EN);
+    g_assert_cmpuint(get_clock_period(qts,
+                                     "/machine/soc/pmc/pclk[58]"), !=, 0);
+    qtest_writel(qts, SAM9X7_PIT64B1_BASE + PIT64B_CR, PIT64B_CR_SWRST);
+    qtest_writel(qts, SAM9X7_PIT64B1_BASE + PIT64B_MR, PIT64B_MR_CONT);
+    qtest_writel(qts, SAM9X7_PIT64B1_BASE + PIT64B_MSB_PR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_PIT64B1_BASE + PIT64B_LSB_PR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_PIT64B1_BASE + PIT64B_CR, PIT64B_CR_START);
+    qtest_clock_step(qts, 100000);
+    value = qtest_readl(qts, SAM9X7_PIT64B1_BASE + PIT64B_TLSBR);
+    g_assert_cmpuint(value, >, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PIT64B1_BASE + PIT64B_TMSBR),
+                    ==, 0);
+
+    pmc_write_pcr(qts, 58, 0);
+    value = qtest_readl(qts, SAM9X7_PIT64B1_BASE + PIT64B_TLSBR);
+    qtest_clock_step(qts, 100000);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PIT64B1_BASE + PIT64B_TLSBR),
+                    ==, value);
+    pmc_write_pcr(qts, 58, PMC_PCR_EN);
+    qtest_clock_step(qts, 100000);
+    g_assert_cmpuint(qtest_readl(qts,
+                                 SAM9X7_PIT64B1_BASE + PIT64B_TLSBR), >,
+                     value);
 
     qtest_quit(qts);
 }

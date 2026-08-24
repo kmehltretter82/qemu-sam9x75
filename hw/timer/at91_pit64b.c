@@ -14,6 +14,7 @@
 #include "qemu/bitops.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
 
 #include "trace.h"
 
@@ -95,14 +96,100 @@ static void at91_pit64b_set_clock_period(AT91PIT64BState *s)
     }
 }
 
+static uint64_t at91_pit64b_counter_period(AT91PIT64BState *s)
+{
+    uint64_t period = clock_get(at91_pit64b_selected_clock(s));
+    unsigned int divider = at91_pit64b_clock_divider(s);
+
+    if (period > UINT64_MAX / divider) {
+        return UINT64_MAX;
+    }
+    return period * divider;
+}
+
+static uint64_t at91_pit64b_ns_to_ticks(uint64_t period, uint64_t ns)
+{
+    uint64_t low = ns << 32;
+    uint64_t high = ns >> 32;
+
+    if (!period) {
+        return 0;
+    }
+
+    divu128(&low, &high, period);
+    return low;
+}
+
+static uint64_t at91_pit64b_counter_epoch_value(AT91PIT64BState *s)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    uint64_t elapsed;
+
+    if (!s->running || s->clock_suspended || !s->counter_period ||
+        now <= s->counter_base_ns) {
+        return s->counter_base;
+    }
+
+    elapsed = now - s->counter_base_ns;
+    return s->counter_base +
+           at91_pit64b_ns_to_ticks(s->counter_period, elapsed);
+}
+
+static void at91_pit64b_freeze_counter_epoch(AT91PIT64BState *s)
+{
+    s->counter_base = at91_pit64b_counter_epoch_value(s);
+    s->counter_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
+static bool at91_pit64b_needs_counter_epoch(AT91PIT64BState *s)
+{
+    Clock *clk = at91_pit64b_selected_clock(s);
+    uint64_t duration;
+    unsigned int divider = at91_pit64b_clock_divider(s);
+
+    if (at91_pit64b_period(s) == UINT64_MAX) {
+        return true;
+    }
+    if (!clock_get_hz(clk)) {
+        return false;
+    }
+
+    duration = clock_ticks_to_ns(clk, at91_pit64b_period(s));
+    return duration == INT64_MAX || duration > INT64_MAX / divider;
+}
+
+static void at91_pit64b_enter_counter_epoch(AT91PIT64BState *s,
+                                             uint64_t counter)
+{
+    ptimer_transaction_begin(s->timer);
+    ptimer_stop(s->timer);
+    ptimer_transaction_commit(s->timer);
+
+    s->counter_base = counter;
+    s->counter_period = at91_pit64b_counter_period(s);
+    s->counter_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->counter_epoch = true;
+    s->running = true;
+    s->clock_suspended = !clock_get_hz(at91_pit64b_selected_clock(s));
+}
+
 static void at91_pit64b_start(AT91PIT64BState *s)
 {
     Clock *clk = at91_pit64b_selected_clock(s);
+
+    if (at91_pit64b_needs_counter_epoch(s)) {
+        at91_pit64b_enter_counter_epoch(s, 0);
+        return;
+    }
 
     ptimer_transaction_begin(s->timer);
     ptimer_stop(s->timer);
     at91_pit64b_set_clock_period(s);
     ptimer_set_limit(s->timer, at91_pit64b_period(s), 1);
+    s->counter_base = 0;
+    s->counter_period = 0;
+    s->counter_base_ns = 0;
+    s->counter_epoch = false;
     s->running = true;
     s->clock_suspended = !clock_get_hz(clk);
     if (!s->clock_suspended) {
@@ -124,8 +211,12 @@ static void at91_pit64b_stop_and_clear(AT91PIT64BState *s)
     s->imr = 0;
     s->isr = 0;
     s->latched_msb = 0;
+    s->counter_base = 0;
+    s->counter_period = 0;
+    s->counter_base_ns = 0;
     s->running = false;
     s->clock_suspended = false;
+    s->counter_epoch = false;
     at91_pit64b_update_irq(s);
 }
 
@@ -162,8 +253,15 @@ static bool at91_pit64b_write_protected(AT91PIT64BState *s, hwaddr offset)
 
 static uint64_t at91_pit64b_counter(AT91PIT64BState *s)
 {
-    uint64_t remaining = ptimer_get_count(s->timer);
-    uint64_t period = at91_pit64b_period(s);
+    uint64_t remaining;
+    uint64_t period;
+
+    if (s->counter_epoch) {
+        return at91_pit64b_counter_epoch_value(s);
+    }
+
+    remaining = ptimer_get_count(s->timer);
+    period = at91_pit64b_period(s);
 
     /* The hardware is an up-counter; the ptimer backing it counts down. */
     return remaining ? period - remaining : 0;
@@ -326,6 +424,19 @@ static void at91_pit64b_clock_changed(void *opaque, ClockEvent event)
     }
 
     clk = at91_pit64b_selected_clock(s);
+    if (s->counter_epoch) {
+        at91_pit64b_freeze_counter_epoch(s);
+        s->counter_period = at91_pit64b_counter_period(s);
+        s->clock_suspended = !clock_get_hz(clk);
+        return;
+    }
+    if (s->running && at91_pit64b_needs_counter_epoch(s)) {
+        uint64_t counter = at91_pit64b_counter(s);
+
+        at91_pit64b_enter_counter_epoch(s, counter);
+        return;
+    }
+
     ptimer_transaction_begin(s->timer);
     if (!clock_get_hz(clk)) {
         if (s->running && !s->clock_suspended) {
@@ -400,13 +511,19 @@ static int at91_pit64b_post_load(void *opaque, int version_id)
 {
     AT91PIT64BState *s = AT91_PIT64B(opaque);
 
+    if (version_id < 2 && s->running &&
+        at91_pit64b_needs_counter_epoch(s)) {
+        uint64_t counter = at91_pit64b_counter(s);
+
+        at91_pit64b_enter_counter_epoch(s, counter);
+    }
     at91_pit64b_update_irq(s);
     return 0;
 }
 
 static const VMStateDescription at91_pit64b_vmstate = {
     .name = TYPE_AT91_PIT64B,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = at91_pit64b_post_load,
     .fields = (const VMStateField[]) {
@@ -421,8 +538,12 @@ static const VMStateDescription at91_pit64b_vmstate = {
         VMSTATE_UINT32(wpmr, AT91PIT64BState),
         VMSTATE_UINT32(wpsr, AT91PIT64BState),
         VMSTATE_UINT32(latched_msb, AT91PIT64BState),
+        VMSTATE_UINT64_V(counter_base, AT91PIT64BState, 2),
+        VMSTATE_UINT64_V(counter_period, AT91PIT64BState, 2),
+        VMSTATE_INT64_V(counter_base_ns, AT91PIT64BState, 2),
         VMSTATE_BOOL(running, AT91PIT64BState),
         VMSTATE_BOOL(clock_suspended, AT91PIT64BState),
+        VMSTATE_BOOL_V(counter_epoch, AT91PIT64BState, 2),
         VMSTATE_END_OF_LIST()
     },
 };
