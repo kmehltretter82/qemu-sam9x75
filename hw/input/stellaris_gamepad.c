@@ -74,8 +74,12 @@ static void stellaris_gamepad_unrealize(DeviceState *dev)
 static void stellaris_gamepad_reset_enter(Object *obj, ResetType type)
 {
     StellarisGamepad *s = STELLARIS_GAMEPAD(obj);
+    unsigned int i;
 
     memset(s->pressed, 0, s->num_buttons * sizeof(uint8_t));
+    for (i = 0; i < s->num_buttons; i++) {
+        qemu_set_irq(s->irqs[i], 0);
+    }
 }
 
 static const Property stellaris_gamepad_properties[] = {

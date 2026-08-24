@@ -6,6 +6,7 @@
 
 #include "qemu/osdep.h"
 
+#include "hw/core/irq.h"
 #include "hw/i2c/i2c.h"
 #include "hw/misc/mcp16502.h"
 #include "migration/vmstate.h"
@@ -31,9 +32,15 @@ OBJECT_DECLARE_SIMPLE_TYPE(MCP16502State, MCP16502_AB)
 struct MCP16502State {
     I2CSlave parent_obj;
 
+    qemu_irq nstrto;
+
     uint8_t regs[MCP16502_NUM_REGS];
     uint8_t pointer;
     uint8_t count;
+    bool nstart_level;
+    bool pwrhld_level;
+    bool lpm_level;
+    bool hpm_level;
 };
 
 /*
@@ -89,16 +96,32 @@ static uint8_t mcp16502_write_mask(uint8_t reg)
     return 0;
 }
 
+static int mcp16502_power_mode(MCP16502State *s)
+{
+    if (!s->pwrhld_level) {
+        return s->lpm_level ? 2 : -1;
+    }
+    if (s->lpm_level) {
+        return 1;
+    }
+    if (s->hpm_level && (s->regs[0x03] & BIT(5))) {
+        return 3;
+    }
+    return 0;
+}
+
 static uint8_t mcp16502_status(MCP16502State *s, uint8_t reg)
 {
     uint8_t value = s->regs[reg];
     uint8_t output;
     uint8_t clear_mask;
+    int mode;
 
     if (reg >= MCP16502_BUCK1_STATUS &&
         reg <= MCP16502_LDO2_STATUS) {
         output = 0x10 + (reg - MCP16502_BUCK1_STATUS) * 0x10;
-        if (s->regs[output] & MCP16502_REGULATOR_EN) {
+        mode = mcp16502_power_mode(s);
+        if (mode >= 0 && (s->regs[output + mode] & MCP16502_REGULATOR_EN)) {
             value |= MCP16502_STATUS_SSD | MCP16502_STATUS_POK |
                      MCP16502_STATUS_ENS;
         }
@@ -128,6 +151,36 @@ static uint8_t mcp16502_read(MCP16502State *s, uint8_t reg)
     }
 
     return 0;
+}
+
+static void mcp16502_set_nstart(void *opaque, int line, int level)
+{
+    MCP16502State *s = opaque;
+
+    s->nstart_level = level < 0 || level;
+    /* nSTRTO is active-low electrically; expose logical assertion. */
+    qemu_set_irq(s->nstrto, !s->nstart_level);
+}
+
+static void mcp16502_set_pwrhld(void *opaque, int line, int level)
+{
+    MCP16502State *s = opaque;
+
+    s->pwrhld_level = level > 0;
+}
+
+static void mcp16502_set_lpm(void *opaque, int line, int level)
+{
+    MCP16502State *s = opaque;
+
+    s->lpm_level = level > 0;
+}
+
+static void mcp16502_set_hpm(void *opaque, int line, int level)
+{
+    MCP16502State *s = opaque;
+
+    s->hpm_level = level > 0;
 }
 
 static int mcp16502_event(I2CSlave *i2c, enum i2c_event event)
@@ -174,20 +227,56 @@ static void mcp16502_reset_enter(Object *obj, ResetType type)
     memcpy(s->regs, mcp16502ab_reset_regs, sizeof(s->regs));
     s->pointer = 0;
     s->count = 0;
+    s->nstart_level = true;
+    s->pwrhld_level = true;
+    s->lpm_level = false;
+    s->hpm_level = false;
+    qemu_set_irq(s->nstrto, 0);
+}
+
+static int mcp16502_post_load(void *opaque, int version_id)
+{
+    MCP16502State *s = opaque;
+
+    if (version_id < 2) {
+        s->nstart_level = true;
+        s->pwrhld_level = true;
+        s->lpm_level = false;
+        s->hpm_level = false;
+    }
+    qemu_set_irq(s->nstrto, !s->nstart_level);
+    return 0;
 }
 
 static const VMStateDescription vmstate_mcp16502 = {
     .name = TYPE_MCP16502_AB,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .post_load = mcp16502_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, MCP16502State),
         VMSTATE_UINT8_ARRAY(regs, MCP16502State, MCP16502_NUM_REGS),
         VMSTATE_UINT8(pointer, MCP16502State),
         VMSTATE_UINT8(count, MCP16502State),
+        VMSTATE_BOOL_V(nstart_level, MCP16502State, 2),
+        VMSTATE_BOOL_V(pwrhld_level, MCP16502State, 2),
+        VMSTATE_BOOL_V(lpm_level, MCP16502State, 2),
+        VMSTATE_BOOL_V(hpm_level, MCP16502State, 2),
         VMSTATE_END_OF_LIST()
     }
 };
+
+static void mcp16502_init(Object *obj)
+{
+    DeviceState *dev = DEVICE(obj);
+    MCP16502State *s = MCP16502_AB(obj);
+
+    qdev_init_gpio_in_named(dev, mcp16502_set_nstart, "nstart", 1);
+    qdev_init_gpio_in_named(dev, mcp16502_set_pwrhld, "pwrhld", 1);
+    qdev_init_gpio_in_named(dev, mcp16502_set_lpm, "lpm", 1);
+    qdev_init_gpio_in_named(dev, mcp16502_set_hpm, "hpm", 1);
+    qdev_init_gpio_out_named(dev, &s->nstrto, "nstrto", 1);
+}
 
 static void mcp16502_class_init(ObjectClass *oc, const void *data)
 {
@@ -207,6 +296,7 @@ static const TypeInfo mcp16502_info = {
     .name = TYPE_MCP16502_AB,
     .parent = TYPE_I2C_SLAVE,
     .instance_size = sizeof(MCP16502State),
+    .instance_init = mcp16502_init,
     .class_init = mcp16502_class_init,
 };
 

@@ -101,6 +101,15 @@ static void led_realize(DeviceState *dev, Error **errp)
     qdev_init_gpio_in(DEVICE(s), led_set_state_gpio_handler, 1);
 }
 
+static void led_init(Object *obj)
+{
+    LEDState *s = LED(obj);
+
+    object_property_add_uint8_ptr(obj, "intensity-percent",
+                                  &s->intensity_percent,
+                                  OBJ_PROP_FLAG_READ);
+}
+
 static const Property led_properties[] = {
     DEFINE_PROP_STRING("color", LEDState, color),
     DEFINE_PROP_STRING("description", LEDState, description),
@@ -123,6 +132,7 @@ static const TypeInfo led_info = {
     .name = TYPE_LED,
     .parent = TYPE_DEVICE,
     .instance_size = sizeof(LEDState),
+    .instance_init = led_init,
     .class_init = led_class_init
 };
 

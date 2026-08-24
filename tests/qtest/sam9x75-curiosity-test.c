@@ -945,6 +945,30 @@ static uint64_t get_clock_period(QTestState *qts, const char *path)
     return period;
 }
 
+static int64_t qom_get_int(QTestState *qts, const char *path,
+                           const char *property)
+{
+    QDict *response;
+    int64_t value;
+
+    response = qtest_qmp(qts,
+                         "{ 'execute': 'qom-get', 'arguments': { "
+                         "'path': %s, 'property': %s } }",
+                         path, property);
+    g_assert_false(qdict_haskey(response, "error"));
+    value = qdict_get_int(response, "return");
+    qobject_unref(response);
+    return value;
+}
+
+static void send_input_key(QTestState *qts, const char *qcode, bool down)
+{
+    qtest_qmp_assert_success(qts,
+        "{ 'execute': 'input-send-event', 'arguments': { 'events': ["
+        "{ 'type': 'key', 'data': { 'down': %i, 'key': {"
+        "'type': 'qcode', 'data': %s } } } ] } }", down, qcode);
+}
+
 static void pmc_write_pcr(QTestState *qts, unsigned int id,
                           uint32_t config);
 
@@ -1266,6 +1290,123 @@ static void test_mcp16502_registers_and_regulators(void)
     twi6_enable_master(qts);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x02), ==, 0x54);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x40), ==, 0xe3);
+
+    qtest_quit(qts);
+}
+
+static void test_board_rgb_led_and_user_button(void)
+{
+    const uint32_t leds = BIT(14) | BIT(20) | BIT(21);
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PCR,
+                 PMC_PCR_CMD | PMC_PCR_EN | 4);
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOC_BASE + PIO_PDSR) & BIT(9));
+    send_input_key(qts, "0", true);
+    g_assert_false(qtest_readl(qts, SAM9X7_PIOC_BASE + PIO_PDSR) & BIT(9));
+    send_input_key(qts, "0", false);
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOC_BASE + PIO_PDSR) & BIT(9));
+
+    qtest_writel(qts, SAM9X7_PIOC_BASE + PIO_PER, leds);
+    qtest_writel(qts, SAM9X7_PIOC_BASE + PIO_CODR, leds);
+    qtest_writel(qts, SAM9X7_PIOC_BASE + PIO_OER, leds);
+    g_assert_cmpint(qom_get_int(qts, "/machine/rgb-led-red",
+                                "intensity-percent"), ==, 0);
+    g_assert_cmpint(qom_get_int(qts, "/machine/rgb-led-blue",
+                                "intensity-percent"), ==, 0);
+    g_assert_cmpint(qom_get_int(qts, "/machine/rgb-led-green",
+                                "intensity-percent"), ==, 0);
+
+    qtest_writel(qts, SAM9X7_PIOC_BASE + PIO_SODR, BIT(14) | BIT(21));
+    g_assert_cmpint(qom_get_int(qts, "/machine/rgb-led-red",
+                                "intensity-percent"), ==, 100);
+    g_assert_cmpint(qom_get_int(qts, "/machine/rgb-led-blue",
+                                "intensity-percent"), ==, 0);
+    g_assert_cmpint(qom_get_int(qts, "/machine/rgb-led-green",
+                                "intensity-percent"), ==, 100);
+
+    qtest_writel(qts, SAM9X7_PIOC_BASE + PIO_CODR, BIT(14));
+    qtest_writel(qts, SAM9X7_PIOC_BASE + PIO_SODR, BIT(20));
+    g_assert_cmpint(qom_get_int(qts, "/machine/rgb-led-red",
+                                "intensity-percent"), ==, 0);
+    g_assert_cmpint(qom_get_int(qts, "/machine/rgb-led-blue",
+                                "intensity-percent"), ==, 100);
+    g_assert_cmpint(qom_get_int(qts, "/machine/rgb-led-green",
+                                "intensity-percent"), ==, 100);
+
+    qtest_quit(qts);
+}
+
+static void test_board_wakeup_start_reset_and_pmic_modes(void)
+{
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -global at91-shdwc.request-system-shutdown=off");
+    uint32_t value;
+    unsigned int reg;
+
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    twi6_enable_master(qts);
+    for (reg = 0x05; reg <= 0x09; reg++) {
+        g_assert_cmphex(twi6_read_reg(qts, 0x5b, reg), ==, 0x07);
+    }
+
+    /* LPM high followed by SHDN low selects the AB hibernate settings. */
+    qtest_set_irq_in(qts, "/machine/mcp16502", "lpm", 0, 1);
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_WUIR,
+                 SHDWC_WUIR_WKUPEN0);
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_MR,
+                 SHDWC_MR_WKUPDBC(1));
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_CR,
+                 SHDWC_CR_KEY | SHDWC_CR_SHDW);
+    qtest_clock_step(qts, 2 * SHDWC_SLCK_CYCLE_NS);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x06), ==, 0x07);
+    for (reg = 0x07; reg <= 0x0a; reg++) {
+        g_assert_cmphex(twi6_read_reg(qts, 0x5b, reg), ==, 0);
+    }
+
+    /* START passes through nSTRT/nSTRTO and wakes the real WKUP0 input. */
+    send_input_key(qts, "s", true);
+    qtest_clock_step(qts, 3 * SHDWC_SLCK_CYCLE_NS);
+    value = qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_SR);
+    g_assert_cmphex(value, ==, SHDWC_SR_WKUPS | SHDWC_SR_WKUPIS0);
+    for (reg = 0x05; reg <= 0x09; reg++) {
+        g_assert_cmphex(twi6_read_reg(qts, 0x5b, reg), ==, 0x07);
+    }
+    send_input_key(qts, "s", false);
+
+    /* The dedicated WKUP switch reaches the same active-low WKUP0 net. */
+    qtest_set_irq_in(qts, "/machine/mcp16502", "lpm", 0, 0);
+    qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_CR,
+                 SHDWC_CR_KEY | SHDWC_CR_SHDW);
+    qtest_clock_step(qts, 2 * SHDWC_SLCK_CYCLE_NS);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
+    send_input_key(qts, "w", true);
+    qtest_clock_step(qts, 3 * SHDWC_SLCK_CYCLE_NS);
+    value = qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_SR);
+    g_assert_cmphex(value, ==, SHDWC_SR_WKUPS | SHDWC_SR_WKUPIS0);
+    send_input_key(qts, "w", false);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0x07);
+
+    /* HPM is ignored until HPMPEN is set, then selects register x3. */
+    twi6_write_reg(qts, 0x5b, 0x13, 0x77);
+    qtest_set_irq_in(qts, "/machine/mcp16502", "hpm", 0, 1);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0x07);
+    twi6_write_reg(qts, 0x5b, 0x03, 0xe0);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
+    qtest_set_irq_in(qts, "/machine/mcp16502", "hpm", 0, 0);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0x07);
+
+    /* RESET reaches the RSTC's active-low NRST input and records URSTS. */
+    qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
+    send_input_key(qts, "r", true);
+    qtest_clock_step(qts, SHDWC_SLCK_CYCLE_NS + 1);
+    qtest_qmp_eventwait(qts, "RESET");
+    send_input_key(qts, "r", false);
+    value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & (RSTC_SR_URSTS | RSTC_SR_NRSTL), ==,
+                    RSTC_SR_URSTS | RSTC_SR_NRSTL);
 
     qtest_quit(qts);
 }
@@ -5065,6 +5206,7 @@ static void test_shdwc_registers_shutdown_and_pin_wake(void)
     qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_MR,
                  SHDWC_MR_WKUPDBC(1));
     qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_WUIR, wakeup_inputs);
+    qtest_set_irq_in(qts, "/machine/soc/shdwc", "wkup", 0, 0);
     qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_CR,
                  SHDWC_CR_KEY | SHDWC_CR_SHDW);
     qtest_clock_step(qts, 2 * SHDWC_SLCK_CYCLE_NS - 1);
@@ -6174,6 +6316,10 @@ int main(int argc, char **argv)
                    test_twi_eeprom_transfers_fifo_and_access_width);
     qtest_add_func("sam9x75/board/mcp16502-registers-and-regulators",
                    test_mcp16502_registers_and_regulators);
+    qtest_add_func("sam9x75/board/rgb-led-and-user-button",
+                   test_board_rgb_led_and_user_button);
+    qtest_add_func("sam9x75/board/wakeup-start-reset-and-pmic-modes",
+                   test_board_wakeup_start_reset_and_pmic_modes);
     qtest_add_func("sam9x75/board/pac1934-register-protocol-and-wiring",
                    test_pac1934_register_protocol_and_board_wiring);
     qtest_add_func("sam9x75/board/pac1934-measurements-and-modes",

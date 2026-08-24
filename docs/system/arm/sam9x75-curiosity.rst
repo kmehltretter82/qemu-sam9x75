@@ -165,8 +165,10 @@ Support matrix
    * - I2C board devices
      - Initial
      - The exact MCP16502TAB-E/S8B PMIC is present on FLEXCOM6 with OTP
-       defaults, writable masks and live regulator status.  FLEXCOM7 carries
-       the PAC1934 with its sparse variable-width register loops, delayed
+       defaults, writable masks, Active/Low-Power/Hibernate/HPM regulator
+       selection, live status and its SHDN/PWRHLD and nSTRT/nSTRTO board
+       signals.  FLEXCOM7 carries the PAC1934 with its sparse variable-width
+       register loops, delayed
        REFRESH/REFRESH_V activation, channel skipping, four voltage inputs,
        virtual-time power accumulation, overflow signaling, migration state
        and the shared PB18 SLOW/ALERT connection.  The current-sense inputs
@@ -174,6 +176,15 @@ Support matrix
        or hardware-trace replay.  Conversion-complete alert pulses, SMBus
        timeout/electrical details, hardware-calibrated telemetry and the
        board/extension EEPROMs remain.
+   * - LEDs and push buttons
+     - Initial
+     - PC14, PC20 and PC21 drive observable red, blue and green LED devices.
+       Keyboard ``0``, ``W``, ``R`` and ``S`` operate the active-low USER,
+       WKUP, RESET and START switches.  USER drives PC9; RESET enters RSTC
+       through NRST; WKUP and the PMIC nSTRTO output share WKUP0; and START
+       enters the PMIC through nSTRT.  LED intensity and every switch path
+       have board qtests.  PMIC rail sequencing and push-button long-press
+       timing remain.
    * - Timers, ADC, PWM and SSC
      - Initial
      - TC0 has three 32-bit channels, GCLK/MCK-divided/slow-clock selection,
@@ -251,11 +262,12 @@ phase green merely by avoiding it in the device tree.
    negative-path coverage where those concepts apply.  The full board qtest
    suite and a boot with ``-d unimp,guest_errors`` are mandatory regression
    gates after every slice.
-#. **Finish the populated base board.**  The MCP16502 regulators and PAC1934
-   power monitor are modeled on FLEXCOM6/7.  Next expose the RGB LED, user
-   button, reset/start controls and the board's fixed straps.  Exercise the
-   exact upstream board DT without QEMU-only changes, including regulator
-   state, IIO telemetry and suspend/resume.
+#. **Finish the populated base board.**  The MCP16502 regulators, PAC1934
+   power monitor, RGB LED and four push buttons are modeled with their board
+   wiring.  Next complete PMIC rail sequencing/long-press behavior, default
+   strap selection and board/extension EEPROMs.  Exercise the exact upstream
+   board DT without QEMU-only changes, including regulator state, IIO
+   telemetry and suspend/resume.
 #. **Complete reusable data paths.**  Add the USART and SPI personalities to
    all applicable FLEXCOM instances, complete TWI client/SMBus/PEC/FIFO
    behavior, and wire every documented XDMAC request.  Complete SSC, TC1,
@@ -305,7 +317,7 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The 55-test board qtest baseline and this boot are clean of SAM9X75 model
+The 57-test board qtest baseline and this boot are clean of SAM9X75 model
 warnings with ``-d unimp,guest_errors``.  Generic SD diagnostics still report
 the expected failed MMC/SDIO probes against a memory-only SD card.  FLEXCOM
 USART children remain missing but are not the selected board console.
@@ -318,13 +330,42 @@ while still modeling SHDN, timing and wake status by adding::
 
   -global at91-shdwc.request-system-shutdown=off
 
+The physical board switches are available through QEMU keyboard input.  The
+QMP ``send-key`` command (or the equivalent ``input-send-event`` command) maps
+the following keys:
+
+.. list-table:: Board switch input
+   :header-rows: 1
+
+   * - Key
+     - Board switch
+     - Signal path
+   * - ``0``
+     - SW1 USER
+     - PC9, active-low
+   * - ``W``
+     - SW2 WKUP
+     - WKUP0, active-low
+   * - ``R``
+     - SW3 RESET
+     - NRST into RSTC
+   * - ``S``
+     - SW4 START
+     - MCP16502 nSTRT, then nSTRTO to WKUP0
+
+The three LED objects are visible as ``/machine/rgb-led-red``,
+``/machine/rgb-led-blue`` and ``/machine/rgb-led-green``.  Their read-only
+``intensity-percent`` QOM property is either 0 or 100 for the GPIO-driven
+board LED.
+
 Completion gates
 ----------------
 
 Polling DBGU from SRAM, interrupt-driven bare metal, unmodified SD
 AT91Bootstrap into U-Boot, a Linux shell from SD, and GEM/LAN8840 packet
-exchange are achieved.  The remaining integration gates are populated
-base-board I/O, genuine QSPI and NAND RomBOOT, USB, CAN, expansion buses,
+exchange and the populated LED/button paths are achieved.  The remaining
+integration gates are base-board straps/EEPROMs, genuine QSPI and NAND
+RomBOOT, USB, CAN, expansion buses,
 multimedia/security, whole-machine migration and finally hardware differential
 validation.  Normal supported boots must be clean with
 ``-d unimp,guest_errors``.
