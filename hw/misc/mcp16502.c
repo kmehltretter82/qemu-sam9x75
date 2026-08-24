@@ -43,6 +43,14 @@
 #define MCP16502_STATUS_POK     BIT(1)
 #define MCP16502_STATUS_ENS     BIT(0)
 
+#define MCP16502_NUM_REGULATORS         6
+#define MCP16502_SEQUENCE_EVENTS        (2 * MCP16502_NUM_REGULATORS + 1)
+#define MCP16502_SEQUENCE_START(n)      (n)
+#define MCP16502_SEQUENCE_DONE(n)       (MCP16502_NUM_REGULATORS + (n))
+#define MCP16502_SEQUENCE_RESET         (2 * MCP16502_NUM_REGULATORS)
+#define MCP16502_SEQUENCE_INACTIVE      (-1)
+#define MCP16502_WAKE_TIME_NS           (100 * SCALE_US)
+
 typedef enum MCP16502PushTimerPhase {
     MCP16502_PUSH_TIMER_IDLE,
     MCP16502_PUSH_TIMER_LONG_PRESS,
@@ -58,17 +66,26 @@ struct MCP16502State {
     qemu_irq ninto;
     qemu_irq nrsto;
     QEMUTimer *push_timer;
+    QEMUTimer *sequence_timer;
 
     uint8_t regs[MCP16502_NUM_REGS];
     uint8_t pointer;
     uint8_t count;
     uint8_t push_timer_phase;
+    uint8_t sequence_started;
+    uint8_t sequence_done;
     bool nstart_level;
     bool pwrhld_level;
     bool lpm_level;
     bool hpm_level;
     bool forced_off;
+    bool startup_active;
+    bool startup_requires_nstart;
+    bool startup_first_regulator;
+    bool hibernate_latched;
     bool request_system_shutdown;
+    int64_t sequence_deadline[MCP16502_SEQUENCE_EVENTS];
+    int64_t sequence_remaining[MCP16502_SEQUENCE_EVENTS];
 };
 
 /*
@@ -156,7 +173,8 @@ static void mcp16502_update_outputs(MCP16502State *s)
     /* Active-low open-drain pins are exposed as logical assertions. */
     qemu_set_irq(s->nstrto, !s->nstart_level);
     qemu_set_irq(s->ninto, interrupt);
-    qemu_set_irq(s->nrsto, s->forced_off || !s->pwrhld_level);
+    qemu_set_irq(s->nrsto,
+                 s->forced_off || !s->pwrhld_level || s->startup_active);
 }
 
 static int64_t mcp16502_scale_timing(MCP16502State *s, int64_t ns)
@@ -172,6 +190,181 @@ static int64_t mcp16502_scale_timing(MCP16502State *s, int64_t ns)
         return muldiv64(ns, 10000, 11650);
     }
     return ns;
+}
+
+static uint8_t mcp16502_regulator_base(unsigned int regulator)
+{
+    return 0x10 + regulator * 0x10;
+}
+
+static int64_t mcp16502_sequence_delay(MCP16502State *s, uint8_t sequence)
+{
+    static const int64_t delays[] = {
+        0,
+        500 * SCALE_US,
+        1 * SCALE_MS,
+        2 * SCALE_MS,
+        4 * SCALE_MS,
+        8 * SCALE_MS,
+        12 * SCALE_MS,
+        16 * SCALE_MS,
+    };
+
+    return mcp16502_scale_timing(s, delays[sequence & 7]);
+}
+
+static int64_t mcp16502_soft_start_time(MCP16502State *s,
+                                         unsigned int regulator)
+{
+    uint8_t base = mcp16502_regulator_base(regulator);
+    unsigned int rate = extract32(s->regs[base + 4], 6, 2) + 1;
+    unsigned int voltage_code = s->regs[base] & 0x3f;
+    unsigned int voltage_steps = MAX(24, 11 + voltage_code);
+
+    /* One DAC step takes 8/16/24/32 us at the nominal 2 MHz clock. */
+    return mcp16502_scale_timing(s,
+        (int64_t)voltage_steps * rate * 8 * SCALE_US);
+}
+
+static int64_t mcp16502_reset_delay(MCP16502State *s)
+{
+    unsigned int selector = extract32(s->regs[MCP16502_SYS_TMG], 0, 3);
+
+    return mcp16502_scale_timing(s, (1LL << selector) * SCALE_MS);
+}
+
+static void mcp16502_update_sequence_timer(MCP16502State *s)
+{
+    int64_t earliest = INT64_MAX;
+    unsigned int i;
+
+    for (i = 0; i < MCP16502_SEQUENCE_EVENTS; i++) {
+        if (s->sequence_deadline[i] >= 0) {
+            earliest = MIN(earliest, s->sequence_deadline[i]);
+        }
+    }
+    if (earliest == INT64_MAX) {
+        timer_del(s->sequence_timer);
+    } else {
+        timer_mod_ns(s->sequence_timer, earliest);
+    }
+}
+
+static void mcp16502_abort_sequence(MCP16502State *s)
+{
+    unsigned int i;
+
+    s->startup_active = false;
+    s->startup_requires_nstart = false;
+    s->startup_first_regulator = false;
+    s->sequence_started = 0;
+    s->sequence_done = 0;
+    for (i = 0; i < MCP16502_SEQUENCE_EVENTS; i++) {
+        s->sequence_deadline[i] = MCP16502_SEQUENCE_INACTIVE;
+    }
+    timer_del(s->sequence_timer);
+}
+
+static void mcp16502_sequence_timer_tick(void *opaque)
+{
+    MCP16502State *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    unsigned int regulator;
+
+    for (regulator = 0; regulator < MCP16502_NUM_REGULATORS;
+         regulator++) {
+        if (s->sequence_deadline[MCP16502_SEQUENCE_START(regulator)] >= 0 &&
+            s->sequence_deadline[MCP16502_SEQUENCE_START(regulator)] <= now) {
+            s->sequence_deadline[MCP16502_SEQUENCE_START(regulator)] =
+                MCP16502_SEQUENCE_INACTIVE;
+            s->sequence_started |= BIT(regulator);
+            s->startup_first_regulator = true;
+        }
+        if (s->sequence_deadline[MCP16502_SEQUENCE_DONE(regulator)] >= 0 &&
+            s->sequence_deadline[MCP16502_SEQUENCE_DONE(regulator)] <= now) {
+            s->sequence_deadline[MCP16502_SEQUENCE_DONE(regulator)] =
+                MCP16502_SEQUENCE_INACTIVE;
+            s->sequence_done |= BIT(regulator);
+        }
+    }
+
+    if (s->sequence_deadline[MCP16502_SEQUENCE_RESET] >= 0 &&
+        s->sequence_deadline[MCP16502_SEQUENCE_RESET] <= now) {
+        s->sequence_deadline[MCP16502_SEQUENCE_RESET] =
+            MCP16502_SEQUENCE_INACTIVE;
+        if (s->pwrhld_level) {
+            s->startup_active = false;
+            s->startup_requires_nstart = false;
+            s->startup_first_regulator = false;
+            s->sequence_started = 0;
+            s->sequence_done = 0;
+            s->forced_off = false;
+        } else {
+            mcp16502_abort_sequence(s);
+        }
+    }
+
+    mcp16502_update_sequence_timer(s);
+    mcp16502_update_outputs(s);
+}
+
+static void mcp16502_begin_sequence(MCP16502State *s,
+                                    bool from_hibernate,
+                                    bool requires_nstart)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t base = now + (from_hibernate ? 0 : MCP16502_WAKE_TIME_NS);
+    int64_t step_end;
+    uint8_t sequence;
+    uint8_t regulator_base;
+    unsigned int regulator;
+    unsigned int step;
+
+    if (s->startup_active) {
+        return;
+    }
+
+    mcp16502_abort_sequence(s);
+    s->startup_active = true;
+    s->startup_requires_nstart = requires_nstart;
+
+    for (regulator = 0; regulator < MCP16502_NUM_REGULATORS;
+         regulator++) {
+        regulator_base = mcp16502_regulator_base(regulator);
+        sequence = s->regs[regulator_base + 4];
+        if (from_hibernate && (sequence & BIT(3)) &&
+            (s->regs[regulator_base + 2] & MCP16502_REGULATOR_EN)) {
+            s->sequence_started |= BIT(regulator);
+            s->sequence_done |= BIT(regulator);
+        }
+    }
+
+    for (step = 0; step < 3; step++) {
+        step_end = base;
+        for (regulator = 0; regulator < MCP16502_NUM_REGULATORS;
+             regulator++) {
+            regulator_base = mcp16502_regulator_base(regulator);
+            sequence = s->regs[regulator_base + 4];
+            if (!(sequence & BIT(3)) ||
+                MIN(extract32(sequence, 4, 2), 2) != step ||
+                (s->sequence_done & BIT(regulator))) {
+                continue;
+            }
+            s->sequence_deadline[MCP16502_SEQUENCE_START(regulator)] =
+                base + mcp16502_sequence_delay(s, sequence);
+            s->sequence_deadline[MCP16502_SEQUENCE_DONE(regulator)] =
+                s->sequence_deadline[MCP16502_SEQUENCE_START(regulator)] +
+                mcp16502_soft_start_time(s, regulator);
+            step_end = MAX(step_end,
+                s->sequence_deadline[MCP16502_SEQUENCE_DONE(regulator)]);
+        }
+        base = step_end;
+    }
+
+    s->sequence_deadline[MCP16502_SEQUENCE_RESET] =
+        base + mcp16502_reset_delay(s);
+    mcp16502_update_sequence_timer(s);
+    mcp16502_update_outputs(s);
 }
 
 static int64_t mcp16502_push_timeout(MCP16502State *s)
@@ -216,7 +409,8 @@ static void mcp16502_push_timer_tick(void *opaque)
 
     switch (s->push_timer_phase) {
     case MCP16502_PUSH_TIMER_LONG_PRESS:
-        if (s->nstart_level || !s->pwrhld_level || s->forced_off) {
+        if (s->nstart_level || !s->pwrhld_level ||
+            (s->forced_off && !s->startup_active)) {
             mcp16502_cancel_push_timer(s);
             return;
         }
@@ -228,6 +422,7 @@ static void mcp16502_push_timer_tick(void *opaque)
         mcp16502_update_outputs(s);
         break;
     case MCP16502_PUSH_TIMER_INTERRUPT:
+        mcp16502_abort_sequence(s);
         s->forced_off = true;
         s->push_timer_phase = MCP16502_PUSH_TIMER_IDLE;
         mcp16502_update_outputs(s);
@@ -252,10 +447,22 @@ static uint8_t mcp16502_status(MCP16502State *s, uint8_t reg)
     if (reg >= MCP16502_BUCK1_STATUS &&
         reg <= MCP16502_LDO2_STATUS) {
         output = 0x10 + (reg - MCP16502_BUCK1_STATUS) * 0x10;
-        mode = mcp16502_power_mode(s);
-        if (mode >= 0 && (s->regs[output + mode] & MCP16502_REGULATOR_EN)) {
-            value |= MCP16502_STATUS_SSD | MCP16502_STATUS_POK |
-                     MCP16502_STATUS_ENS;
+        if (s->startup_active) {
+            unsigned int regulator = reg - MCP16502_BUCK1_STATUS;
+
+            if (s->sequence_started & BIT(regulator)) {
+                value |= MCP16502_STATUS_ENS;
+            }
+            if (s->sequence_done & BIT(regulator)) {
+                value |= MCP16502_STATUS_SSD | MCP16502_STATUS_POK;
+            }
+        } else {
+            mode = mcp16502_power_mode(s);
+            if (mode >= 0 &&
+                (s->regs[output + mode] & MCP16502_REGULATOR_EN)) {
+                value |= MCP16502_STATUS_SSD | MCP16502_STATUS_POK |
+                         MCP16502_STATUS_ENS;
+            }
         }
     }
 
@@ -301,11 +508,23 @@ static void mcp16502_set_nstart(void *opaque, int line, int level)
     bool old_level = s->nstart_level;
 
     s->nstart_level = level < 0 || level;
-    if (old_level && !s->nstart_level && s->pwrhld_level && !s->forced_off) {
-        mcp16502_start_push_timer(s);
-    } else if (!old_level && s->nstart_level &&
-               s->push_timer_phase == MCP16502_PUSH_TIMER_LONG_PRESS) {
-        mcp16502_cancel_push_timer(s);
+    if (old_level && !s->nstart_level) {
+        if (!s->startup_active && (s->forced_off || !s->pwrhld_level)) {
+            mcp16502_begin_sequence(s,
+                s->hibernate_latched && !s->forced_off, true);
+        }
+        if ((s->pwrhld_level || s->startup_active) &&
+            s->push_timer_phase == MCP16502_PUSH_TIMER_IDLE) {
+            mcp16502_start_push_timer(s);
+        }
+    } else if (!old_level && s->nstart_level) {
+        if (s->push_timer_phase == MCP16502_PUSH_TIMER_LONG_PRESS) {
+            mcp16502_cancel_push_timer(s);
+        }
+        if (s->startup_active && s->startup_requires_nstart &&
+            !s->startup_first_regulator) {
+            mcp16502_abort_sequence(s);
+        }
     }
     mcp16502_update_outputs(s);
 }
@@ -313,12 +532,24 @@ static void mcp16502_set_nstart(void *opaque, int line, int level)
 static void mcp16502_set_pwrhld(void *opaque, int line, int level)
 {
     MCP16502State *s = opaque;
+    bool old_level = s->pwrhld_level;
 
     s->pwrhld_level = level > 0;
-    if (!s->pwrhld_level) {
+    if (old_level && !s->pwrhld_level) {
+        s->hibernate_latched = s->lpm_level && !s->forced_off;
+        mcp16502_abort_sequence(s);
         mcp16502_cancel_push_timer(s);
-    } else if (!s->nstart_level && !s->forced_off) {
-        mcp16502_start_push_timer(s);
+    } else if (!old_level && s->pwrhld_level) {
+        if (s->startup_active) {
+            s->startup_requires_nstart = false;
+        } else {
+            mcp16502_begin_sequence(s, s->hibernate_latched, false);
+        }
+        s->hibernate_latched = false;
+        if (!s->nstart_level &&
+            s->push_timer_phase == MCP16502_PUSH_TIMER_IDLE) {
+            mcp16502_start_push_timer(s);
+        }
     }
     mcp16502_update_outputs(s);
 }
@@ -328,6 +559,9 @@ static void mcp16502_set_lpm(void *opaque, int line, int level)
     MCP16502State *s = opaque;
 
     s->lpm_level = level > 0;
+    if (!s->pwrhld_level && !s->startup_active && !s->forced_off) {
+        s->hibernate_latched = s->lpm_level;
+    }
     mcp16502_update_outputs(s);
 }
 
@@ -390,13 +624,31 @@ static void mcp16502_reset_enter(Object *obj, ResetType type)
     s->lpm_level = false;
     s->hpm_level = false;
     s->forced_off = false;
+    s->hibernate_latched = false;
     mcp16502_cancel_push_timer(s);
+    mcp16502_abort_sequence(s);
     mcp16502_update_outputs(s);
+}
+
+static int mcp16502_pre_save(void *opaque)
+{
+    MCP16502State *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    unsigned int i;
+
+    for (i = 0; i < MCP16502_SEQUENCE_EVENTS; i++) {
+        s->sequence_remaining[i] = s->sequence_deadline[i] >= 0 ?
+            MAX(s->sequence_deadline[i] - now, 0) :
+            MCP16502_SEQUENCE_INACTIVE;
+    }
+    return 0;
 }
 
 static int mcp16502_post_load(void *opaque, int version_id)
 {
     MCP16502State *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    unsigned int i;
 
     if (version_id < 2) {
         s->nstart_level = true;
@@ -409,14 +661,28 @@ static int mcp16502_post_load(void *opaque, int version_id)
         s->forced_off = false;
         timer_del(s->push_timer);
     }
+    if (version_id < 4) {
+        s->hibernate_latched = false;
+        mcp16502_abort_sequence(s);
+    } else if (s->startup_active) {
+        for (i = 0; i < MCP16502_SEQUENCE_EVENTS; i++) {
+            s->sequence_deadline[i] = s->sequence_remaining[i] >= 0 ?
+                now + s->sequence_remaining[i] :
+                MCP16502_SEQUENCE_INACTIVE;
+        }
+        mcp16502_update_sequence_timer(s);
+    } else {
+        mcp16502_abort_sequence(s);
+    }
     mcp16502_update_outputs(s);
     return 0;
 }
 
 static const VMStateDescription vmstate_mcp16502 = {
     .name = TYPE_MCP16502_AB,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
+    .pre_save = mcp16502_pre_save,
     .post_load = mcp16502_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_I2C_SLAVE(parent_obj, MCP16502State),
@@ -430,6 +696,14 @@ static const VMStateDescription vmstate_mcp16502 = {
         VMSTATE_UINT8_V(push_timer_phase, MCP16502State, 3),
         VMSTATE_BOOL_V(forced_off, MCP16502State, 3),
         VMSTATE_TIMER_PTR_V(push_timer, MCP16502State, 3),
+        VMSTATE_UINT8_V(sequence_started, MCP16502State, 4),
+        VMSTATE_UINT8_V(sequence_done, MCP16502State, 4),
+        VMSTATE_BOOL_V(startup_active, MCP16502State, 4),
+        VMSTATE_BOOL_V(startup_requires_nstart, MCP16502State, 4),
+        VMSTATE_BOOL_V(startup_first_regulator, MCP16502State, 4),
+        VMSTATE_BOOL_V(hibernate_latched, MCP16502State, 4),
+        VMSTATE_INT64_ARRAY_V(sequence_remaining, MCP16502State,
+                              MCP16502_SEQUENCE_EVENTS, 4),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -448,6 +722,8 @@ static void mcp16502_init(Object *obj)
     qdev_init_gpio_out_named(dev, &s->nrsto, "nrsto", 1);
     s->push_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                   mcp16502_push_timer_tick, s);
+    s->sequence_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                     mcp16502_sequence_timer_tick, s);
 }
 
 static void mcp16502_finalize(Object *obj)
@@ -455,6 +731,7 @@ static void mcp16502_finalize(Object *obj)
     MCP16502State *s = MCP16502_AB(obj);
 
     timer_free(s->push_timer);
+    timer_free(s->sequence_timer);
 }
 
 static const Property mcp16502_properties[] = {

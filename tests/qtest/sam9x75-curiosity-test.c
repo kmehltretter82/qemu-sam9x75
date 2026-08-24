@@ -1371,6 +1371,12 @@ static void test_board_wakeup_start_reset_and_pmic_modes(void)
     qtest_clock_step(qts, 3 * SHDWC_SLCK_CYCLE_NS);
     value = qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_SR);
     g_assert_cmphex(value, ==, SHDWC_SR_WKUPS | SHDWC_SR_WKUPIS0);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x06), ==, 0x07);
+    for (reg = 0x07; reg <= 0x0a; reg++) {
+        g_assert_cmphex(twi6_read_reg(qts, 0x5b, reg), ==, 0);
+    }
+    qtest_clock_step(qts, 22 * 1000000LL);
     for (reg = 0x05; reg <= 0x09; reg++) {
         g_assert_cmphex(twi6_read_reg(qts, 0x5b, reg), ==, 0x07);
     }
@@ -1387,6 +1393,8 @@ static void test_board_wakeup_start_reset_and_pmic_modes(void)
     value = qtest_readl(qts, SAM9X7_SHDWC_BASE + SHDWC_SR);
     g_assert_cmphex(value, ==, SHDWC_SR_WKUPS | SHDWC_SR_WKUPIS0);
     send_input_key(qts, "w", false);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
+    qtest_clock_step(qts, 31 * 1000000LL);
     g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0x07);
 
     /* HPM is ignored until HPMPEN is set, then selects register x3. */
@@ -1462,6 +1470,23 @@ static void test_mcp16502_push_button_timeouts(void)
     g_assert_true(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_PDSR) & BIT(12));
     send_input_key(qts, "s", false);
 
+    /* A new START must survive t1; release before it leaves the PMIC off. */
+    send_input_key(qts, "s", true);
+    qtest_clock_step(qts, 600000 - 1);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
+    send_input_key(qts, "s", false);
+    qtest_clock_step(qts, 31 * 1000000LL);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
+
+    send_input_key(qts, "s", true);
+    qtest_clock_step(qts, 600000);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 1);
+    send_input_key(qts, "s", false);
+    qtest_clock_step(qts, 30 * 1000000LL);
+    g_assert_false(qtest_get_irq(qts, 0));
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0x07);
+
     /* FSD=10 slows the timing oscillator by 16.5 percent. */
     qtest_system_reset(qts);
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PCR,
@@ -1500,6 +1525,96 @@ static void test_mcp16502_push_button_shutdown_request(void)
     g_assert_true(qdict_get_bool(data, "guest"));
     g_assert_cmpstr(qdict_get_str(data, "reason"), ==, "guest-shutdown");
     qobject_unref(event);
+
+    qtest_quit(qts);
+}
+
+static void test_mcp16502_startup_sequence(void)
+{
+    const int64_t wake_time = 100000;
+    const int64_t half_ms = 500000;
+    const int64_t one_ms = 1000000;
+    const int64_t out1_soft_start = 528000;
+    const int64_t out2_slow_soft_start = 864000;
+    const int64_t out34_soft_start = 368000;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int reg;
+
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    twi6_enable_master(qts);
+    qtest_irq_intercept_out_named(qts, "/machine/mcp16502", "nrsto");
+
+    /* Build a two-rail step 1 with distinct delay and soft-start rates. */
+    qtest_set_irq_in(qts, "/machine/mcp16502", "pwrhld", 0, 0);
+    g_assert_true(qtest_get_irq(qts, 0));
+    for (reg = 0x05; reg <= 0x0a; reg++) {
+        g_assert_cmphex(twi6_read_reg(qts, 0x5b, reg), ==, 0);
+    }
+    twi6_write_reg(qts, 0x5b, 0x02, 0x50); /* RSTDLY=1 ms. */
+    twi6_write_reg(qts, 0x5b, 0x14, 0x08); /* OUT1: t=0, SSR=8 us. */
+    twi6_write_reg(qts, 0x5b, 0x24, 0x4a); /* OUT2: t=1 ms, SSR=16 us. */
+    twi6_write_reg(qts, 0x5b, 0x34, 0x24);
+    twi6_write_reg(qts, 0x5b, 0x44, 0x24);
+    twi6_write_reg(qts, 0x5b, 0x54, 0x01);
+    twi6_write_reg(qts, 0x5b, 0x64, 0x01);
+
+    qtest_set_irq_in(qts, "/machine/mcp16502", "pwrhld", 0, 1);
+    qtest_clock_step(qts, wake_time - 1);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
+    qtest_clock_step(qts, 1);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 1);
+    qtest_clock_step(qts, out1_soft_start);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0x07);
+
+    qtest_clock_step(qts, one_ms - out1_soft_start - 1);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x06), ==, 0);
+    qtest_clock_step(qts, 1);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x06), ==, 1);
+    qtest_clock_step(qts, out2_slow_soft_start);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x06), ==, 0x07);
+    qtest_clock_step(qts, one_ms - 1);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, 1);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    /* SEQEN=0 rails adopt their Active register only after nRSTO release. */
+    for (reg = 0x05; reg <= 0x09; reg++) {
+        g_assert_cmphex(twi6_read_reg(qts, 0x5b, reg), ==, 0x07);
+    }
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x0a), ==, 0);
+
+    /* The AB hibernate rail stays up and is skipped by the next sequence. */
+    qtest_system_reset(qts);
+    twi6_enable_master(qts);
+    qtest_set_irq_in(qts, "/machine/mcp16502", "lpm", 0, 1);
+    qtest_set_irq_in(qts, "/machine/mcp16502", "pwrhld", 0, 0);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x06), ==, 0x07);
+
+    qtest_set_irq_in(qts, "/machine/mcp16502", "pwrhld", 0, 1);
+    qtest_clock_step(qts, half_ms - 1);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x06), ==, 0x07);
+    qtest_clock_step(qts, 1);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 1);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x09), ==, 1);
+    qtest_clock_step(qts, out1_soft_start);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x05), ==, 0x07);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x09), ==, 0x07);
+
+    qtest_clock_step(qts, 4 * one_ms - 1);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x07), ==, 0);
+    qtest_clock_step(qts, 1);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x07), ==, 1);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x08), ==, 1);
+    qtest_clock_step(qts, out34_soft_start);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x07), ==, 0x07);
+    g_assert_cmphex(twi6_read_reg(qts, 0x5b, 0x08), ==, 0x07);
+    qtest_clock_step(qts, 16 * one_ms - 1);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, 1);
+    g_assert_false(qtest_get_irq(qts, 0));
 
     qtest_quit(qts);
 }
@@ -6417,6 +6532,8 @@ int main(int argc, char **argv)
                    test_mcp16502_push_button_timeouts);
     qtest_add_func("sam9x75/board/mcp16502-push-button-shutdown-request",
                    test_mcp16502_push_button_shutdown_request);
+    qtest_add_func("sam9x75/board/mcp16502-startup-sequence",
+                   test_mcp16502_startup_sequence);
     qtest_add_func("sam9x75/board/pac1934-register-protocol-and-wiring",
                    test_pac1934_register_protocol_and_board_wiring);
     qtest_add_func("sam9x75/board/pac1934-measurements-and-modes",
