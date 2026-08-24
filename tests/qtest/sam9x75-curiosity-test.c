@@ -59,6 +59,7 @@
 #define SAM9X7_RTT_BASE         0xfffffe20
 #define SAM9X7_PIT_BASE         0xfffffe40
 #define SAM9X7_SCKC_BASE        0xfffffe50
+#define SAM9X7_BSC_BASE         0xfffffe54
 #define SAM9X7_GPBR_BASE        0xfffffe60
 #define SAM9X7_RTC_BASE         0xfffffea8
 #define SAM9X7_SYSCWP_BASE      0xfffffedc
@@ -568,6 +569,10 @@
 #define GPBR_FCLR_ENABLE        BIT(0)
 #define GPBR_MR_WP(index)       BIT(index)
 #define GPBR_MR_RP(index)       BIT((index) + 16)
+
+#define BSC_CR                  0x00
+#define BSC_CR_BOOT_MASK        0x00000007
+#define BSC_CR_WPKEY            0x66830000
 
 #define PMC_PLL_CTRL0           0x0c
 #define PMC_PLL_CTRL1           0x10
@@ -2102,6 +2107,7 @@ static void test_board_wakeup_start_reset_and_pmic_modes(void)
 static void test_board_power_reset_domains(void)
 {
     const uint32_t gpbr_marker = 0x9a750001;
+    const uint32_t bsc_config = 5;
     const uint32_t slow_clock_config = SCKC_CR_TD_OSCSEL |
                                        SCKC_CR_OSC32EN | 1;
     const uint32_t shdwc_mode = SHDWC_MR_WKUPDBC(1);
@@ -2114,8 +2120,10 @@ static void test_board_power_reset_domains(void)
     qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
     twi6_enable_master(qts);
 
-    /* Seed one external, three backup-domain and two core-domain blocks. */
+    /* Seed one external, four backup-domain and two core-domain blocks. */
     twi6_write_reg(qts, 0x5b, 0x13, 0x77);
+    qtest_writel(qts, SAM9X7_BSC_BASE + BSC_CR,
+                 BSC_CR_WPKEY | bsc_config);
     qtest_writel(qts, SAM9X7_GPBR_BASE + GPBR_REG(0), gpbr_marker);
     qtest_writel(qts, SAM9X7_SCKC_BASE + SCKC_CR, slow_clock_config);
     qtest_writel(qts, SAM9X7_SHDWC_BASE + SHDWC_MR, shdwc_mode);
@@ -2151,6 +2159,8 @@ static void test_board_power_reset_domains(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_OSR), ==, 0);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_MPDDRC_BASE + MPDDRC_CR), ==,
                     0x00207024);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BSC_BASE + BSC_CR), ==,
+                    bsc_config);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(0)), ==,
                     gpbr_marker);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_SCKC_BASE + SCKC_CR), ==,
@@ -2178,6 +2188,8 @@ static void test_board_power_reset_domains(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_OSR), ==, 0);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_MPDDRC_BASE + MPDDRC_CR), ==,
                     0x00207024);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BSC_BASE + BSC_CR), ==,
+                    bsc_config);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(0)), ==,
                     gpbr_marker);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_SCKC_BASE + SCKC_CR), ==,
@@ -2200,6 +2212,8 @@ static void test_board_power_reset_domains(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_OSR), ==, 0);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_MPDDRC_BASE + MPDDRC_CR), ==,
                     0x00207024);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BSC_BASE + BSC_CR), ==,
+                    bsc_config);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GPBR_BASE + GPBR_REG(0)), ==,
                     gpbr_marker);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_SCKC_BASE + SCKC_CR), ==,
@@ -7598,6 +7612,63 @@ static void rtc_begin_update(QTestState *qts)
     qtest_writel(qts, SAM9X7_RTC_BASE + RTC_SCCR, RTC_SR_ACKUPD);
 }
 
+static void test_bsc_key_retention_and_factory_reset(void)
+{
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -global at91-bsc.factory-boot-sequence=2");
+
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BSC_BASE + BSC_CR), ==, 2);
+
+    /* An incorrect or absent key aborts the complete BOOT field write. */
+    qtest_writel(qts, SAM9X7_BSC_BASE + BSC_CR, 5);
+    qtest_writel(qts, SAM9X7_BSC_BASE + BSC_CR, 0x12340007);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BSC_BASE + BSC_CR), ==, 2);
+
+    /* Reserved bits are ignored and the write-only key reads as zero. */
+    qtest_writel(qts, SAM9X7_BSC_BASE + BSC_CR,
+                 BSC_CR_WPKEY |
+                 (UINT16_MAX & ~BSC_CR_BOOT_MASK) | 5);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BSC_BASE + BSC_CR), ==,
+                    5 & BSC_CR_BOOT_MASK);
+
+    /* BSC_CR is retained; RomBOOT observes the selection after reset. */
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BSC_BASE + BSC_CR), ==, 5);
+
+    /* Removing VDDBU restores the configured factory value. */
+    qtest_set_irq_in(qts, "/machine/soc/bsc", "vddbu-reset", 0, 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BSC_BASE + BSC_CR), ==, 2);
+    qtest_set_irq_in(qts, "/machine/soc/bsc", "vddbu-reset", 0, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_bsc_migration(void)
+{
+    const char *args = SAM9X75_MACHINE
+        " -global at91-bsc.factory-boot-sequence=2";
+    QTestState *from = qtest_init(args);
+    QTestState *to = qtest_initf("%s -incoming defer", args);
+
+    qtest_writel(from, SAM9X7_BSC_BASE + BSC_CR, BSC_CR_WPKEY | 7);
+    qtest_system_reset(from);
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_cmphex(qtest_readl(to, SAM9X7_BSC_BASE + BSC_CR), ==, 7);
+    qtest_system_reset(to);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_BSC_BASE + BSC_CR), ==, 7);
+    qtest_set_irq_in(to, "/machine/soc/bsc", "vddbu-reset", 0, 1);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_BSC_BASE + BSC_CR), ==, 2);
+
+    qtest_quit(from);
+    qtest_quit(to);
+}
+
 static void test_gpbr_protection_and_retention(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -8809,6 +8880,9 @@ int main(int argc, char **argv)
                    test_shdwc_rtc_alarm_wake);
     qtest_add_func("sam9x75/shdwc/rtt-alarm-wake",
                    test_shdwc_rtt_alarm_wake);
+    qtest_add_func("sam9x75/bsc/key-retention-and-factory-reset",
+                   test_bsc_key_retention_and_factory_reset);
+    qtest_add_func("sam9x75/bsc/migration", test_bsc_migration);
     qtest_add_func("sam9x75/gpbr/protection-and-retention",
                    test_gpbr_protection_and_retention);
     qtest_add_func("sam9x75/gpbr/tamper-clear",

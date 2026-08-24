@@ -136,6 +136,12 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->sckc), 0);
     memory_region_add_subregion(s->memory, SAM9X7_SCKC_BASE, mr);
 
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->bsc), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->bsc), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_BSC_BASE, mr);
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->pmc), errp)) {
         return;
     }
@@ -566,6 +572,8 @@ static void sam9x7_init(Object *obj)
     clock_set_hz(s->slow_xtal, 32768);
 
     object_initialize_child(obj, "sysc", &s->sysc, TYPE_AT91_SYSCWP);
+
+    object_initialize_child(obj, "bsc", &s->bsc, TYPE_AT91_BSC);
 
     object_initialize_child(obj, "matrix", &s->matrix, TYPE_AT91_MATRIX);
 

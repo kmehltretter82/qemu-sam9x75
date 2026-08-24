@@ -71,8 +71,16 @@ Support matrix
        SRAM0 view and is covered across reset and migration.  A complete
        user-supplied 176 KiB mask-ROM dump can be loaded with ``-bios`` and
        executes from the reset alias; QEMU does not distribute the proprietary
-       ROM image.  Genuine-image validation, media-selection straps,
-       authentication/error fallbacks and revision errata remain incomplete.
+       ROM image.  The keyed ``BOOT[2:0]`` register in the VDDBU-powered Boot
+       Sequence Controller is mapped at its documented address, retains its
+       value across core resets, restores its configurable factory value when
+       VDDBU is removed, persists for the next RomBOOT execution, and
+       migrates.  The boot chapter calls bit 0
+       ``EMUL_EN`` while the controller chapter and 2026 Microchip device pack
+       call the complete field ``BOOT[2:0]``; values 2--7 need hardware
+       characterization.  Genuine-image validation, OTPC-backed media
+       selection, authentication/error fallbacks and revision errata remain
+       incomplete.
    * - Bus MATRIX
      - Initial
      - All 14 host and 12 client configuration/priority banks, remap control,
@@ -84,10 +92,13 @@ Support matrix
        not yet modeled.
    * - SRAM and DDR3L
      - Initial
-     - 64 KiB SRAM0, 4 KiB SRAM1 and fixed 256 MiB DDR mapped.  MPDDRC
+     - 64 KiB SRAM0, 4 KiB SRAM1 and fixed 256 MiB DDR mapped.  The BSC
+       request for RomBOOT to use SRAM1 as OTP emulation storage is modeled,
+       but OTPC mode control, packet parsing and access redirection are not
+       yet implemented.  MPDDRC
        configuration, refresh, error reporting, interrupts and write
-       protection have an initial register model; DDR timing/training and OTP
-       emulation control remain missing.
+       protection have an initial register model; DDR timing/training remains
+       missing.
    * - DBGU and chip identification
      - Functional
      - Full SAM9X7 aperture, byte and word data accesses, masks, timeout,
@@ -121,7 +132,7 @@ Support matrix
        interrupt behavior and General/Backup/Watchdog/Software/User reset
        causes.  MCP16502 nRSTO drives the SoC NRST power-reset input: backup
        exit and warm reset reset VDDCORE devices while the VDDBU-powered
-       SYSCWP, GPBR, RSTC, RTT, RTC, SHDWC and SCKC retain state.  SHDWC has
+       SYSCWP, BSC, GPBR, RSTC, RTT, RTC, SHDWC and SCKC retain state.  SHDWC has
        keyed two-slow-clock shutdown, SHDN,
        programmable WKUP0 polarity/debounce, raw RTC/RTT alarm wake-up,
        read-clear status, system write protection, VDDBU retention and
@@ -300,8 +311,9 @@ Support matrix
        timing, paired DMA and TX-only CBC-MAC.  The unmodified Linux driver
        probes version 0x700 and acquires both DMA channels.  XTEA register-word
        ordering and timing, the version value, private-key bus, tamper and
-       fault-injection behavior require hardware confirmation.  OTP and PUF
-       are missing.
+       fault-injection behavior require hardware confirmation.  The BSC
+       request to RomBOOT is modeled; the OTPC packet engine, OTP contents,
+       private-key paths and PUF are missing.
    * - Display and camera
      - Missing
      - XLCDC, GFX2D, LVDS, DSI/CSI, MIPI PHY, CSI2DC and ISC backends.
@@ -398,7 +410,7 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The 85-test board qtest baseline and this boot are clean of SAM9X75 model
+The 87-test board qtest baseline and this boot are clean of SAM9X75 model
 warnings with ``-d unimp,guest_errors``.  Generic SD diagnostics still report
 the expected failed MMC/SDIO probes against a memory-only SD card.  ``-kernel``
 remains a development entry path and is not a substitute for ROM media
@@ -418,6 +430,20 @@ this proprietary image.  ``-bios`` and ``-kernel`` are mutually exclusive.
 The ROM loader makes genuine RomBOOT execution possible, but the real image
 and its SD, QSPI and NAND selection/fallback flows have not yet been
 validated.
+
+The initial VDDBU/factory value of ``BSC_CR.BOOT`` defaults to zero and can be
+set to the OTP-emulation request value for RomBOOT experiments with, for
+example::
+
+  -global at91-bsc.factory-boot-sequence=1
+
+This models the retained BSC request available to RomBOOT after reset.  It
+does not yet make SRAM1 a functional OTP packet store; that requires the OTPC
+packet parser and access-redirection model.  On physical hardware, first read
+and record the factory value, then confirm the key, write mask, reset-latch
+and VDDBU-loss behavior with a recovery path available.  In particular,
+values 2--7 must not be programmed until their undocumented boot effects have
+been established safely.
 
 The pinned Linux ``i2c-at91`` driver probes the FLEXCOM6 FIFO and obtains its
 XDMAC channels.  Byte-width DMA, including an unaligned 13-byte transfer,

@@ -20,6 +20,7 @@
 #include "hw/i2c/at91_twi.h"
 #include "hw/intc/at91_aic.h"
 #include "hw/misc/at91_aes.h"
+#include "hw/misc/at91_bsc.h"
 #include "hw/misc/at91_sha.h"
 #include "hw/misc/at91_tdes.h"
 #include "hw/misc/at91_flexcom.h"
@@ -111,6 +112,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_RTT_BASE              0xfffffe20
 #define SAM9X7_PIT_BASE              0xfffffe40
 #define SAM9X7_SCKC_BASE             0xfffffe50
+#define SAM9X7_BSC_BASE              0xfffffe54
 #define SAM9X7_GPBR_BASE             0xfffffe60
 #define SAM9X7_RTC_BASE              0xfffffea8
 #define SAM9X7_SYSCWP_BASE           0xfffffedc
@@ -132,6 +134,7 @@ struct SAM9X7State {
     AT91CLASSDState classd;
     AT91I2SMCCState i2smcc;
     AT91DBGUState dbgu;
+    AT91BSCState bsc;
     AT91MatrixState matrix;
     AT91PMCState pmc;
     AT91PMECCState pmecc;
