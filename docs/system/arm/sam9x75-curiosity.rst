@@ -494,9 +494,12 @@ Support matrix
        reload selection, the TSCFG/ATB destructive-read behavior, effective
        transmit FDF/BRS/ESI normalization without changing guest Message RAM,
        and disabled, internal and reserved timestamp-source selection are
-       also covered.  Bus-error confinement/retry, bit-level arbitration,
-       debug-message handling, timestamp synchronization pins, the external
-       timestamp source and precise timestamp-unit timing remain incomplete.
+       also covered.  Successful-transfer LEC/DLEC updates, the last received
+       CAN-FD format indicators, PSR read side effects and ECR.CEL
+       read-to-clear behavior follow the Bosch interface.  Bus-error counters,
+       confinement/retry, bit-level arbitration, debug-message handling,
+       timestamp synchronization pins, the external timestamp source and
+       precise timestamp-unit timing remain incomplete.
        A Linux
        7.2.0-rc7-next-20260814 guest with a DT overlay probes ``can0`` and
        ``can1`` and passes bidirectional

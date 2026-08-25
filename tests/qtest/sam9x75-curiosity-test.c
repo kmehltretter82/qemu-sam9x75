@@ -329,6 +329,7 @@
 #define MCAN_TSCV               0x024
 #define MCAN_TOCC               0x028
 #define MCAN_TOCV               0x02c
+#define MCAN_ECR                0x040
 #define MCAN_PSR                0x044
 #define MCAN_IR                 0x050
 #define MCAN_IE                 0x054
@@ -371,6 +372,11 @@
 #define MCAN_CCCR_FDOE          BIT(8)
 #define MCAN_CCCR_BRSE          BIT(9)
 #define MCAN_TEST_LBCK          BIT(4)
+#define MCAN_PSR_LEC_MASK       MAKE_64BIT_MASK(0, 3)
+#define MCAN_PSR_DLEC_MASK      MAKE_64BIT_MASK(8, 3)
+#define MCAN_PSR_RESI           BIT(11)
+#define MCAN_PSR_RBRS           BIT(12)
+#define MCAN_PSR_RFDF           BIT(13)
 #define MCAN_IR_RF0N            BIT(0)
 #define MCAN_IR_RF0W            BIT(1)
 #define MCAN_IR_RF0F            BIT(2)
@@ -17142,6 +17148,25 @@ static void mcan_loopback_frame(QTestState *qts, uint64_t base,
     g_assert_true(qtest_readl(qts, base + MCAN_TXBTO) & BIT(0));
 }
 
+static void mcan_loopback_fd_frame(QTestState *qts, uint64_t base,
+                                   uint32_t tx_offset, uint32_t id,
+                                   bool brs, bool esi)
+{
+    const uint32_t data = 0xa5a55a5a;
+    uint32_t word0 = (id & 0x7ff) << 18;
+    uint32_t word1 = MCAN_ELEMENT_FDF | MCAN_ELEMENT_DLC(4);
+
+    if (brs) {
+        word1 |= MCAN_ELEMENT_BRS;
+    }
+    if (esi) {
+        word0 |= MCAN_ELEMENT_ESI;
+    }
+    mcan_write_tx_element(qts, tx_offset, word0, word1, &data, 1);
+    qtest_writel(qts, base + MCAN_TXBAR, BIT(0));
+    g_assert_true(qtest_readl(qts, base + MCAN_TXBTO) & BIT(0));
+}
+
 static void mcan_set_gfc(QTestState *qts, uint64_t base, uint32_t gfc)
 {
     mcan_begin_loopback_configuration(qts, base);
@@ -17166,6 +17191,93 @@ static uint32_t mcan_wait_register(QTestState *qts, uint64_t address,
     g_error("timed out waiting for M_CAN register 0x%" PRIx64
             " mask 0x%08x to become 0x%08x (value 0x%08x)",
             address, mask, expected, value);
+}
+
+static void test_mcan_protocol_status(void)
+{
+    const uint64_t base = SAM9X7_MCAN0_BASE;
+    const uint32_t rx_offset = 0x3000;
+    const uint32_t tx_offset = 0x4000;
+    const uint32_t fd_status = MCAN_PSR_RESI | MCAN_PSR_RBRS |
+                               MCAN_PSR_RFDF;
+    const uint32_t fd_mode = MCAN_CCCR_TEST | MCAN_CCCR_MON |
+                             MCAN_CCCR_FDOE | MCAN_CCCR_BRSE;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_ECR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_ECR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_PSR), ==,
+                    MCAN_PSR_LEC_MASK | MCAN_PSR_DLEC_MASK);
+
+    mcan_enable_clocks(qts, 29);
+    mcan_configure(qts, base, rx_offset, 4, tx_offset, 1, false, true);
+    mcan_loopback_frame(qts, base, tx_offset, 0x123, false, false,
+                        0x11223344);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_PSR), ==,
+                    MCAN_PSR_DLEC_MASK);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_PSR), ==,
+                    MCAN_PSR_LEC_MASK | MCAN_PSR_DLEC_MASK);
+
+    /* A fresh FD+BRS success clears DLEC only and records its Rx flags. */
+    qtest_system_reset(qts);
+    mcan_enable_clocks(qts, 29);
+    mcan_configure(qts, base, rx_offset, 4, tx_offset, 1, true, true);
+    mcan_loopback_fd_frame(qts, base, tx_offset, 0x124, true, true);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_PSR), ==,
+                    MCAN_PSR_LEC_MASK | fd_status);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_PSR), ==,
+                    MCAN_PSR_LEC_MASK | MCAN_PSR_DLEC_MASK);
+
+    /* The most recent FD frame replaces RBRS and RESI instead of latching. */
+    mcan_loopback_fd_frame(qts, base, tx_offset, 0x125, true, true);
+    mcan_loopback_fd_frame(qts, base, tx_offset, 0x126, false, false);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_PSR), ==, MCAN_PSR_RFDF);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_PSR), ==,
+                    MCAN_PSR_LEC_MASK | MCAN_PSR_DLEC_MASK);
+
+    /* A valid FD frame updates PSR even when GFC rejects it. */
+    qtest_writel(qts, base + MCAN_CCCR,
+                 MCAN_CCCR_INIT | MCAN_CCCR_CCE);
+    qtest_writel(qts, base + MCAN_CCCR,
+                 MCAN_CCCR_INIT | MCAN_CCCR_CCE | fd_mode);
+    qtest_writel(qts, base + MCAN_GFC, 2U << 4);
+    qtest_writel(qts, base + MCAN_TEST, MCAN_TEST_LBCK);
+    qtest_writel(qts, base + MCAN_CCCR, fd_mode);
+    mcan_loopback_fd_frame(qts, base, tx_offset, 0x127, true, true);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF0S), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_PSR), ==,
+                    MCAN_PSR_LEC_MASK | fd_status);
+
+    qtest_quit(qts);
+}
+
+static void test_mcan_protocol_status_migration(void)
+{
+    const uint64_t base = SAM9X7_MCAN0_BASE;
+    const uint32_t rx_offset = 0x3000;
+    const uint32_t tx_offset = 0x4000;
+    const uint32_t fd_status = MCAN_PSR_RESI | MCAN_PSR_RBRS |
+                               MCAN_PSR_RFDF;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+
+    mcan_enable_clocks(from, 29);
+    mcan_configure(from, base, rx_offset, 4, tx_offset, 1, true, true);
+    mcan_loopback_frame(from, base, tx_offset, 0x123, false, false,
+                        0x11223344);
+    mcan_loopback_fd_frame(from, base, tx_offset, 0x124, true, true);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_cmphex(qtest_readl(to, base + MCAN_PSR), ==, fd_status);
+    g_assert_cmphex(qtest_readl(to, base + MCAN_PSR), ==,
+                    MCAN_PSR_LEC_MASK | MCAN_PSR_DLEC_MASK);
+
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
 static void test_mcan_sam_register_semantics(void)
@@ -18485,6 +18597,10 @@ int main(int argc, char **argv)
                    test_mcan_sam_register_semantics);
     qtest_add_func("sam9x75/mcan/sam-register-migration",
                    test_mcan_sam_register_migration);
+    qtest_add_func("sam9x75/mcan/protocol-status",
+                   test_mcan_protocol_status);
+    qtest_add_func("sam9x75/mcan/protocol-status-migration",
+                   test_mcan_protocol_status_migration);
     qtest_add_func("sam9x75/mcan/tx-flag-normalization-and-timestamps",
                    test_mcan_tx_flag_normalization_and_timestamps);
     qtest_add_func("sam9x75/mcan/registers-configuration-and-reset",

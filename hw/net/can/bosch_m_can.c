@@ -107,6 +107,17 @@ enum {
 #define MCAN_TOCC_TOS_LEN   2
 #define MCAN_TOCC_TOP_SHIFT 16
 
+#define MCAN_ECR_CEL_MASK   MAKE_64BIT_MASK(16, 8)
+
+#define MCAN_PSR_LEC_MASK   MAKE_64BIT_MASK(0, 3)
+#define MCAN_PSR_DLEC_MASK  MAKE_64BIT_MASK(8, 3)
+#define MCAN_PSR_RESI       BIT(11)
+#define MCAN_PSR_RBRS       BIT(12)
+#define MCAN_PSR_RFDF       BIT(13)
+#define MCAN_PSR_PXE        BIT(14)
+#define MCAN_PSR_READ_CLEAR (MCAN_PSR_PXE | MCAN_PSR_RFDF | \
+                             MCAN_PSR_RBRS | MCAN_PSR_RESI)
+
 #define MCAN_IR_RF0N        BIT(0)
 #define MCAN_IR_RF0W        BIT(1)
 #define MCAN_IR_RF0F        BIT(2)
@@ -249,6 +260,38 @@ static bool bosch_m_can_active(BoschMCanState *s)
 {
     return s->resources_ready && clock_is_enabled(s->cclk) &&
            !(MCAN_REG(s, MCAN_CCCR) & MCAN_CCCR_INIT);
+}
+
+static void bosch_m_can_record_success(BoschMCanState *s,
+                                       const qemu_can_frame *frame)
+{
+    uint32_t clear = (frame->flags & QEMU_CAN_FRMF_TYPE_FD) &&
+                     (frame->flags & QEMU_CAN_FRMF_BRS) ?
+                     MCAN_PSR_DLEC_MASK : MCAN_PSR_LEC_MASK;
+
+    MCAN_REG(s, MCAN_PSR) &= ~clear;
+}
+
+static void bosch_m_can_record_rx(BoschMCanState *s,
+                                  const qemu_can_frame *frame)
+{
+    uint32_t psr;
+
+    bosch_m_can_record_success(s, frame);
+    if (!(frame->flags & QEMU_CAN_FRMF_TYPE_FD)) {
+        return;
+    }
+
+    psr = MCAN_REG(s, MCAN_PSR);
+    psr &= ~(MCAN_PSR_RBRS | MCAN_PSR_RESI);
+    psr |= MCAN_PSR_RFDF;
+    if (frame->flags & QEMU_CAN_FRMF_BRS) {
+        psr |= MCAN_PSR_RBRS;
+    }
+    if (frame->flags & QEMU_CAN_FRMF_ESI) {
+        psr |= MCAN_PSR_RESI;
+    }
+    MCAN_REG(s, MCAN_PSR) = psr;
 }
 
 static void bosch_m_can_update_irq(BoschMCanState *s)
@@ -796,6 +839,7 @@ static bool bosch_m_can_receive_frame(BoschMCanState *s,
         (!(frame->flags & QEMU_CAN_FRMF_TYPE_FD) && frame->can_dlc > 8)) {
         return false;
     }
+    bosch_m_can_record_rx(s, frame);
     if (frame->can_id & QEMU_CAN_RTR_FLAG) {
         bool reject = frame->can_id & QEMU_CAN_EFF_FLAG ?
                       gfc & BIT(0) : gfc & BIT(1);
@@ -1052,6 +1096,7 @@ static bool bosch_m_can_transmit_one(BoschMCanState *s, unsigned index)
         return false;
     }
 
+    bosch_m_can_record_success(s, &frame);
     MCAN_REG(s, MCAN_TXBRP) &= ~BIT(index);
     MCAN_REG(s, MCAN_TXBTO) |= BIT(index);
     bosch_m_can_advance_tx_get(s, index);
@@ -1213,6 +1258,20 @@ static uint64_t bosch_m_can_read(void *opaque, hwaddr offset,
         return 0x87654321;
     case MCAN_CUST:
         return 0;
+    case MCAN_ECR: {
+        uint32_t value = MCAN_REG(s, offset);
+
+        MCAN_REG(s, offset) &= ~MCAN_ECR_CEL_MASK;
+        return value;
+    }
+    case MCAN_PSR: {
+        uint32_t value = MCAN_REG(s, offset);
+
+        MCAN_REG(s, offset) &= ~(MCAN_PSR_LEC_MASK | MCAN_PSR_DLEC_MASK |
+                                 MCAN_PSR_READ_CLEAR);
+        MCAN_REG(s, offset) |= MCAN_PSR_LEC_MASK | MCAN_PSR_DLEC_MASK;
+        return value;
+    }
     case MCAN_TSCV:
         switch (MCAN_REG(s, MCAN_TSCC) & MCAN_TSCC_TSS_MASK) {
         case MCAN_TSCC_TSS_INTERNAL:
