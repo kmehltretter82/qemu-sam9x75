@@ -270,9 +270,16 @@ Support matrix
        ``END``, complete the transfer, or retry after the fault.  Incomplete
        descriptor tables report an ADMA length mismatch without raising
        transfer-complete; ``INT`` still raises DMA status when its descriptor
-       line itself completed.  The unmodified
-       AT91Bootstrap SD/ADMA path was validated before exact EBI decode was
-       introduced and is pending a repeat with the pinned artifacts.  SDIO
+       line itself completed.  At QEMU commit ``e5936216dd7e``, the pinned
+       AT91Bootstrap SD/ADMA path loaded unmodified U-Boot, which initialized
+       DDR, NAND, MMC and QSPI and loaded Linux from SD.  Linux reached its
+       embedded-initramfs shell.  A disposable 512 MiB derivative that
+       preserved the reference image's FAT partition and added ext4 partition
+       2 then proved a read/write ``/dev/mmcblk0p2`` mount, ``switch_root``, a
+       disk-root shell and clean power-down.  The original 128 MiB image itself
+       has only the FAT partition, so it cannot satisfy its
+       ``root=/dev/mmcblk0p2`` command line.  The exact-head diagnostic log
+       contained only the expected generic CMD1/CMD5/CMD52 media probes.  SDIO
        I/O functions, full M.2
        ``mmc_spi`` guest integration and dynamic card-detect/media-change
        completeness remain under audit.
@@ -336,8 +343,10 @@ Support matrix
      - GEM0 has six priority queues, DMA transmit/receive, AIC sources 24 and
        60--64, a Clause 22 PHY at address 1 with the LAN8840 identifier, and a
        station address provisioned through the SST26VF064BEUI.  Unmodified
-       U-Boot obtains a DHCP lease and exchanges packets.  J12 defaults closed
-       and supplies the LAN8840's required 25 MHz reference clock;
+       U-Boot obtained a DHCP lease and exchanged packets in the earlier
+       fixed-decode validation.  The exact-head SD repeat re-proved ``eth0``
+       discovery but did not repeat packet traffic.  J12 defaults closed and
+       supplies the LAN8840's required 25 MHz reference clock;
        opening it makes MDIO inaccessible and prevents external RGMII
        traffic.
 
@@ -757,21 +766,32 @@ device.  OTP images, VM snapshots and migration streams may contain key-packet
 material; protect stored artifacts and use an encrypted migration channel.
 
 The following pinned AT91Bootstrap ELF and SD image are the integration target
-for the current media boot path.  This flow was exercised before exact EBI
-decode was introduced and must be repeated with the same artifacts::
+for the current media boot path.  This flow was repeated at QEMU commit
+``e5936216dd7e`` after exact EBI decode was introduced::
 
   qemu-system-arm -M sam9x75-curiosity \
     -kernel sam9x7-sdcardboot-uboot-4.0.13.elf \
-    -drive file=sam9x75-sdcard.img,if=sd,format=raw \
+    -drive file=sam9x75-sdcard.img,if=sd,format=raw,snapshot=on \
     -nic user,mac=02:00:00:09:75:01 -nographic
 
-A successful repeat must load unmodified U-Boot, initialize DDR, NAND, MMC and
-QSPI, discover the LAN8840, exchange packets through GEM0, and reach the Linux
-shell from the SD root filesystem.  It must also remain clean of SAM9X75 model
-warnings with ``-d unimp,guest_errors`` apart from the previously recorded
-generic failed MMC/SDIO probes against a memory-only SD card.  ``-kernel``
-remains a development entry path and is not a substitute for ROM media
-selection.
+That run loaded unmodified U-Boot, initialized DDR, NAND, MMC and QSPI,
+discovered GEM0, loaded the DTB and kernel from the FAT partition, and reached
+the Linux embedded-initramfs shell.  The pinned 128 MiB image has no partition
+2, despite the kernel command line naming ``/dev/mmcblk0p2``.  To close that
+separate gate without changing the pinned image, a sparse 512 MiB derivative
+preserved partition 1 byte-for-byte and added a 255 MiB ext4 partition 2.  It
+proved a read/write mount, ``switch_root`` with ``/dev/mmcblk0p2`` as ``/``, an
+interactive disk-root shell and clean power-down.  The derivative image has
+SHA-256
+``d912f64deb059ce8a2fb0cd666681bd97aa175a5310dafd0f939bba905caf8a4``.
+
+The diagnostic log remained clean of SAM9X75 MMIO warnings; it contained one
+generic CMD1, two CMD52 and four CMD5 failed media probes while firmware and
+Linux distinguished the memory-only SD card from MMC/SDIO.  This exact-head
+run did not repeat DHCP or packet exchange, and the base Linux DT did not probe
+GEM.  A future complete integration regression must add current GEM traffic
+without losing the firmware and disk-root results.  ``-kernel`` remains a
+development entry path and is not a substitute for ROM media selection.
 
 The populated raw NAND path can be exercised independently with the pinned
 NAND AT91Bootstrap.  Create an exactly 512 MiB data-only image, place U-Boot
@@ -1048,10 +1068,11 @@ Completion gates
 ----------------
 
 Polling DBGU from SRAM, interrupt-driven bare metal and the populated
-LED/button paths are achieved.  SD and NAND AT91Bootstrap into U-Boot, the
-Linux shell from SD, and GEM/LAN8840 packet exchange were achieved against the
-earlier fixed-decode model and are pending one repeat against exact EBI decode.
-The other remaining integration gates include full guest ``mmc_spi`` operation
+LED/button paths are achieved.  The exact-EBI SD AT91Bootstrap path, Linux
+embedded-initramfs shell and a derivative-image ext4 disk-root shell are now
+repeated.  NAND AT91Bootstrap and GEM/LAN8840 packet exchange remain pending
+against the exact-EBI model; GEM discovery alone was repeated.  The other
+remaining integration gates include full guest ``mmc_spi`` operation
 through J24, the remaining board jumper and mux behavior, genuine QSPI and NAND
 RomBOOT, USB, CAN, expansion buses, multimedia/security, whole-machine
 migration and finally hardware differential validation.  Normal supported
