@@ -125,6 +125,116 @@ static void ehci_aw_h3_class_init(ObjectClass *oc, const void *data)
     set_bit(DEVICE_CATEGORY_USB, dc->categories);
 }
 
+#define AT91_UHPHS_INSNREG06_AHB_ERR (1U << 31)
+
+static uint64_t ehci_at91_uhphs_vendor_read(void *opaque, hwaddr addr,
+                                            unsigned int size)
+{
+    AT91UHPHSEHCIState *s = opaque;
+
+    switch (addr) {
+    case 0x0:
+        return s->insnreg06;
+    case 0x4:
+        return s->insnreg07;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void ehci_at91_uhphs_vendor_write(void *opaque, hwaddr addr,
+                                         uint64_t value, unsigned int size)
+{
+    AT91UHPHSEHCIState *s = opaque;
+
+    switch (addr) {
+    case 0x0:
+        /* AHB_ERR is cleared by writing zero; all other fields are RO. */
+        if (!(value & AT91_UHPHS_INSNREG06_AHB_ERR)) {
+            s->insnreg06 &= ~AT91_UHPHS_INSNREG06_AHB_ERR;
+        }
+        break;
+    case 0x4:
+        /* AHB_ADDR is read-only. */
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static const MemoryRegionOps ehci_at91_uhphs_vendor_ops = {
+    .read = ehci_at91_uhphs_vendor_read,
+    .write = ehci_at91_uhphs_vendor_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
+};
+
+void at91_uhphs_ehci_record_dma_error(AT91UHPHSEHCIState *s,
+                                      uint64_t addr)
+{
+    s->insnreg06 |= AT91_UHPHS_INSNREG06_AHB_ERR;
+    s->insnreg07 = (uint32_t)addr;
+}
+
+static void ehci_at91_uhphs_dma_error(void *opaque, uint64_t addr)
+{
+    at91_uhphs_ehci_record_dma_error(opaque, addr);
+}
+
+static void ehci_at91_uhphs_reset(void *opaque)
+{
+    AT91UHPHSEHCIState *s = opaque;
+
+    s->insnreg06 = 0;
+    s->insnreg07 = 0;
+}
+
+static const VMStateDescription vmstate_ehci_at91_uhphs = {
+    .name = "at91-uhphs-ehci",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT(parent_obj.ehci, AT91UHPHSEHCIState, 1,
+                       vmstate_ehci, EHCIState),
+        VMSTATE_UINT32(insnreg06, AT91UHPHSEHCIState),
+        VMSTATE_UINT32(insnreg07, AT91UHPHSEHCIState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static void ehci_at91_uhphs_init(Object *obj)
+{
+    AT91UHPHSEHCIState *s = AT91_UHPHS_EHCI(obj);
+    EHCISysBusState *i = &s->parent_obj;
+
+    i->ehci.dma_error_cb = ehci_at91_uhphs_dma_error;
+    i->ehci.dma_error_opaque = s;
+    i->ehci.reset_cb = ehci_at91_uhphs_reset;
+    i->ehci.reset_opaque = s;
+
+    /* SAM9X7 Series Data Sheet, UHPHS register reset values. */
+    i->ehci.caps[0x08] = 0x26;
+    i->ehci.usbcmd_reset = 0x00080b00;
+
+    memory_region_init_io(&s->vendor_mem, obj, &ehci_at91_uhphs_vendor_ops,
+                          s, "at91-uhphs-vendor", 8);
+    memory_region_add_subregion(&i->ehci.mem, 0xa8, &s->vendor_mem);
+}
+
+static void ehci_at91_uhphs_class_init(ObjectClass *oc, const void *data)
+{
+    SysBusEHCIClass *sec = SYS_BUS_EHCI_CLASS(oc);
+    DeviceClass *dc = DEVICE_CLASS(oc);
+
+    sec->capsbase = 0x0;
+    sec->opregbase = 0x10;
+    sec->portscbase = 0x44;
+    sec->portnr = 3;
+    dc->vmsd = &vmstate_ehci_at91_uhphs;
+    set_bit(DEVICE_CATEGORY_USB, dc->categories);
+}
+
 static void ehci_npcm7xx_class_init(ObjectClass *oc, const void *data)
 {
     SysBusEHCIClass *sec = SYS_BUS_EHCI_CLASS(oc);
@@ -257,6 +367,13 @@ static const TypeInfo ehci_sysbus_types[] = {
         .name          = TYPE_AW_H3_EHCI,
         .parent        = TYPE_SYS_BUS_EHCI,
         .class_init    = ehci_aw_h3_class_init,
+    },
+    {
+        .name          = TYPE_AT91_UHPHS_EHCI,
+        .parent        = TYPE_SYS_BUS_EHCI,
+        .instance_size = sizeof(AT91UHPHSEHCIState),
+        .instance_init = ehci_at91_uhphs_init,
+        .class_init    = ehci_at91_uhphs_class_init,
     },
     {
         .name          = TYPE_NPCM7XX_EHCI,

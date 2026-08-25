@@ -81,6 +81,7 @@ struct OHCIState {
     uint32_t hmask;
     uint32_t hreset;
     uint32_t htest;
+    bool pxa_extensions;
 
     /* SM501 local memory offset */
     dma_addr_t localmem_base;
@@ -90,12 +91,43 @@ struct OHCIState {
     USBPacket usb_packet;
     uint8_t usb_buf[8192];
     uint32_t async_td;
+    uint32_t async_ed;
     bool async_complete;
+    bool rebuild_async;
+    bool rebuild_cancel;
+    uint32_t rebuild_td;
+    uint32_t rebuild_ed;
+    int32_t migrate_packet_status;
+    int32_t migrate_packet_actual_length;
+    int32_t migrate_packet_pid;
+    uint32_t migrate_packet_length;
+    uint8_t migrate_device_address;
+    uint8_t migrate_endpoint;
+    bool migrate_short_not_ok;
+    bool migrate_int_req;
+    bool migrate_async_state_loaded;
+    bool migrate_async_state;
+    bool owns_bus;
+    VMChangeStateEntry *vmstate;
+
+    /*
+     * Some integrated OHCIs have implementation-defined reset values for
+     * the root hub and frame timing registers.  Keep the standard QEMU
+     * defaults unless a concrete controller subtype supplies its values.
+     */
+    bool custom_reset_values;
+    uint32_t reset_intr;
+    uint16_t reset_fsmps;
+    uint32_t reset_rhdesc_a;
+    uint32_t reset_port_ctrl;
+    void (*dma_error_cb)(void *opaque, dma_addr_t addr);
+    void *dma_error_opaque;
 
     void (*ohci_die)(OHCIState *ohci);
 };
 
 #define TYPE_SYSBUS_OHCI "sysbus-ohci"
+#define TYPE_AT91_UHPHS_OHCI "at91-uhphs-ohci"
 OBJECT_DECLARE_SIMPLE_TYPE(OHCISysBusState, SYSBUS_OHCI)
 
 struct OHCISysBusState {
@@ -108,6 +140,7 @@ struct OHCISysBusState {
     uint32_t num_ports;
     uint32_t firstport;
     dma_addr_t dma_offset;
+    bool migrate_state;
 };
 
 extern const VMStateDescription vmstate_ohci_state;
@@ -116,6 +149,7 @@ void usb_ohci_init(OHCIState *ohci, DeviceState *dev, uint32_t num_ports,
                    dma_addr_t localmem_base, char *masterbus,
                    uint32_t firstport, AddressSpace *as,
                    void (*ohci_die_fn)(OHCIState *), Error **errp);
+void usb_ohci_uninit(OHCIState *ohci);
 void ohci_bus_stop(OHCIState *ohci);
 void ohci_stop_endpoints(OHCIState *ohci);
 void ohci_hard_reset(OHCIState *ohci);

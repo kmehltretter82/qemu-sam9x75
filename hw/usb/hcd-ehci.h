@@ -269,6 +269,11 @@ struct EHCIState {
     bool migrate_fetch_addr_64bit;
     bool caps_64bit_addr;
     uint32_t ctrldssegment_default;
+    uint32_t usbcmd_reset;
+    void (*dma_error_cb)(void *opaque, uint64_t addr);
+    void *dma_error_opaque;
+    void (*reset_cb)(void *opaque);
+    void *reset_opaque;
 
     /*
      *  EHCI spec version 1.0 Section 2.3
@@ -366,6 +371,7 @@ struct EHCIPCIState {
 #define TYPE_TEGRA2_EHCI "tegra2-ehci-usb"
 #define TYPE_PPC4xx_EHCI "ppc4xx-ehci-usb"
 #define TYPE_FUSBH200_EHCI "fusbh200-ehci-usb"
+#define TYPE_AT91_UHPHS_EHCI "at91-uhphs-ehci-usb"
 
 OBJECT_DECLARE_TYPE(EHCISysBusState, SysBusEHCIClass, SYS_BUS_EHCI)
 
@@ -376,6 +382,19 @@ struct EHCISysBusState {
 
     EHCIState ehci;
 };
+
+OBJECT_DECLARE_SIMPLE_TYPE(AT91UHPHSEHCIState, AT91_UHPHS_EHCI)
+
+struct AT91UHPHSEHCIState {
+    EHCISysBusState parent_obj;
+
+    MemoryRegion vendor_mem;
+    uint32_t insnreg06;
+    uint32_t insnreg07;
+};
+
+void at91_uhphs_ehci_record_dma_error(AT91UHPHSEHCIState *s,
+                                      uint64_t addr);
 
 struct SysBusEHCIClass {
     /*< private >*/

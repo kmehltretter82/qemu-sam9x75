@@ -415,6 +415,38 @@ static inline bool ehci_periodic_enabled(EHCIState *s)
     return ehci_enabled(s) && (s->usbcmd & USBCMD_PSE);
 }
 
+static uint32_t ehci_frame_list_period(const EHCIState *s)
+{
+    switch ((s->usbcmd & USBCMD_FLS) >> USBCMD_FLS_SH) {
+    case 0:
+        return 0x2000; /* 1024 frames */
+    case 1:
+        return 0x1000; /* 512 frames */
+    case 2:
+        return 0x0800; /* 256 frames */
+    default:
+        /* The reserved encoding is rejected on register write. */
+        return 0x2000;
+    }
+}
+
+static void ehci_dma_error(EHCIState *s, uint64_t addr)
+{
+    ehci_raise_irq(s, USBSTS_HSE);
+    s->usbcmd &= ~USBCMD_RUNSTOP;
+    ehci_update_halt(s);
+    trace_usb_ehci_dma_error();
+
+    if (s->dma_error_cb) {
+        s->dma_error_cb(s->dma_error_opaque, addr);
+    }
+
+    /* Finish stopping an active schedule after its current state unwinds. */
+    if (s->async_bh) {
+        qemu_bh_schedule(s->async_bh);
+    }
+}
+
 /* Get an array of dwords from main memory */
 static inline int get_dwords(EHCIState *ehci, uint64_t addr,
                              uint32_t *buf, int num)
@@ -422,15 +454,16 @@ static inline int get_dwords(EHCIState *ehci, uint64_t addr,
     int i;
 
     if (!ehci->as) {
-        ehci_raise_irq(ehci, USBSTS_HSE);
-        ehci->usbcmd &= ~USBCMD_RUNSTOP;
-        trace_usb_ehci_dma_error();
+        ehci_dma_error(ehci, addr);
         return -1;
     }
 
     for (i = 0; i < num; i++, buf++, addr += sizeof(*buf)) {
-        dma_memory_read(ehci->as, addr, buf, sizeof(*buf),
-                        MEMTXATTRS_UNSPECIFIED);
+        if (dma_memory_read(ehci->as, addr, buf, sizeof(*buf),
+                            MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+            ehci_dma_error(ehci, addr);
+            return -1;
+        }
         *buf = le32_to_cpu(*buf);
     }
 
@@ -444,16 +477,17 @@ static inline int put_dwords(EHCIState *ehci, uint64_t addr,
     int i;
 
     if (!ehci->as) {
-        ehci_raise_irq(ehci, USBSTS_HSE);
-        ehci->usbcmd &= ~USBCMD_RUNSTOP;
-        trace_usb_ehci_dma_error();
+        ehci_dma_error(ehci, addr);
         return -1;
     }
 
     for (i = 0; i < num; i++, buf++, addr += sizeof(*buf)) {
         uint32_t tmp = cpu_to_le32(*buf);
-        dma_memory_write(ehci->as, addr, &tmp, sizeof(tmp),
-                         MEMTXATTRS_UNSPECIFIED);
+        if (dma_memory_write(ehci->as, addr, &tmp, sizeof(tmp),
+                             MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+            ehci_dma_error(ehci, addr);
+            return -1;
+        }
     }
 
     return num;
@@ -533,10 +567,14 @@ static void ehci_writeback_async_complete_packet(EHCIPacket *p)
     /* Verify the qh + qtd, like we do when going through fetchqh & fetchqtd */
     memset(&qh, 0, sizeof(qh));
     memset(&qtd, 0, sizeof(qtd));
-    get_dwords(q->ehci, NLPTR_GET(q->qhaddr),
-               (uint32_t *) &qh, ehci_qh_dwords(q->ehci));
-    get_dwords(q->ehci, NLPTR_GET(q->qtdaddr),
-               (uint32_t *) &qtd, ehci_qtd_dwords(q->ehci));
+    if (get_dwords(q->ehci, NLPTR_GET(q->qhaddr),
+                   (uint32_t *) &qh, ehci_qh_dwords(q->ehci)) < 0 ||
+        get_dwords(q->ehci, NLPTR_GET(q->qtdaddr),
+                   (uint32_t *) &qtd, ehci_qtd_dwords(q->ehci)) < 0) {
+        p->async = EHCI_ASYNC_INITIALIZED;
+        ehci_free_packet(p);
+        return;
+    }
     if (!ehci_verify_qh(q, &qh) || !ehci_verify_qtd(p, &qtd)) {
         p->async = EHCI_ASYNC_INITIALIZED;
         ehci_free_packet(p);
@@ -544,8 +582,11 @@ static void ehci_writeback_async_complete_packet(EHCIPacket *p)
     }
 
     state = ehci_get_state(q->ehci, q->async);
-    ehci_state_executing(q);
-    ehci_state_writeback(q); /* Frees the packet! */
+    if (ehci_state_executing(q) < 0 || ehci_state_writeback(q) < 0) {
+        ehci_set_state(q->ehci, q->async, state);
+        return;
+    }
+    /* ehci_state_writeback() frees the packet. */
     if (!(q->qh.token & QTD_TOKEN_HALT)) {
         ehci_state_advqueue(q);
     }
@@ -777,7 +818,11 @@ static void ehci_detach(USBPort *port)
          * EHCI spec 4.2.2: "When a disconnect occurs... On the event,
          * the port ownership is returned immediately to the EHCI controller."
          */
-        *portsc &= ~PORTSC_POWNER;
+        if (s->configflag) {
+            *portsc &= ~PORTSC_POWNER;
+        } else {
+            *portsc |= PORTSC_POWNER;
+        }
         return;
     }
 
@@ -919,7 +964,7 @@ void ehci_reset(void *opaque)
     memset(&s->opreg, 0x00, sizeof(s->opreg));
     memset(&s->portsc, 0x00, sizeof(s->portsc));
 
-    s->usbcmd = NB_MAXINTRATE << USBCMD_ITC_SH;
+    s->usbcmd = s->usbcmd_reset;
     s->usbsts = USBSTS_HALT;
     s->usbsts_pending = 0;
     s->usbsts_frindex = 0;
@@ -943,6 +988,10 @@ void ehci_reset(void *opaque)
     ehci_queues_rip_all(s, 1);
     timer_del(s->frame_timer);
     qemu_bh_cancel(s->async_bh);
+
+    if (s->reset_cb) {
+        s->reset_cb(s->reset_opaque);
+    }
 }
 
 static uint64_t ehci_caps_read(void *ptr, hwaddr addr,
@@ -1031,8 +1080,9 @@ static void ehci_port_write(void *ptr, hwaddr addr,
     *portsc &= ~(val & PORTSC_RWC_MASK);
     /* The guest may clear, but not set the PED bit */
     *portsc &= val | ~PORTSC_PED;
-    /* POWNER is masked out by RO_MASK as it is RO when we've no companion */
-    handle_port_owner_write(s, port, val);
+    /* CF=0 unconditionally routes every shared port to its companion. */
+    handle_port_owner_write(s, port,
+                            s->configflag ? val : PORTSC_POWNER);
     /* And finally apply RO_MASK */
     val &= PORTSC_RO_MASK;
 
@@ -1087,12 +1137,21 @@ static void ehci_opreg_write(void *ptr, hwaddr addr,
             break;
         }
 
-        /* not supporting dynamic frame list size at the moment */
-        if ((val & USBCMD_FLS) && !(s->usbcmd & USBCMD_FLS)) {
+        if (!(s->caps[0x08] & BIT(1))) {
+            val = (val & ~USBCMD_FLS) | (s->usbcmd & USBCMD_FLS);
+        } else if ((val & USBCMD_FLS) == USBCMD_FLS) {
             qemu_log_mask(LOG_GUEST_ERROR,
-                          "attempt to set frame list size -- value %" PRId64
-                          "\n", val & USBCMD_FLS);
-            val &= ~USBCMD_FLS;
+                          "attempt to select reserved frame list size\n");
+            val = (val & ~USBCMD_FLS) | (s->usbcmd & USBCMD_FLS);
+        } else if (!(s->usbsts & USBSTS_HALT) &&
+                   ((val ^ s->usbcmd) & USBCMD_FLS)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "attempt to change frame list size while running\n");
+            val = (val & ~USBCMD_FLS) | (s->usbcmd & USBCMD_FLS);
+        }
+
+        if (!(s->caps[0x08] & BIT(2))) {
+            val &= ~(USBCMD_ASPMC | USBCMD_ASPME);
         }
 
         if (val & USBCMD_IAAD) {
@@ -1140,9 +1199,10 @@ static void ehci_opreg_write(void *ptr, hwaddr addr,
 
     case CONFIGFLAG:
         val &= 0x1;
-        if (val) {
-            for (i = 0; i < EHCI_PORTS; i++) {
-                handle_port_owner_write(s, i, 0);
+        if (!val || !(old & 0x1)) {
+            for (i = 0; i < s->portnr; i++) {
+                handle_port_owner_write(s, i,
+                                        val ? 0 : PORTSC_POWNER);
             }
         }
         break;
@@ -1187,13 +1247,14 @@ static void ehci_opreg_write(void *ptr, hwaddr addr,
  *  The first three dwords are read-only for the EHCI, so skip them
  *  when writing back the qh.
  */
-static void ehci_flush_qh(EHCIQueue *q)
+static int ehci_flush_qh(EHCIQueue *q)
 {
     uint32_t *qh = (uint32_t *) &q->qh;
     uint32_t dwords = ehci_qh_dwords(q->ehci);
     uint64_t addr = NLPTR_GET(q->qhaddr);
 
-    put_dwords(q->ehci, addr + 3 * sizeof(uint32_t), qh + 3, dwords - 3);
+    return put_dwords(q->ehci, addr + 3 * sizeof(uint32_t), qh + 3,
+                      dwords - 3);
 }
 
 /* 4.10.2 */
@@ -1242,9 +1303,7 @@ static int ehci_qh_do_overlay(EHCIQueue *q)
     q->qh.bufptr[1] &= ~BUFPTR_CPROGMASK_MASK;
     q->qh.bufptr[2] &= ~BUFPTR_FRAMETAG_MASK;
 
-    ehci_flush_qh(q);
-
-    return 0;
+    return ehci_flush_qh(q) < 0 ? -1 : 0;
 }
 
 static int ehci_init_transfer(EHCIPacket *p)
@@ -1277,6 +1336,60 @@ static int ehci_init_transfer(EHCIPacket *p)
         qemu_sglist_add(&p->sgl, page, plen);
         bytes -= plen;
     }
+    return 0;
+}
+
+static void ehci_packet_unmap_failed(USBPacket *packet, QEMUSGList *sgl,
+                                     DMADirection dir)
+{
+    int i;
+
+    for (i = 0; i < packet->iov.niov; i++) {
+        dma_memory_unmap(sgl->as, packet->iov.iov[i].iov_base,
+                         packet->iov.iov[i].iov_len, dir, 0);
+    }
+    qemu_iovec_reset(&packet->iov);
+}
+
+static int ehci_packet_map(EHCIState *ehci, USBPacket *packet,
+                           QEMUSGList *sgl)
+{
+    DMADirection dir = packet->pid == USB_TOKEN_IN ?
+        DMA_DIRECTION_FROM_DEVICE : DMA_DIRECTION_TO_DEVICE;
+    void *mem;
+    int i;
+
+    for (i = 0; i < sgl->nsg; i++) {
+        dma_addr_t base = sgl->sg[i].base;
+        dma_addr_t len = sgl->sg[i].len;
+
+        while (len) {
+            dma_addr_t xlen = len;
+
+            mem = dma_memory_map(sgl->as, base, &xlen, dir,
+                                 MEMTXATTRS_UNSPECIFIED);
+            if (!mem || !xlen) {
+                ehci_dma_error(ehci, base);
+                ehci_packet_unmap_failed(packet, sgl, dir);
+                return -1;
+            }
+            if (xlen > len) {
+                xlen = len;
+            }
+            if (!dma_memory_valid(sgl->as, base, xlen, dir,
+                                  MEMTXATTRS_UNSPECIFIED)) {
+                /* address_space_map() may bounce an unassigned region. */
+                dma_memory_unmap(sgl->as, mem, xlen, dir, 0);
+                ehci_dma_error(ehci, base);
+                ehci_packet_unmap_failed(packet, sgl, dir);
+                return -1;
+            }
+            qemu_iovec_add(&packet->iov, mem, xlen);
+            base += xlen;
+            len -= xlen;
+        }
+    }
+
     return 0;
 }
 
@@ -1329,7 +1442,7 @@ static void ehci_async_complete_packet(USBPort *port, USBPacket *packet)
     qemu_bh_schedule(s->async_bh);
 }
 
-static void ehci_execute_complete(EHCIQueue *q)
+static int ehci_execute_complete(EHCIQueue *q)
 {
     EHCIPacket *p = QTAILQ_FIRST(&q->packets);
     uint32_t tbytes;
@@ -1357,7 +1470,7 @@ static void ehci_execute_complete(EHCIQueue *q)
         break;
     case USB_RET_NAK:
         set_field(&q->qh.altnext_qtd, 0, QH_ALTNEXT_NAKCNT);
-        return; /* We're not done yet with this transaction */
+        return 0; /* We're not done yet with this transaction */
     case USB_RET_BABBLE:
         q->qh.token |= (QTD_TOKEN_HALT | QTD_TOKEN_BABBLE);
         ehci_raise_irq(q->ehci, USBSTS_ERRINT);
@@ -1400,6 +1513,8 @@ static void ehci_execute_complete(EHCIQueue *q)
             q->ehci->int_req_by_async = true;
         }
     }
+
+    return 0;
 }
 
 /* 4.10.3 returns "again" */
@@ -1439,7 +1554,7 @@ static int ehci_execute(EHCIPacket *p, const char *action)
         spd = (p->pid == USB_TOKEN_IN && NLPTR_TBIT(p->qtd.altnext) == 0);
         usb_packet_setup(&p->packet, p->pid, ep, 0, p->qtdaddr, spd,
                          (p->qtd.token & QTD_TOKEN_IOC) != 0);
-        if (usb_packet_map(&p->packet, &p->sgl)) {
+        if (ehci_packet_map(p->queue->ehci, &p->packet, &p->sgl)) {
             qemu_sglist_destroy(&p->sgl);
             return -1;
         }
@@ -1524,7 +1639,8 @@ static int ehci_process_itd(EHCIState *ehci,
                 if (ep && ep->type == USB_ENDPOINT_XFER_ISOC) {
                     usb_packet_setup(&ehci->ipacket, pid, ep, 0, addr, false,
                                      (itd->transact[i] & ITD_XACT_IOC) != 0);
-                    if (usb_packet_map(&ehci->ipacket, &ehci->isgl)) {
+                    if (ehci_packet_map(ehci, &ehci->ipacket,
+                                        &ehci->isgl)) {
                         qemu_sglist_destroy(&ehci->isgl);
                         return -1;
                     }
@@ -1795,8 +1911,10 @@ static int ehci_state_fetchitd(EHCIState *ehci, int async)
         return -1;
     }
 
-    put_dwords(ehci, NLPTR_GET(entry), (uint32_t *) &itd,
-               ehci_itd_dwords(ehci));
+    if (put_dwords(ehci, NLPTR_GET(entry), (uint32_t *) &itd,
+                   ehci_itd_dwords(ehci)) < 0) {
+        return -1;
+    }
     ehci_set_fetch_addr(ehci, async, ehci_get_desc_addr(ehci, itd.next));
     ehci_set_state(ehci, async, EST_FETCHENTRY);
 
@@ -1898,7 +2016,9 @@ static int ehci_state_fetchqtd(EHCIQueue *q)
             p = NULL;
         } else {
             p->qtd = qtd;
-            ehci_qh_do_overlay(q);
+            if (ehci_qh_do_overlay(q) < 0) {
+                return -1;
+            }
         }
     }
 
@@ -2034,7 +2154,9 @@ static int ehci_state_execute(EHCIQueue *q)
         goto out;
     }
     if (p->packet.status == USB_RET_ASYNC) {
-        ehci_flush_qh(q);
+        if (ehci_flush_qh(q) < 0) {
+            return -1;
+        }
         trace_usb_ehci_packet_action(p->queue, p, "async");
         p->async = EHCI_ASYNC_INFLIGHT;
         ehci_set_state(q->ehci, q->async, EST_HORIZONTALQH);
@@ -2060,7 +2182,9 @@ static int ehci_state_executing(EHCIQueue *q)
     assert(p != NULL);
     assert(p->qtdaddr == q->qtdaddr);
 
-    ehci_execute_complete(q);
+    if (ehci_execute_complete(q) < 0) {
+        return -1;
+    }
 
     /* 4.10.3 */
     if (!q->async && q->transact_ctr > 0) {
@@ -2074,8 +2198,7 @@ static int ehci_state_executing(EHCIQueue *q)
         ehci_set_state(q->ehci, q->async, EST_WRITEBACK);
     }
 
-    ehci_flush_qh(q);
-    return 1;
+    return ehci_flush_qh(q) < 0 ? -1 : 1;
 }
 
 
@@ -2094,9 +2217,13 @@ static int ehci_state_writeback(EHCIQueue *q)
     qtd = (uint32_t *) &q->qh.next_qtd;
     addr = NLPTR_GET(p->qtdaddr);
     /* First write back the offset */
-    put_dwords(q->ehci, addr + 3 * sizeof(uint32_t), qtd + 3, 1);
+    if (put_dwords(q->ehci, addr + 3 * sizeof(uint32_t), qtd + 3, 1) < 0) {
+        return -1;
+    }
     /* Then write back the token, clearing the 'active' bit */
-    put_dwords(q->ehci, addr + 2 * sizeof(uint32_t), qtd + 2, 1);
+    if (put_dwords(q->ehci, addr + 2 * sizeof(uint32_t), qtd + 2, 1) < 0) {
+        return -1;
+    }
     ehci_free_packet(p);
 
     /*
@@ -2200,7 +2327,12 @@ static void ehci_advance_state(EHCIState *ehci, int async)
             g_assert_not_reached();
         }
 
-        if (again < 0 || itd_count > 16) {
+        if (!(ehci->usbcmd & USBCMD_RUNSTOP) &&
+            (ehci->usbsts & USBSTS_HSE)) {
+            /* A DMA error already stopped the controller and raised HSE. */
+            ehci_set_state(ehci, async, EST_ACTIVE);
+            again = 0;
+        } else if (again < 0 || itd_count > 16) {
             /* TODO: notify guest (raise HSE irq?) */
             qemu_log_mask(LOG_GUEST_ERROR,
                           "processing error - resetting ehci HC\n");
@@ -2294,7 +2426,8 @@ static void ehci_advance_periodic_state(EHCIState *ehci)
         if (list == 0) {
             break;
         }
-        list |= ((ehci->frindex & 0x1ff8) >> 1);
+        list |= ((ehci->frindex &
+                  (ehci_frame_list_period(ehci) - 8)) >> 1);
         list64 = ehci_get_desc_addr(ehci, list);
         if (get_dwords(ehci, list64, &entry, 1) < 0) {
             break;
@@ -2320,8 +2453,9 @@ static void ehci_update_frindex(EHCIState *ehci, int uframes)
         return;
     }
 
-    /* Generate FLR interrupt if frame index rolls over 0x2000 */
-    if ((ehci->frindex % 0x2000) + uframes >= 0x2000) {
+    /* Generate FLR when the selected periodic frame list rolls over. */
+    if ((ehci->frindex % ehci_frame_list_period(ehci)) + uframes >=
+        ehci_frame_list_period(ehci)) {
         ehci_raise_irq(ehci, USBSTS_FLR);
     }
 
@@ -2545,6 +2679,8 @@ static int usb_ehci_post_load(void *opaque, int version_id)
         s->p_fetch_addr = s->migrate_p_fetch_addr;
     }
 
+    ehci_update_irq(s);
+
     return 0;
 }
 
@@ -2568,7 +2704,9 @@ static void usb_ehci_vm_state_change(void *opaque, bool running, RunState state)
      * will never have existed on the destination. Therefore we must flush the
      * async schedule on savevm to catch any not yet noticed unlinks.
      */
-    if (state == RUN_STATE_SAVE_VM) {
+    if (!running &&
+        (state == RUN_STATE_SAVE_VM ||
+         state == RUN_STATE_FINISH_MIGRATE)) {
         ehci_advance_async_state(ehci);
         ehci_queues_rip_unseen(ehci, 1);
     }
@@ -2696,6 +2834,7 @@ void usb_ehci_init(EHCIState *s, DeviceState *dev)
     s->caps[0x08] = 0x80;        /* We can cache whole frame */
     s->caps[0x0a] = 0x00;
     s->caps[0x0b] = 0x00;
+    s->usbcmd_reset = NB_MAXINTRATE << USBCMD_ITC_SH;
 
     QTAILQ_INIT(&s->aqueues);
     QTAILQ_INIT(&s->pqueues);

@@ -35,6 +35,7 @@
 #include "migration/vmstate.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/qdev-properties.h"
+#include "system/runstate.h"
 #include "trace.h"
 #include "hcd-ohci.h"
 
@@ -130,6 +131,16 @@ struct ohci_td {
     uint32_t be;
 };
 
+typedef struct OHCIMigratedPacket {
+    int actual_length;
+    int pid;
+    uint32_t length;
+    uint8_t device_address;
+    uint8_t endpoint;
+    bool short_not_ok;
+    bool int_req;
+} OHCIMigratedPacket;
+
 /* Isochronous transfer descriptor */
 struct ohci_iso_td {
     uint32_t flags;
@@ -185,13 +196,15 @@ struct ohci_iso_td {
 
 #define OHCI_LS_THRESH        0x628
 
-#define OHCI_RHA_RW_MASK      0x00000000 /* Mask of supported features.  */
 #define OHCI_RHA_PSM          (1 << 8)
 #define OHCI_RHA_NPS          (1 << 9)
 #define OHCI_RHA_DT           (1 << 10)
 #define OHCI_RHA_OCPM         (1 << 11)
 #define OHCI_RHA_NOCP         (1 << 12)
 #define OHCI_RHA_POTPGT_MASK  0xff000000
+#define OHCI_RHA_RW_MASK      (OHCI_RHA_PSM | OHCI_RHA_NPS | \
+                               OHCI_RHA_OCPM | OHCI_RHA_NOCP | \
+                               OHCI_RHA_POTPGT_MASK)
 
 #define OHCI_RHS_LPS          (1U << 0)
 #define OHCI_RHS_OCI          (1U << 1)
@@ -294,15 +307,75 @@ static USBDevice *ohci_find_device(OHCIState *ohci, uint8_t addr)
     return NULL;
 }
 
+static USBDevice *ohci_find_attached_device(OHCIState *ohci, uint8_t addr)
+{
+    USBDevice *dev;
+    int i;
+
+    for (i = 0; i < ohci->num_ports; i++) {
+        dev = usb_find_device(&ohci->rhport[i].port, addr);
+        if (dev) {
+            return dev;
+        }
+    }
+    return NULL;
+}
+
+static void ohci_clear_async_state(OHCIState *ohci)
+{
+    ohci->async_td = 0;
+    ohci->async_ed = 0;
+    ohci->async_complete = false;
+    ohci->rebuild_async = false;
+    ohci->rebuild_cancel = false;
+    ohci->rebuild_td = 0;
+    ohci->rebuild_ed = 0;
+    ohci->migrate_packet_status = 0;
+    ohci->migrate_packet_actual_length = 0;
+    ohci->migrate_packet_pid = 0;
+    ohci->migrate_packet_length = 0;
+    ohci->migrate_device_address = 0;
+    ohci->migrate_endpoint = 0;
+    ohci->migrate_short_not_ok = false;
+    ohci->migrate_int_req = false;
+    ohci->migrate_async_state_loaded = false;
+}
+
+static void ohci_capture_async_packet_metadata(OHCIState *ohci)
+{
+    USBPacket *packet = &ohci->usb_packet;
+
+    g_assert(packet->ep);
+    ohci->migrate_packet_pid = packet->pid;
+    ohci->migrate_packet_length = packet->iov.size;
+    ohci->migrate_device_address = packet->ep->dev->addr;
+    ohci->migrate_endpoint = packet->ep->nr;
+    ohci->migrate_short_not_ok = packet->short_not_ok;
+    ohci->migrate_int_req = packet->int_req;
+}
+
+static void ohci_cancel_async_packet(OHCIState *ohci)
+{
+    USBEndpoint *ep = ohci->usb_packet.ep;
+
+    if (ohci->async_td && usb_packet_is_inflight(&ohci->usb_packet)) {
+        usb_cancel_packet(&ohci->usb_packet);
+    }
+    ohci_clear_async_state(ohci);
+    if (ep) {
+        usb_device_ep_stopped(ep->dev, ep);
+    }
+}
+
 void ohci_stop_endpoints(OHCIState *ohci)
 {
     USBDevice *dev;
     int i, j;
 
-    if (ohci->async_td) {
+    if (ohci->async_td && usb_packet_is_inflight(&ohci->usb_packet)) {
         usb_cancel_packet(&ohci->usb_packet);
-        ohci->async_td = 0;
     }
+    ohci_clear_async_state(ohci);
     for (i = 0; i < ohci->num_ports; i++) {
         dev = ohci->rhport[i].port.dev;
         if (dev && dev->attached) {
@@ -321,13 +394,18 @@ static void ohci_roothub_reset(OHCIState *ohci)
     int i;
 
     ohci_bus_stop(ohci);
-    ohci->rhdesc_a = OHCI_RHA_NPS | ohci->num_ports;
+    ohci->rhdesc_a = ohci->custom_reset_values ?
+                     ohci->reset_rhdesc_a : OHCI_RHA_NPS | ohci->num_ports;
     ohci->rhdesc_b = 0x0; /* Impl. specific */
     ohci->rhstatus = 0;
 
     for (i = 0; i < ohci->num_ports; i++) {
         port = &ohci->rhport[i];
-        port->ctrl = 0;
+        port->ctrl = ohci->custom_reset_values ?
+                     ohci->reset_port_ctrl : 0;
+        if (ohci->rhdesc_a & OHCI_RHA_NPS) {
+            port->ctrl |= OHCI_PORT_PPS;
+        }
         if (port->port.dev && port->port.dev->attached) {
             usb_port_reset(&port->port);
         }
@@ -341,11 +419,14 @@ static void ohci_soft_reset(OHCIState *ohci)
     trace_usb_ohci_reset(ohci->name);
 
     ohci_bus_stop(ohci);
+    ohci_stop_endpoints(ohci);
     ohci->ctl = (ohci->ctl & OHCI_CTL_IR) | OHCI_USB_SUSPEND;
     ohci->old_ctl = 0;
     ohci->status = 0;
     ohci->intr_status = 0;
-    ohci->intr = OHCI_INTR_MIE;
+    ohci->intr = ohci->custom_reset_values ?
+                 ohci->reset_intr : OHCI_INTR_MIE;
+    ohci_intr_update(ohci);
 
     ohci->hcca = 0;
     ohci->ctrl_head = ohci->ctrl_cur = 0;
@@ -357,7 +438,8 @@ static void ohci_soft_reset(OHCIState *ohci)
      * FSMPS is marked TBD in OCHI 1.0, what gives ffs?
      * I took the value linux sets ...
      */
-    ohci->fsmps = 0x2778;
+    ohci->fsmps = ohci->custom_reset_values ?
+                  ohci->reset_fsmps : 0x2778;
     ohci->fi = 0x2edf;
     ohci->fit = 0;
     ohci->frt = 0;
@@ -373,6 +455,13 @@ void ohci_hard_reset(OHCIState *ohci)
     ohci_roothub_reset(ohci);
 }
 
+static void ohci_dma_error(OHCIState *ohci, dma_addr_t addr)
+{
+    if (ohci->dma_error_cb) {
+        ohci->dma_error_cb(ohci->dma_error_opaque, addr);
+    }
+}
+
 /* Get an array of dwords from main memory */
 static inline int get_dwords(OHCIState *ohci,
                              dma_addr_t addr, uint32_t *buf, int num)
@@ -384,6 +473,7 @@ static inline int get_dwords(OHCIState *ohci,
     for (i = 0; i < num; i++, buf++, addr += sizeof(*buf)) {
         if (dma_memory_read(ohci->as, addr,
                             buf, sizeof(*buf), MEMTXATTRS_UNSPECIFIED)) {
+            ohci_dma_error(ohci, addr);
             return -1;
         }
         *buf = le32_to_cpu(*buf);
@@ -404,6 +494,7 @@ static inline int put_dwords(OHCIState *ohci,
         uint32_t tmp = cpu_to_le32(*buf);
         if (dma_memory_write(ohci->as, addr,
                              &tmp, sizeof(tmp), MEMTXATTRS_UNSPECIFIED)) {
+            ohci_dma_error(ohci, addr);
             return -1;
         }
     }
@@ -422,6 +513,7 @@ static inline int get_words(OHCIState *ohci,
     for (i = 0; i < num; i++, buf++, addr += sizeof(*buf)) {
         if (dma_memory_read(ohci->as, addr,
                             buf, sizeof(*buf), MEMTXATTRS_UNSPECIFIED)) {
+            ohci_dma_error(ohci, addr);
             return -1;
         }
         *buf = le16_to_cpu(*buf);
@@ -442,6 +534,7 @@ static inline int put_words(OHCIState *ohci,
         uint16_t tmp = cpu_to_le16(*buf);
         if (dma_memory_write(ohci->as, addr,
                              &tmp, sizeof(tmp), MEMTXATTRS_UNSPECIFIED)) {
+            ohci_dma_error(ohci, addr);
             return -1;
         }
     }
@@ -471,8 +564,13 @@ static inline int ohci_read_iso_td(OHCIState *ohci,
 static inline int ohci_read_hcca(OHCIState *ohci,
                                  dma_addr_t addr, struct ohci_hcca *hcca)
 {
-    return dma_memory_read(ohci->as, addr + ohci->localmem_base, hcca,
-                           sizeof(*hcca), MEMTXATTRS_UNSPECIFIED);
+    addr += ohci->localmem_base;
+    if (dma_memory_read(ohci->as, addr, hcca, sizeof(*hcca),
+                        MEMTXATTRS_UNSPECIFIED)) {
+        ohci_dma_error(ohci, addr);
+        return -1;
+    }
+    return 0;
 }
 
 static inline int ohci_put_ed(OHCIState *ohci,
@@ -503,10 +601,14 @@ static inline int ohci_put_iso_td(OHCIState *ohci,
 static inline int ohci_put_hcca(OHCIState *ohci,
                                 dma_addr_t addr, struct ohci_hcca *hcca)
 {
-    return dma_memory_write(ohci->as,
-                            addr + ohci->localmem_base + HCCA_WRITEBACK_OFFSET,
-                            (char *)hcca + HCCA_WRITEBACK_OFFSET,
-                            HCCA_WRITEBACK_SIZE, MEMTXATTRS_UNSPECIFIED);
+    addr += ohci->localmem_base + HCCA_WRITEBACK_OFFSET;
+    if (dma_memory_write(ohci->as, addr,
+                         (char *)hcca + HCCA_WRITEBACK_OFFSET,
+                         HCCA_WRITEBACK_SIZE, MEMTXATTRS_UNSPECIFIED)) {
+        ohci_dma_error(ohci, addr);
+        return -1;
+    }
+    return 0;
 }
 
 /* Read/Write the contents of a TD from/to main memory.  */
@@ -522,6 +624,7 @@ static int ohci_copy_td(OHCIState *ohci, struct ohci_td *td,
     }
     if (dma_memory_rw(ohci->as, ptr + ohci->localmem_base, buf,
                       n, dir, MEMTXATTRS_UNSPECIFIED)) {
+        ohci_dma_error(ohci, ptr + ohci->localmem_base);
         return -1;
     }
     if (n == len) {
@@ -531,6 +634,7 @@ static int ohci_copy_td(OHCIState *ohci, struct ohci_td *td,
     buf += n;
     if (dma_memory_rw(ohci->as, ptr + ohci->localmem_base, buf,
                       len - n, dir, MEMTXATTRS_UNSPECIFIED)) {
+        ohci_dma_error(ohci, ptr + ohci->localmem_base);
         return -1;
     }
     return 0;
@@ -550,6 +654,7 @@ static int ohci_copy_iso_td(OHCIState *ohci,
     }
     if (dma_memory_rw(ohci->as, ptr + ohci->localmem_base, buf,
                       n, dir, MEMTXATTRS_UNSPECIFIED)) {
+        ohci_dma_error(ohci, ptr + ohci->localmem_base);
         return -1;
     }
     if (n == len) {
@@ -559,6 +664,7 @@ static int ohci_copy_iso_td(OHCIState *ohci,
     buf += n;
     if (dma_memory_rw(ohci->as, ptr + ohci->localmem_base, buf,
                       len - n, dir, MEMTXATTRS_UNSPECIFIED)) {
+        ohci_dma_error(ohci, ptr + ohci->localmem_base);
         return -1;
     }
     return 0;
@@ -871,7 +977,9 @@ static void ohci_td_pkt(const char *msg, const uint8_t *buf, size_t len)
  * Service a transport descriptor.
  * Returns nonzero to terminate processing of this endpoint.
  */
-static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
+static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed,
+                           uint32_t ed_addr,
+                           const OHCIMigratedPacket *resume)
 {
     int dir;
     size_t len = 0, pktlen = 0;
@@ -885,6 +993,7 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
     uint32_t addr;
     int flag_r;
     int completion;
+    int resume_length = resume ? resume->actual_length : 0;
 
     addr = ed->head & OHCI_DPTR_MASK;
     if (addr == 0) {
@@ -974,6 +1083,7 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
                 if (ohci_copy_td(ohci, &td, ohci->usb_buf, pktlen,
                                  DMA_DIRECTION_TO_DEVICE)) {
                     ohci_die(ohci);
+                    return 1;
                 }
             }
         }
@@ -985,15 +1095,30 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
     ohci_td_pkt("OUT", ohci->usb_buf, pktlen);
 
     if (completion) {
+        if (ohci->usb_packet.status == USB_RET_SUCCESS &&
+            (ohci->usb_packet.actual_length < 0 ||
+             (size_t)ohci->usb_packet.actual_length > pktlen)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "ohci: invalid completed packet length %d\n",
+                          ohci->usb_packet.actual_length);
+            ohci_die(ohci);
+            return 1;
+        }
         ohci->async_td = 0;
+        ohci->async_ed = 0;
         ohci->async_complete = false;
     } else {
-        dev = ohci_find_device(ohci, OHCI_BM(ed->flags, ED_FA));
+        dev = ohci_find_device(ohci, resume ? resume->device_address :
+                              OHCI_BM(ed->flags, ED_FA));
         if (dev == NULL) {
             trace_usb_ohci_td_dev_error();
             return 1;
         }
-        ep = usb_ep_get(dev, pid, OHCI_BM(ed->flags, ED_EN));
+        if (resume) {
+            pid = resume->pid;
+        }
+        ep = usb_ep_get(dev, pid, resume ? resume->endpoint :
+                        OHCI_BM(ed->flags, ED_EN));
         if (ohci->async_td) {
             /*
              * ??? The hardware should allow one active packet per
@@ -1004,15 +1129,28 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
             trace_usb_ohci_td_too_many_pending(ep->nr);
             return 1;
         }
-        usb_packet_setup(&ohci->usb_packet, pid, ep, 0, addr, !flag_r,
-                         OHCI_BM(td.flags, TD_DI) == 0);
-        usb_packet_addbuf(&ohci->usb_packet, ohci->usb_buf, pktlen);
+        usb_packet_setup(&ohci->usb_packet, pid, ep, 0, addr,
+                         resume ? resume->short_not_ok : !flag_r,
+                         resume ? resume->int_req :
+                                  OHCI_BM(td.flags, TD_DI) == 0);
+        usb_packet_addbuf(&ohci->usb_packet, ohci->usb_buf,
+                          resume ? resume->length : pktlen);
+        if (resume_length < 0 || (size_t)resume_length > pktlen) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "ohci: invalid resumed packet length %d\n",
+                          resume_length);
+            ohci_die(ohci);
+            return 1;
+        }
+        ohci->usb_packet.actual_length = resume_length;
         usb_handle_packet(dev, &ohci->usb_packet);
         trace_usb_ohci_td_packet_status(ohci->usb_packet.status);
 
         if (ohci->usb_packet.status == USB_RET_ASYNC) {
             usb_device_flush_ep_queue(dev, ep);
             ohci->async_td = addr;
+            ohci->async_ed = ed_addr;
+            ohci_capture_async_packet_metadata(ohci);
             return 1;
         }
     }
@@ -1027,6 +1165,7 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
             if (ohci_copy_td(ohci, &td, ohci->usb_buf, ret,
                              DMA_DIRECTION_FROM_DEVICE)) {
                 ohci_die(ohci);
+                return 1;
             }
             ohci_td_pkt("IN", ohci->usb_buf, pktlen);
         } else {
@@ -1144,10 +1283,7 @@ static int ohci_service_ed_list(OHCIState *ohci, uint32_t head)
             /* Cancel pending packets for ED that have been paused. */
             addr = ed.head & OHCI_DPTR_MASK;
             if (ohci->async_td && addr == ohci->async_td) {
-                usb_cancel_packet(&ohci->usb_packet);
-                ohci->async_td = 0;
-                usb_device_ep_stopped(ohci->usb_packet.ep->dev,
-                                      ohci->usb_packet.ep);
+                ohci_cancel_async_packet(ohci);
             }
             continue;
         }
@@ -1165,12 +1301,22 @@ static int ohci_service_ed_list(OHCIState *ohci, uint32_t head)
             active = 1;
 
             if ((ed.flags & OHCI_ED_F) == 0) {
-                if (ohci_service_td(ohci, &ed)) {
+                int stop = ohci_service_td(ohci, &ed, cur, NULL);
+
+                if (ohci->intr_status & OHCI_INTR_UE) {
+                    return active;
+                }
+                if (stop) {
                     break;
                 }
             } else {
                 /* Handle isochronous endpoints */
-                if (ohci_service_iso_td(ohci, &ed)) {
+                int stop = ohci_service_iso_td(ohci, &ed);
+
+                if (ohci->intr_status & OHCI_INTR_UE) {
+                    return active;
+                }
+                if (stop) {
                     break;
                 }
             }
@@ -1208,18 +1354,28 @@ static void ohci_sof(OHCIState *ohci)
 /* Process Control and Bulk lists. */
 static void ohci_process_lists(OHCIState *ohci)
 {
+    int active;
+
     if ((ohci->ctl & OHCI_CTL_CLE) && (ohci->status & OHCI_STATUS_CLF)) {
         if (ohci->ctrl_cur && ohci->ctrl_cur != ohci->ctrl_head) {
             trace_usb_ohci_process_lists(ohci->ctrl_head, ohci->ctrl_cur);
         }
-        if (!ohci_service_ed_list(ohci, ohci->ctrl_head)) {
+        active = ohci_service_ed_list(ohci, ohci->ctrl_head);
+        if (ohci->intr_status & OHCI_INTR_UE) {
+            return;
+        }
+        if (!active) {
             ohci->ctrl_cur = 0;
             ohci->status &= ~OHCI_STATUS_CLF;
         }
     }
 
     if ((ohci->ctl & OHCI_CTL_BLE) && (ohci->status & OHCI_STATUS_BLF)) {
-        if (!ohci_service_ed_list(ohci, ohci->bulk_head)) {
+        active = ohci_service_ed_list(ohci, ohci->bulk_head);
+        if (ohci->intr_status & OHCI_INTR_UE) {
+            return;
+        }
+        if (!active) {
             ohci->bulk_cur = 0;
             ohci->status &= ~OHCI_STATUS_BLF;
         }
@@ -1244,6 +1400,9 @@ static void ohci_frame_boundary(void *opaque)
 
         n = ohci->frame_number & 0x1f;
         ohci_service_ed_list(ohci, le32_to_cpu(hcca.intr[n]));
+        if (ohci->intr_status & OHCI_INTR_UE) {
+            return;
+        }
     }
 
     /* Cancel all pending packets if either of the lists has been disabled. */
@@ -1332,14 +1491,70 @@ static void ohci_set_frame_interval(OHCIState *ohci, uint16_t val)
     ohci->fi = val;
 }
 
-static void ohci_port_power(OHCIState *ohci, int i, int p)
+static void ohci_child_detach(USBPort *port, USBDevice *dev);
+
+static bool ohci_port_is_powered(const OHCIState *ohci, int i)
 {
-    if (p) {
-        ohci->rhport[i].ctrl |= OHCI_PORT_PPS;
+    return (ohci->rhdesc_a & OHCI_RHA_NPS) ||
+           (ohci->rhport[i].ctrl & OHCI_PORT_PPS);
+}
+
+static bool ohci_port_power(OHCIState *ohci, int i, bool powered)
+{
+    OHCIPort *port = &ohci->rhport[i];
+    USBDevice *dev = port->port.dev;
+    uint32_t old_state = port->ctrl;
+
+    if (powered) {
+        port->ctrl |= OHCI_PORT_PPS;
+        if (dev && dev->attached) {
+            if (!(port->ctrl & OHCI_PORT_CCS)) {
+                port->ctrl |= OHCI_PORT_CCS | OHCI_PORT_CSC;
+            }
+            if (dev->speed == USB_SPEED_LOW) {
+                port->ctrl |= OHCI_PORT_LSDA;
+            } else {
+                port->ctrl &= ~OHCI_PORT_LSDA;
+            }
+        }
     } else {
-        ohci->rhport[i].ctrl &= ~(OHCI_PORT_PPS | OHCI_PORT_CCS |
-                                  OHCI_PORT_PSS | OHCI_PORT_PRS);
+        if (dev && dev->attached) {
+            ohci_child_detach(&port->port, dev);
+        }
+        if (port->ctrl & OHCI_PORT_CCS) {
+            port->ctrl |= OHCI_PORT_CSC;
+        }
+        if (port->ctrl & OHCI_PORT_PES) {
+            port->ctrl |= OHCI_PORT_PESC;
+        }
+        port->ctrl &= ~(OHCI_PORT_PPS | OHCI_PORT_CCS |
+                        OHCI_PORT_PES | OHCI_PORT_PSS |
+                        OHCI_PORT_PRS | OHCI_PORT_LSDA);
     }
+
+    return old_state != port->ctrl;
+}
+
+static bool ohci_port_uses_global_power(const OHCIState *ohci, int port)
+{
+    uint32_t ppcm = 1U << (16 + port + 1);
+
+    if (ohci->rhdesc_a & OHCI_RHA_NPS) {
+        return false;
+    }
+    if (!(ohci->rhdesc_a & OHCI_RHA_PSM)) {
+        return true;
+    }
+    return !(ohci->rhdesc_b & ppcm);
+}
+
+static bool ohci_port_uses_individual_power(const OHCIState *ohci, int port)
+{
+    uint32_t ppcm = 1U << (16 + port + 1);
+
+    return !(ohci->rhdesc_a & OHCI_RHA_NPS) &&
+           (ohci->rhdesc_a & OHCI_RHA_PSM) &&
+           (ohci->rhdesc_b & ppcm);
 }
 
 /* Set HcControlRegister */
@@ -1404,6 +1619,7 @@ static uint32_t ohci_get_frame_remaining(OHCIState *ohci)
 /* Set root hub status */
 static void ohci_set_hub_status(OHCIState *ohci, uint32_t val)
 {
+    bool port_changed = false;
     uint32_t old_state;
 
     old_state = ohci->rhstatus;
@@ -1416,7 +1632,9 @@ static void ohci_set_hub_status(OHCIState *ohci, uint32_t val)
         int i;
 
         for (i = 0; i < ohci->num_ports; i++) {
-            ohci_port_power(ohci, i, 0);
+            if (ohci_port_uses_global_power(ohci, i)) {
+                port_changed |= ohci_port_power(ohci, i, false);
+            }
         }
         trace_usb_ohci_hub_power_down();
     }
@@ -1425,7 +1643,9 @@ static void ohci_set_hub_status(OHCIState *ohci, uint32_t val)
         int i;
 
         for (i = 0; i < ohci->num_ports; i++) {
-            ohci_port_power(ohci, i, 1);
+            if (ohci_port_uses_global_power(ohci, i)) {
+                port_changed |= ohci_port_power(ohci, i, true);
+            }
         }
         trace_usb_ohci_hub_power_up();
     }
@@ -1436,7 +1656,7 @@ static void ohci_set_hub_status(OHCIState *ohci, uint32_t val)
     if (val & OHCI_RHS_CRWE) {
         ohci->rhstatus &= ~OHCI_RHS_DRWE;
     }
-    if (old_state != ohci->rhstatus) {
+    if (old_state != ohci->rhstatus || port_changed) {
         ohci_set_interrupt(ohci, OHCI_INTR_RHSC);
     }
 }
@@ -1517,15 +1737,24 @@ static void ohci_port_set_status(OHCIState *ohci, int portnum, uint32_t val)
     }
 
     /* Invert order here to ensure in ambiguous case, device is powered up. */
-    if (val & OHCI_PORT_LSDA) {
+    if ((val & OHCI_PORT_LSDA) &&
+        ohci_port_uses_individual_power(ohci, portnum)) {
         ohci_port_power(ohci, portnum, 0);
     }
-    if (val & OHCI_PORT_PPS) {
+    if ((val & OHCI_PORT_PPS) &&
+        ohci_port_uses_individual_power(ohci, portnum)) {
         ohci_port_power(ohci, portnum, 1);
     }
     if (old_state != port->ctrl) {
         ohci_set_interrupt(ohci, OHCI_INTR_RHSC);
     }
+}
+
+static uint32_t ohci_rhdesc_b_rw_mask(const OHCIState *ohci)
+{
+    uint32_t ports = (1U << (ohci->num_ports + 1)) - 2;
+
+    return ports | (ports << 16);
 }
 
 static uint64_t ohci_mem_read(void *opaque,
@@ -1541,9 +1770,12 @@ static uint64_t ohci_mem_read(void *opaque,
         return 0xffffffff;
     } else if (addr >= 0x54 && addr < 0x54 + ohci->num_ports * 4) {
         /* HcRhPortStatus */
-        retval = ohci->rhport[(addr - 0x54) >> 2].ctrl | OHCI_PORT_PPS;
+        retval = ohci->rhport[(addr - 0x54) >> 2].ctrl;
         trace_usb_ohci_mem_port_read(size, "HcRhPortStatus", (addr - 0x50) >> 2,
                                      addr, addr >> 2, retval);
+    } else if (addr >= 0x60 && addr <= 0x6c && !ohci->pxa_extensions) {
+        trace_usb_ohci_mem_read_bad_offset(addr);
+        retval = UINT32_MAX;
     } else {
         switch (addr >> 2) {
         case 0: /* HcRevision */
@@ -1677,6 +1909,10 @@ static void ohci_mem_write(void *opaque,
         ohci_port_set_status(ohci, (addr - 0x54) >> 2, val);
         return;
     }
+    if (addr >= 0x60 && addr <= 0x6c && !ohci->pxa_extensions) {
+        trace_usb_ohci_mem_write_bad_offset(addr);
+        return;
+    }
 
     trace_usb_ohci_mem_write(size, ohci_reg_name(addr), addr, addr >> 2, val);
     switch (addr >> 2) {
@@ -1752,12 +1988,29 @@ static void ohci_mem_write(void *opaque,
         ohci->lst = val & 0xffff;
         break;
 
-    case 18: /* HcRhDescriptorA */
+    case 18: { /* HcRhDescriptorA */
+        bool port_changed = false;
+        uint32_t old_rhdesc_a = ohci->rhdesc_a;
+
         ohci->rhdesc_a &= ~OHCI_RHA_RW_MASK;
         ohci->rhdesc_a |= val & OHCI_RHA_RW_MASK;
+        if (!(old_rhdesc_a & OHCI_RHA_NPS) &&
+            (ohci->rhdesc_a & OHCI_RHA_NPS)) {
+            int i;
+
+            for (i = 0; i < ohci->num_ports; i++) {
+                port_changed |= ohci_port_power(ohci, i, true);
+            }
+        }
+        if (port_changed) {
+            ohci_set_interrupt(ohci, OHCI_INTR_RHSC);
+        }
         break;
+    }
 
     case 19: /* HcRhDescriptorB */
+        ohci->rhdesc_b &= ~ohci_rhdesc_b_rw_mask(ohci);
+        ohci->rhdesc_b |= val & ohci_rhdesc_b_rw_mask(ohci);
         break;
 
     case 20: /* HcRhStatus */
@@ -1803,6 +2056,13 @@ static void ohci_attach(USBPort *port1)
     OHCIPort *port = &s->rhport[port1->index];
     uint32_t old_state = port->ctrl;
 
+    trace_usb_ohci_port_attach(port1->index);
+
+    /* An unpowered switchable port does not expose the attached device. */
+    if (!ohci_port_is_powered(s, port1->index)) {
+        return;
+    }
+
     /* set connect status */
     port->ctrl |= OHCI_PORT_CCS | OHCI_PORT_CSC;
 
@@ -1818,8 +2078,6 @@ static void ohci_attach(USBPort *port1)
         ohci_set_interrupt(s, OHCI_INTR_RD);
     }
 
-    trace_usb_ohci_port_attach(port1->index);
-
     if (old_state != port->ctrl) {
         ohci_set_interrupt(s, OHCI_INTR_RHSC);
     }
@@ -1834,6 +2092,8 @@ static void ohci_child_detach(USBPort *port1, USBDevice *dev)
         ohci->usb_packet.ep->dev == dev) {
         usb_cancel_packet(&ohci->usb_packet);
         ohci->async_td = 0;
+        ohci->async_ed = 0;
+        ohci->async_complete = false;
     }
 }
 
@@ -1891,6 +2151,129 @@ static void ohci_async_complete_packet(USBPort *port, USBPacket *packet)
     trace_usb_ohci_async_complete();
     ohci->async_complete = true;
     ohci_process_lists(ohci);
+}
+
+/* Reconnect migrated child request state only long enough to cancel it. */
+static void ohci_rebuild_cancel_packet(OHCIState *ohci,
+                                       uint32_t td_addr,
+                                       const OHCIMigratedPacket *packet)
+{
+    USBEndpoint *ep;
+    USBDevice *dev;
+
+    if (packet->actual_length < 0 ||
+        (uint32_t)packet->actual_length > packet->length ||
+        packet->length > sizeof(ohci->usb_buf) ||
+        packet->endpoint > USB_MAX_ENDPOINTS ||
+        (packet->pid == USB_TOKEN_SETUP && packet->endpoint != 0) ||
+        (packet->pid != USB_TOKEN_IN &&
+         packet->pid != USB_TOKEN_OUT &&
+         packet->pid != USB_TOKEN_SETUP)) {
+        goto invalid;
+    }
+
+    dev = ohci_find_attached_device(ohci, packet->device_address);
+    if (!dev) {
+        goto invalid;
+    }
+    ep = usb_ep_get(dev, packet->pid, packet->endpoint);
+    usb_packet_setup(&ohci->usb_packet, packet->pid, ep, 0, td_addr,
+                     packet->short_not_ok, packet->int_req);
+    usb_packet_addbuf(&ohci->usb_packet, ohci->usb_buf, packet->length);
+    ohci->usb_packet.actual_length = packet->actual_length;
+    usb_handle_packet(dev, &ohci->usb_packet);
+    if (usb_packet_is_inflight(&ohci->usb_packet)) {
+        usb_cancel_packet(&ohci->usb_packet);
+    }
+    usb_device_ep_stopped(dev, ep);
+    ohci_clear_async_state(ohci);
+    return;
+
+invalid:
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "ohci: invalid quiesced transfer after migration\n");
+    ohci_clear_async_state(ohci);
+}
+
+static bool ohci_async_descriptors_match_packet(
+    OHCIState *ohci, const struct ohci_ed *ed, uint32_t td_addr,
+    const OHCIMigratedPacket *packet);
+
+static void ohci_rebuild_async_packet(OHCIState *ohci)
+{
+    OHCIMigratedPacket packet = {
+        .actual_length = ohci->migrate_packet_actual_length,
+        .pid = ohci->migrate_packet_pid,
+        .length = ohci->migrate_packet_length,
+        .device_address = ohci->migrate_device_address,
+        .endpoint = ohci->migrate_endpoint,
+        .short_not_ok = ohci->migrate_short_not_ok,
+        .int_req = ohci->migrate_int_req,
+    };
+    struct ohci_ed ed;
+    bool cancel = ohci->rebuild_cancel;
+    uint32_t ed_addr = ohci->rebuild_ed;
+    uint32_t td_addr = ohci->rebuild_td;
+
+    /* Reconstructed USBPacket state supersedes the migration staging area. */
+    ohci_clear_async_state(ohci);
+
+    if (ohci_read_ed(ohci, ed_addr, &ed)) {
+        ohci_rebuild_cancel_packet(ohci, td_addr, &packet);
+        ohci_die(ohci);
+        return;
+    }
+    if ((ed.head & OHCI_DPTR_MASK) != td_addr ||
+        (ed.flags & OHCI_ED_F)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "ohci: invalid live-transfer state after migration\n");
+        ohci_rebuild_cancel_packet(ohci, td_addr, &packet);
+        ohci_die(ohci);
+        return;
+    }
+
+    if (cancel || (ed.head & OHCI_ED_H) || (ed.flags & OHCI_ED_K) ||
+        !ohci_find_device(ohci, packet.device_address) ||
+        !ohci_async_descriptors_match_packet(ohci, &ed, td_addr,
+                                             &packet)) {
+        ohci_rebuild_cancel_packet(ohci, td_addr, &packet);
+        return;
+    }
+    ohci_service_td(ohci, &ed, ed_addr, &packet);
+    if (ohci->intr_status & OHCI_INTR_UE) {
+        return;
+    }
+    if (ohci_put_ed(ohci, ed_addr, &ed)) {
+        ohci_die(ohci);
+    }
+}
+
+static bool ohci_async_should_cancel_for_migration(OHCIState *ohci,
+                                                    uint32_t target_td,
+                                                    uint32_t target_ed);
+
+static void ohci_vm_state_change(void *opaque, bool running, RunState state)
+{
+    OHCIState *ohci = opaque;
+
+    if (!running &&
+        (state == RUN_STATE_SAVE_VM || state == RUN_STATE_FINISH_MIGRATE) &&
+        !ohci->rebuild_async &&
+        ohci->async_td &&
+        ohci_async_should_cancel_for_migration(ohci, ohci->async_td,
+                                                ohci->async_ed)) {
+        /* Do this before child USB VMState serializes a stale request. */
+        ohci_cancel_async_packet(ohci);
+    }
+
+    /*
+     * USBPacket contains host pointers and cannot be migrated.  Rebuild it
+     * from the still-active guest ED/TD before child USB devices resume.
+     */
+    if (running && ohci->rebuild_async) {
+        ohci->rebuild_async = false;
+        ohci_rebuild_async_packet(ohci);
+    }
 }
 
 static USBPortOps ohci_port_ops = {
@@ -1952,6 +2335,7 @@ void usb_ohci_init(OHCIState *ohci, DeviceState *dev, uint32_t num_ports,
         }
     } else {
         usb_bus_new(&ohci->bus, sizeof(ohci->bus), &ohci_bus_ops, dev);
+        ohci->owns_bus = true;
         for (i = 0; i < num_ports; i++) {
             usb_register_port(&ohci->bus, &ohci->rhport[i].port,
                               ohci, i, &ohci_port_ops,
@@ -1970,6 +2354,30 @@ void usb_ohci_init(OHCIState *ohci, DeviceState *dev, uint32_t num_ports,
 
     ohci->eof_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                    ohci_frame_boundary, ohci);
+    ohci->vmstate = qdev_add_vm_change_state_handler(dev,
+                                                     ohci_vm_state_change,
+                                                     NULL, ohci);
+}
+
+void usb_ohci_uninit(OHCIState *ohci)
+{
+    trace_usb_ohci_exit(ohci->name);
+    ohci_bus_stop(ohci);
+    ohci_stop_endpoints(ohci);
+
+    if (ohci->owns_bus) {
+        usb_bus_release(&ohci->bus);
+        ohci->owns_bus = false;
+    }
+    if (ohci->eof_timer) {
+        timer_free(ohci->eof_timer);
+        ohci->eof_timer = NULL;
+    }
+    if (ohci->vmstate) {
+        qemu_del_vm_change_state_handler(ohci->vmstate);
+        ohci->vmstate = NULL;
+    }
+    usb_packet_cleanup(&ohci->usb_packet);
 }
 
 /*
@@ -2012,10 +2420,449 @@ static const VMStateDescription vmstate_ohci_eof_timer = {
     },
 };
 
+static int ohci_pre_save(void *opaque)
+{
+    OHCIState *ohci = opaque;
+
+    if (!ohci->rebuild_async && ohci->async_td &&
+        ohci_async_should_cancel_for_migration(ohci, ohci->async_td,
+                                                ohci->async_ed)) {
+        /* Match source-side unlink, H/K, and list-disable cancellation. */
+        ohci_cancel_async_packet(ohci);
+    }
+
+    if (ohci->rebuild_async) {
+        /*
+         * The VM may migrate again before its first resume.  Materialize the
+         * staged transfer in the v1 fields and retain its loaded metadata;
+         * usb_packet has not been reconstructed yet.
+         */
+        ohci->async_td = ohci->rebuild_td;
+        ohci->async_ed = ohci->rebuild_ed;
+        ohci->async_complete = false;
+    } else if (ohci->async_td) {
+        ohci->migrate_packet_status = ohci->usb_packet.status;
+        ohci->migrate_packet_actual_length =
+            ohci->usb_packet.actual_length;
+    }
+    return 0;
+}
+
+static int ohci_pre_load(void *opaque)
+{
+    OHCIState *ohci = opaque;
+
+    /* Optional subsections and host-pointer state must not survive loadvm. */
+    ohci_bus_stop(ohci);
+    ohci_stop_endpoints(ohci);
+    return 0;
+}
+
+/* Read schedule links without changing controller-visible DMA error state. */
+static int ohci_peek_ed(OHCIState *ohci, uint32_t addr, struct ohci_ed *ed)
+{
+    uint32_t raw[4];
+    int i;
+
+    if (dma_memory_read(ohci->as, addr + ohci->localmem_base, raw,
+                        sizeof(raw), MEMTXATTRS_UNSPECIFIED)) {
+        return -EIO;
+    }
+    for (i = 0; i < ARRAY_SIZE(raw); i++) {
+        raw[i] = le32_to_cpu(raw[i]);
+    }
+    ed->flags = raw[0];
+    ed->tail = raw[1];
+    ed->head = raw[2];
+    ed->next = raw[3];
+    return 0;
+}
+
+static int ohci_peek_td(OHCIState *ohci, uint32_t addr, struct ohci_td *td)
+{
+    uint32_t raw[4];
+    int i;
+
+    if (dma_memory_read(ohci->as, addr + ohci->localmem_base, raw,
+                        sizeof(raw), MEMTXATTRS_UNSPECIFIED)) {
+        return -EIO;
+    }
+    for (i = 0; i < ARRAY_SIZE(raw); i++) {
+        raw[i] = le32_to_cpu(raw[i]);
+    }
+    td->flags = raw[0];
+    td->cbp = raw[1];
+    td->next = raw[2];
+    td->be = raw[3];
+    return 0;
+}
+
+static bool ohci_async_packet_from_descriptors(
+    OHCIState *ohci, const struct ohci_ed *ed, uint32_t td_addr,
+    OHCIMigratedPacket *packet)
+{
+    struct ohci_td td;
+    size_t len = 0;
+    size_t pktlen = 0;
+    int dir;
+    int pid;
+
+    if (ohci_peek_td(ohci, td_addr, &td)) {
+        return false;
+    }
+    dir = OHCI_BM(ed->flags, ED_D);
+    if (dir != OHCI_TD_DIR_OUT && dir != OHCI_TD_DIR_IN) {
+        dir = OHCI_BM(td.flags, TD_DP);
+    }
+    switch (dir) {
+    case OHCI_TD_DIR_IN:
+        pid = USB_TOKEN_IN;
+        break;
+    case OHCI_TD_DIR_OUT:
+        pid = USB_TOKEN_OUT;
+        break;
+    case OHCI_TD_DIR_SETUP:
+        if (OHCI_BM(ed->flags, ED_EN) > 0) {
+            return false;
+        }
+        pid = USB_TOKEN_SETUP;
+        break;
+    default:
+        return false;
+    }
+
+    if (td.cbp && td.be) {
+        if ((td.cbp & 0xfffff000) != (td.be & 0xfffff000)) {
+            len = (td.be & 0xfff) + 0x1001 - (td.cbp & 0xfff);
+        } else {
+            if (td.cbp - 1 > td.be) {
+                return false;
+            }
+            len = td.be - td.cbp + 1;
+        }
+        len = MIN(len, sizeof(ohci->usb_buf));
+        pktlen = len;
+        if (dir != OHCI_TD_DIR_IN) {
+            pktlen = (ed->flags & OHCI_ED_MPS_MASK) >> OHCI_ED_MPS_SHIFT;
+            if (!pktlen) {
+                return false;
+            }
+            pktlen = MIN(pktlen, len);
+        }
+    }
+
+    packet->actual_length = 0;
+    packet->pid = pid;
+    packet->length = pktlen;
+    packet->device_address = OHCI_BM(ed->flags, ED_FA);
+    packet->endpoint = OHCI_BM(ed->flags, ED_EN);
+    packet->short_not_ok = !(td.flags & OHCI_TD_R);
+    packet->int_req = OHCI_BM(td.flags, TD_DI) == 0;
+    return true;
+}
+
+static bool ohci_async_descriptors_match_packet(
+    OHCIState *ohci, const struct ohci_ed *ed, uint32_t td_addr,
+    const OHCIMigratedPacket *packet)
+{
+    OHCIMigratedPacket derived;
+
+    if (!ohci_async_packet_from_descriptors(ohci, ed, td_addr, &derived)) {
+        return false;
+    }
+    return packet->pid == derived.pid &&
+           packet->length == derived.length &&
+           packet->device_address == derived.device_address &&
+           packet->endpoint == derived.endpoint &&
+           packet->short_not_ok == derived.short_not_ok &&
+           packet->int_req == derived.int_req &&
+           packet->actual_length >= 0 &&
+           (uint32_t)packet->actual_length <= packet->length;
+}
+
+static int ohci_find_async_ed_in_list(OHCIState *ohci, uint32_t head,
+                                      uint32_t target_td, uint32_t target_ed,
+                                      uint32_t *found_ed)
+{
+    struct ohci_ed ed;
+    uint32_t cur, link_cnt = 0;
+
+    for (cur = head; cur && link_cnt++ < ED_LINK_LIMIT;
+         cur = ed.next & OHCI_EDPTR_MASK) {
+        if (ohci_peek_ed(ohci, cur, &ed)) {
+            return -EIO;
+        }
+        if ((ed.head & OHCI_DPTR_MASK) == target_td &&
+            !(ed.flags & OHCI_ED_F) &&
+            (!target_ed || cur == target_ed)) {
+            *found_ed = cur;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+typedef enum OHCIAsyncScheduleKind {
+    OHCI_ASYNC_SCHEDULE_NONE,
+    OHCI_ASYNC_SCHEDULE_CONTROL,
+    OHCI_ASYNC_SCHEDULE_BULK,
+    OHCI_ASYNC_SCHEDULE_PERIODIC,
+} OHCIAsyncScheduleKind;
+
+/*
+ * Locate a live general TD through the control, bulk, or periodic roots.
+ * target_ed is zero for legacy streams that did not serialize the owning ED.
+ */
+static int ohci_find_scheduled_async_ed(OHCIState *ohci, uint32_t target_td,
+                                        uint32_t target_ed,
+                                        uint32_t *found_ed,
+                                        OHCIAsyncScheduleKind *kind)
+{
+    uint32_t intr[32];
+    int i, ret;
+
+    *kind = OHCI_ASYNC_SCHEDULE_NONE;
+    ret = ohci_find_async_ed_in_list(ohci, ohci->ctrl_head, target_td,
+                                     target_ed, found_ed);
+    if (ret) {
+        if (ret > 0) {
+            *kind = OHCI_ASYNC_SCHEDULE_CONTROL;
+        }
+        return ret;
+    }
+    ret = ohci_find_async_ed_in_list(ohci, ohci->bulk_head, target_td,
+                                     target_ed, found_ed);
+    if (ret) {
+        if (ret > 0) {
+            *kind = OHCI_ASYNC_SCHEDULE_BULK;
+        }
+        return ret;
+    }
+
+    if (!ohci->hcca) {
+        return 0;
+    }
+    if (dma_memory_read(ohci->as, ohci->hcca + ohci->localmem_base, intr,
+                        sizeof(intr), MEMTXATTRS_UNSPECIFIED)) {
+        return -EIO;
+    }
+    for (i = 0; i < ARRAY_SIZE(intr); i++) {
+        ret = ohci_find_async_ed_in_list(ohci, le32_to_cpu(intr[i]),
+                                         target_td, target_ed, found_ed);
+        if (ret) {
+            if (ret > 0) {
+                *kind = OHCI_ASYNC_SCHEDULE_PERIODIC;
+            }
+            return ret;
+        }
+    }
+    return 0;
+}
+
+static bool ohci_async_schedule_pending_disable(
+    const OHCIState *ohci, OHCIAsyncScheduleKind kind)
+{
+    switch (kind) {
+    case OHCI_ASYNC_SCHEDULE_CONTROL:
+        return (ohci->old_ctl & OHCI_CTL_CLE) &&
+               !(ohci->ctl & OHCI_CTL_CLE);
+    case OHCI_ASYNC_SCHEDULE_BULK:
+        return (ohci->old_ctl & OHCI_CTL_BLE) &&
+               !(ohci->ctl & OHCI_CTL_BLE);
+    default:
+        /* The runtime cancellation path does not cover the periodic list. */
+        return false;
+    }
+}
+
+static bool ohci_async_should_cancel_for_migration(OHCIState *ohci,
+                                                    uint32_t target_td,
+                                                    uint32_t target_ed)
+{
+    OHCIMigratedPacket packet = {
+        .actual_length = ohci->usb_packet.actual_length,
+        .pid = ohci->usb_packet.pid,
+        .length = ohci->usb_packet.iov.size,
+        .device_address = ohci->usb_packet.ep ?
+                          ohci->usb_packet.ep->dev->addr : 0,
+        .endpoint = ohci->usb_packet.ep ? ohci->usb_packet.ep->nr : 0,
+        .short_not_ok = ohci->usb_packet.short_not_ok,
+        .int_req = ohci->usb_packet.int_req,
+    };
+    OHCIAsyncScheduleKind kind;
+    struct ohci_ed ed;
+    uint32_t found_ed;
+    int ret;
+
+    ret = ohci_find_scheduled_async_ed(ohci, target_td, target_ed,
+                                        &found_ed, &kind);
+    if (!ohci->usb_packet.ep ||
+        ohci_find_device(ohci, packet.device_address) !=
+        ohci->usb_packet.ep->dev || ret <= 0 ||
+        ohci_peek_ed(ohci, found_ed, &ed)) {
+        /* Catch guest unlink races before child USB state is serialized. */
+        return true;
+    }
+    return !ohci_async_descriptors_match_packet(ohci, &ed, target_td,
+                                                 &packet) ||
+           (ed.head & OHCI_ED_H) || (ed.flags & OHCI_ED_K) ||
+           ohci_async_schedule_pending_disable(ohci, kind);
+}
+
+static int ohci_post_load(void *opaque, int version_id)
+{
+    OHCIState *ohci = opaque;
+    bool has_async_metadata = ohci->migrate_async_state_loaded;
+
+    ohci->rebuild_async = false;
+    ohci->migrate_async_state_loaded = false;
+    if (ohci->async_td) {
+        OHCIAsyncScheduleKind kind;
+        struct ohci_ed ed;
+        bool cancel = false;
+        uint32_t found_ed = 0;
+        int ret;
+
+        ret = ohci_find_scheduled_async_ed(ohci, ohci->async_td,
+                                            has_async_metadata ?
+                                            ohci->async_ed : 0,
+                                            &found_ed, &kind);
+        if (ret <= 0 && has_async_metadata && ohci->async_ed &&
+            !ohci_peek_ed(ohci, ohci->async_ed, &ed) &&
+            (ed.head & OHCI_DPTR_MASK) == ohci->async_td &&
+            !(ed.flags & OHCI_ED_F)) {
+            /* A peer may have serialized a guest unlink race. */
+            found_ed = ohci->async_ed;
+            kind = OHCI_ASYNC_SCHEDULE_NONE;
+            cancel = true;
+            ret = 1;
+        }
+        if (ret <= 0) {
+            if (!ohci->async_complete) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "ohci: active migrated TD has no valid ED\n");
+                ohci_clear_async_state(ohci);
+                return -EINVAL;
+            }
+            /* A completed packet has no child request left to reconnect. */
+            ohci_clear_async_state(ohci);
+        } else if (ohci_peek_ed(ohci, found_ed, &ed)) {
+            if (!ohci->async_complete) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "ohci: cannot read active migrated ED\n");
+                ohci_clear_async_state(ohci);
+                return -EINVAL;
+            }
+            ohci_clear_async_state(ohci);
+        } else {
+            OHCIMigratedPacket packet = {
+                .actual_length = ohci->migrate_packet_actual_length,
+                .pid = ohci->migrate_packet_pid,
+                .length = ohci->migrate_packet_length,
+                .device_address = ohci->migrate_device_address,
+                .endpoint = ohci->migrate_endpoint,
+                .short_not_ok = ohci->migrate_short_not_ok,
+                .int_req = ohci->migrate_int_req,
+            };
+
+            ohci->async_ed = found_ed;
+            cancel |= (ed.head & OHCI_ED_H) || (ed.flags & OHCI_ED_K) ||
+                      ohci_async_schedule_pending_disable(ohci, kind);
+            if (!has_async_metadata) {
+                /* Legacy streams carried neither status nor partial length. */
+                if (!ohci_async_packet_from_descriptors(
+                        ohci, &ed, ohci->async_td, &packet)) {
+                    ohci_clear_async_state(ohci);
+                    return -EINVAL;
+                }
+                ohci->migrate_packet_status = USB_RET_SUCCESS;
+                ohci->migrate_packet_actual_length = packet.actual_length;
+                ohci->migrate_packet_pid = packet.pid;
+                ohci->migrate_packet_length = packet.length;
+                ohci->migrate_device_address = packet.device_address;
+                ohci->migrate_endpoint = packet.endpoint;
+                ohci->migrate_short_not_ok = packet.short_not_ok;
+                ohci->migrate_int_req = packet.int_req;
+            } else if (!ohci_async_descriptors_match_packet(
+                           ohci, &ed, ohci->async_td, &packet)) {
+                /* Reconnect the serialized child request only to cancel it. */
+                cancel = true;
+            }
+            if (ohci->async_complete) {
+                if (cancel) {
+                    /* No child request remains to reconnect or cancel. */
+                    ohci_clear_async_state(ohci);
+                } else {
+                    /* Normal list traversal retires the completed packet. */
+                    ohci->usb_packet.status = ohci->migrate_packet_status;
+                    ohci->usb_packet.actual_length =
+                        ohci->migrate_packet_actual_length;
+                }
+            } else {
+                /* Reconnect, or defensively reconnect only to cancel. */
+                ohci->rebuild_async = true;
+                ohci->rebuild_cancel = cancel;
+                ohci->rebuild_td = ohci->async_td;
+                ohci->rebuild_ed = ohci->async_ed;
+                ohci->async_td = 0;
+                ohci->async_ed = 0;
+                ohci->async_complete = false;
+            }
+        }
+    }
+    if (ohci->rhdesc_a & OHCI_RHA_NPS) {
+        int i;
+
+        for (i = 0; i < ohci->num_ports; i++) {
+            ohci->rhport[i].ctrl |= OHCI_PORT_PPS;
+        }
+    }
+    ohci_intr_update(ohci);
+    return 0;
+}
+
+static bool ohci_async_rebuild_needed(void *opaque)
+{
+    OHCIState *ohci = opaque;
+
+    return ohci->migrate_async_state && ohci->async_td != 0;
+}
+
+static int ohci_async_rebuild_post_load(void *opaque, int version_id)
+{
+    OHCIState *ohci = opaque;
+
+    ohci->migrate_async_state_loaded = true;
+    return 0;
+}
+
+static const VMStateDescription vmstate_ohci_async_rebuild = {
+    .name = "ohci-core/async-rebuild",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ohci_async_rebuild_needed,
+    .post_load = ohci_async_rebuild_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(async_ed, OHCIState),
+        VMSTATE_INT32(migrate_packet_status, OHCIState),
+        VMSTATE_INT32(migrate_packet_actual_length, OHCIState),
+        VMSTATE_INT32(migrate_packet_pid, OHCIState),
+        VMSTATE_UINT32(migrate_packet_length, OHCIState),
+        VMSTATE_UINT8(migrate_device_address, OHCIState),
+        VMSTATE_UINT8(migrate_endpoint, OHCIState),
+        VMSTATE_BOOL(migrate_short_not_ok, OHCIState),
+        VMSTATE_BOOL(migrate_int_req, OHCIState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 const VMStateDescription vmstate_ohci_state = {
     .name = "ohci-core",
     .version_id = 1,
     .minimum_version_id = 1,
+    .pre_save = ohci_pre_save,
+    .pre_load = ohci_pre_load,
+    .post_load = ohci_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_INT64(sof_time, OHCIState),
         VMSTATE_UINT32(ctl, OHCIState),
@@ -2055,6 +2902,7 @@ const VMStateDescription vmstate_ohci_state = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_ohci_eof_timer,
+        &vmstate_ohci_async_rebuild,
         NULL
     }
 };

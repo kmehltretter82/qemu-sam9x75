@@ -81,22 +81,8 @@ static void usb_ohci_realize_pci(PCIDevice *dev, Error **errp)
 static void usb_ohci_exit(PCIDevice *dev)
 {
     OHCIPCIState *ohci = PCI_OHCI(dev);
-    OHCIState *s = &ohci->state;
 
-    trace_usb_ohci_exit(s->name);
-    ohci_bus_stop(s);
-
-    if (s->async_td) {
-        usb_cancel_packet(&s->usb_packet);
-        s->async_td = 0;
-    }
-    ohci_stop_endpoints(s);
-
-    if (!ohci->masterbus) {
-        usb_bus_release(&s->bus);
-    }
-
-    timer_free(s->eof_timer);
+    usb_ohci_uninit(&ohci->state);
 }
 
 static void usb_ohci_reset_pci(DeviceState *d)
@@ -112,6 +98,8 @@ static const Property ohci_pci_properties[] = {
     DEFINE_PROP_STRING("masterbus", OHCIPCIState, masterbus),
     DEFINE_PROP_UINT32("num-ports", OHCIPCIState, num_ports, 3),
     DEFINE_PROP_UINT32("firstport", OHCIPCIState, firstport, 0),
+    DEFINE_PROP_BOOL("x-migrate-async-state", OHCIPCIState,
+                     state.migrate_async_state, false),
 };
 
 static const VMStateDescription vmstate_ohci = {
