@@ -380,6 +380,7 @@ USBDevice *usb_find_device(USBPort *port, uint8_t addr)
 static void usb_process_one(USBPacket *p)
 {
     USBDevice *dev = p->ep->dev;
+    USBDeviceClass *klass = USB_DEVICE_GET_CLASS(dev);
     bool nak;
 
     /*
@@ -389,6 +390,23 @@ static void usb_process_one(USBPacket *p)
      */
     nak = (p->status == USB_RET_NAK);
     p->status = USB_RET_SUCCESS;
+
+    if (klass->handle_packet) {
+        /*
+         * A parameterized control packet represents an entire control
+         * transfer.  A device-controller model needs the individual SETUP,
+         * data, and status tokens so guest software can service each stage.
+         */
+        if (p->parameter) {
+            p->status = USB_RET_STALL;
+            return;
+        }
+        if (!nak) {
+            usb_pcap_data(p, true);
+        }
+        klass->handle_packet(dev, p);
+        return;
+    }
 
     if (p->ep->nr == 0) {
         /* control pipe */

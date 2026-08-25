@@ -301,8 +301,27 @@ struct USBDeviceClass {
     void (*handle_reset)(USBDevice *dev);
 
     /*
+     * Process a raw USBPacket without generic control-transfer handling.
+     * Device-controller models use this callback when the guest, rather than
+     * the emulated USB device, implements endpoint zero.  SETUP, IN, and OUT
+     * packets for every endpoint are delivered unchanged.
+     *
+     * The callback has the same completion rules as handle_data(): it stores
+     * a USB_RET_* value in p->status and the transferred byte count in
+     * p->actual_length.  Returning USB_RET_ASYNC is supported.  Parameterized
+     * control packets are completed with USB_RET_STALL instead because they
+     * do not expose the individual endpoint-zero token stages.
+     * Raw-packet devices must leave endpoint pipelining disabled because its
+     * input aggregation deliberately operates above the packet level.
+     *
+     * When this callback is NULL, the existing generic endpoint-zero state
+     * machine and handle_control()/handle_data() callbacks are used.
+     */
+    void (*handle_packet)(USBDevice *dev, USBPacket *p);
+
+    /*
      * Process control request.
-     * Called from handle_packet().
+     * Called from usb_handle_packet().
      *
      * Status gets stored in p->status, and if p->status == USB_RET_SUCCESS
      * then the number of bytes transferred is stored in p->actual_length
@@ -312,7 +331,7 @@ struct USBDeviceClass {
 
     /*
      * Process data transfers (both BULK and ISOC).
-     * Called from handle_packet().
+     * Called from usb_handle_packet().
      *
      * Status gets stored in p->status, and if p->status == USB_RET_SUCCESS
      * then the number of bytes transferred is stored in p->actual_length
