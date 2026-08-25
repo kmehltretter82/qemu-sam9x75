@@ -113,6 +113,11 @@ static void sam9x7_set_ebi_assignment(void *opaque, int n, int level)
     }
 }
 
+static void sam9x7_uhphs_ohci_dma_error(void *opaque, dma_addr_t addr)
+{
+    at91_uhphs_ehci_record_dma_error(opaque, addr);
+}
+
 static void sam9x7_realize(DeviceState *dev, Error **errp)
 {
     SAM9X7State *s = SAM9X7(dev);
@@ -136,6 +141,14 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     static const unsigned int sdmmc_irq[] = { 12, 26 };
     static const unsigned int gmac_irq[SAM9X7_NUM_GMAC_QUEUES] = {
         24, 60, 61, 62, 63, 64,
+    };
+    static const hwaddr mcan_base[SAM9X7_NUM_MCAN] = {
+        SAM9X7_MCAN0_BASE,
+        SAM9X7_MCAN1_BASE,
+    };
+    static const unsigned int mcan_irq[SAM9X7_NUM_MCAN][2] = {
+        { 29, 68 },
+        { 30, 69 },
     };
     unsigned int i;
 
@@ -189,6 +202,12 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     }
     qdev_connect_gpio_out(DEVICE(&s->ebi_irq), 0,
                           qdev_get_gpio_in(DEVICE(&s->aic), 49));
+
+    if (!qdev_realize(DEVICE(&s->uhphs_irq), NULL, errp)) {
+        return;
+    }
+    qdev_connect_gpio_out(DEVICE(&s->uhphs_irq), 0,
+                          qdev_get_gpio_in(DEVICE(&s->aic), 22));
 
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->sysc), errp)) {
         return;
@@ -372,6 +391,33 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(s->memory, SAM9X7_SFR_BASE, mr);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->sfr), 0,
                        qdev_get_gpio_in(DEVICE(&s->sys_irq), 4));
+
+    object_property_set_bool(OBJECT(&s->uhphs_ehci), "companion-enable",
+                             true, &error_abort);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->uhphs_ehci), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->uhphs_ehci), 0);
+    memory_region_add_subregion(&s->uhphs_ehci_window, 0, mr);
+    memory_region_add_subregion(s->memory, SAM9X7_UHPHS_EHCI_BASE,
+                                &s->uhphs_ehci_window);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->uhphs_ehci), 0,
+                       qdev_get_gpio_in(DEVICE(&s->uhphs_irq), 0));
+
+    object_property_set_str(OBJECT(&s->uhphs_ohci), "masterbus",
+                            s->uhphs_ehci.parent_obj.ehci.bus.qbus.name,
+                            &error_abort);
+    object_property_set_uint(OBJECT(&s->uhphs_ohci), "num-ports", 3,
+                             &error_abort);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->uhphs_ohci), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->uhphs_ohci), 0);
+    memory_region_add_subregion(&s->uhphs_ohci_window, 0, mr);
+    memory_region_add_subregion(s->memory, SAM9X7_UHPHS_OHCI_BASE,
+                                &s->uhphs_ohci_window);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->uhphs_ohci), 0,
+                       qdev_get_gpio_in(DEVICE(&s->uhphs_irq), 1));
 
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->mpddrc), errp)) {
         return;
@@ -580,6 +626,27 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion_overlap(s->memory, SAM9X7_BOOT_BASE,
                                         &s->boot_sram_alias, 1);
 
+    /* Both controllers address the same 64 KiB SRAM0 from offset zero. */
+    for (i = 0; i < ARRAY_SIZE(s->mcan); i++) {
+        object_property_set_link(OBJECT(&s->mcan[i]), "message-ram",
+                                 OBJECT(&s->sram0), &error_abort);
+        if (s->canbus[i]) {
+            object_property_set_link(OBJECT(&s->mcan[i]), "canbus",
+                                     OBJECT(s->canbus[i]), &error_abort);
+        }
+        if (!sysbus_realize(SYS_BUS_DEVICE(&s->mcan[i]), errp)) {
+            return;
+        }
+        mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->mcan[i]), 0);
+        memory_region_add_subregion(s->memory, mcan_base[i], mr);
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->mcan[i]), 0,
+                           qdev_get_gpio_in(DEVICE(&s->aic),
+                                            mcan_irq[i][0]));
+        sysbus_connect_irq(SYS_BUS_DEVICE(&s->mcan[i]), 1,
+                           qdev_get_gpio_in(DEVICE(&s->aic),
+                                            mcan_irq[i][1]));
+    }
+
     qdev_connect_gpio_out_named(DEVICE(&s->matrix), "cpu-remap", 0,
         qdev_get_gpio_in_named(dev, "boot-remap", 0));
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->matrix), errp)) {
@@ -626,6 +693,7 @@ static void sam9x7_init(Object *obj)
     static const unsigned int pit64b_pid[] = { 37, 58 };
     static const unsigned int pio_pid[] = { 2, 3, 4, 44 };
     static const unsigned int sdmmc_pid[] = { 12, 26 };
+    static const unsigned int mcan_pid[SAM9X7_NUM_MCAN] = { 29, 30 };
     static const uint32_t pio_valid_mask[] = {
         UINT32_MAX,
         0x07ffffff,
@@ -660,6 +728,13 @@ static void sam9x7_init(Object *obj)
                             "ebi-assignment",
                             SAM9X7_NUM_EBI_ASSIGNMENTS);
 
+    memory_region_init(&s->uhphs_ohci_window, obj,
+                       "sam9x7.uhphs-ohci-window",
+                       SAM9X7_UHPHS_WINDOW_SIZE);
+    memory_region_init(&s->uhphs_ehci_window, obj,
+                       "sam9x7.uhphs-ehci-window",
+                       SAM9X7_UHPHS_WINDOW_SIZE);
+
     object_initialize_child(obj, "cpu", &s->cpu,
                             ARM_CPU_TYPE_NAME("arm926"));
     object_property_set_bool(OBJECT(&s->cpu), "vfp", false, &error_abort);
@@ -675,6 +750,9 @@ static void sam9x7_init(Object *obj)
                             &error_abort);
     object_initialize_child(obj, "ebi-irq", &s->ebi_irq, TYPE_OR_IRQ);
     object_property_set_int(OBJECT(&s->ebi_irq), "num-lines", 2,
+                            &error_abort);
+    object_initialize_child(obj, "uhphs-irq", &s->uhphs_irq, TYPE_OR_IRQ);
+    object_property_set_int(OBJECT(&s->uhphs_irq), "num-lines", 2,
                             &error_abort);
 
     s->main_xtal = qdev_init_clock_out(DEVICE(s), "main-xtal");
@@ -782,6 +860,13 @@ static void sam9x7_init(Object *obj)
 
     object_initialize_child(obj, "sfr", &s->sfr, TYPE_AT91_SFR);
 
+    object_initialize_child(obj, "uhphs-ehci", &s->uhphs_ehci,
+                            TYPE_AT91_UHPHS_EHCI);
+    object_initialize_child(obj, "uhphs-ohci", &s->uhphs_ohci,
+                            TYPE_AT91_UHPHS_OHCI);
+    s->uhphs_ohci.ohci.dma_error_cb = sam9x7_uhphs_ohci_dma_error;
+    s->uhphs_ohci.ohci.dma_error_opaque = &s->uhphs_ehci;
+
     object_initialize_child(obj, "mpddrc", &s->mpddrc, TYPE_AT91_MPDDRC);
 
     object_initialize_child(obj, "pmecc", &s->pmecc, TYPE_AT91_PMECC);
@@ -802,6 +887,20 @@ static void sam9x7_init(Object *obj)
     qdev_prop_set_uint32(DEVICE(&s->gmac), "phy-id", 0x00221650);
     qdev_prop_set_uint8(DEVICE(&s->gmac), "num-priority-queues",
                        SAM9X7_NUM_GMAC_QUEUES);
+
+    for (i = 0; i < ARRAY_SIZE(s->mcan); i++) {
+        g_autofree char *name = g_strdup_printf("mcan[%u]", i);
+        g_autofree char *pclk_name =
+            g_strdup_printf("pclk[%u]", mcan_pid[i]);
+        g_autofree char *gclk_name =
+            g_strdup_printf("gclk[%u]", mcan_pid[i]);
+
+        object_initialize_child(obj, name, &s->mcan[i], TYPE_BOSCH_M_CAN);
+        qdev_connect_clock_in(DEVICE(&s->mcan[i]), "hclk",
+                             qdev_get_clock_out(DEVICE(&s->pmc), pclk_name));
+        qdev_connect_clock_in(DEVICE(&s->mcan[i]), "cclk",
+                             qdev_get_clock_out(DEVICE(&s->pmc), gclk_name));
+    }
 
     for (i = 0; i < ARRAY_SIZE(s->flexcom); i++) {
         AT91SPIState *spi = i < ARRAY_SIZE(s->spi) ? &s->spi[i] : NULL;
@@ -902,6 +1001,10 @@ static const Property sam9x7_properties[] = {
                      MemoryRegion *),
     DEFINE_PROP_LINK("ddr-memory", SAM9X7State, ddr_memory,
                      TYPE_MEMORY_REGION, MemoryRegion *),
+    DEFINE_PROP_LINK("canbus0", SAM9X7State, canbus[0], TYPE_CAN_BUS,
+                     CanBusState *),
+    DEFINE_PROP_LINK("canbus1", SAM9X7State, canbus[1], TYPE_CAN_BUS,
+                     CanBusState *),
 };
 
 static void sam9x7_class_init(ObjectClass *klass, const void *data)

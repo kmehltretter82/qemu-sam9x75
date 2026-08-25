@@ -349,8 +349,21 @@ Support matrix
        to every queue.  LAN8840 MMD/RGMII delay registers, PHY reset-value
        fidelity, checksum corner cases, filtering and PTP/TSN remain.
    * - USB host and device
-     - Missing
-     - OHCI, EHCI, UDPHS, port power, hotplug, gadget mode and SAM-BA path.
+     - Initial
+     - UHPHS exposes the documented 1 MiB OHCI and EHCI windows, three
+       companion ports and their shared AIC source 22.  Tests cover host
+       hotplug, EHCI/OHCI ownership handoff, all OHCI root-hub power modes,
+       EHCI frame-list sizes, descriptor and payload DMA faults, reset,
+       interrupt reconstruction and same-build controller migration.  OHCI
+       migration carries partial asynchronous-packet metadata, validates its
+       owning schedule and cancels a guest unlink, halted/skipped ED or pending
+       control/bulk-list disable before child-device state is saved.  The
+       destination reconstruction path is exercised with a real asynchronous
+       ``usb-storage`` WRITE held at a retryable block error across live
+       migration, then resumed through a successful mass-storage status
+       packet.  Physical-board host-controller reset, power and DMA behavior
+       has not yet been compared.  UDPHS, gadget mode and the SAM-BA device
+       path remain missing.
    * - I2C board devices
      - Initial
      - The exact MCP16502TAB-E/S8B PMIC is present on FLEXCOM6 with OTP
@@ -402,8 +415,24 @@ Support matrix
        QEMU audio-backend output, exact serial framing, underrun behavior and
        the analog output path remain.
    * - CAN FD
-     - Missing
-     - Two Bosch M_CAN instances, shared message RAM and CAN bus backends.
+     - Initial
+     - Both Bosch M_CAN instances are mapped with their peripheral and generic
+       clocks, AIC sources 29/30 and 68/69, shared SRAM0 message RAM and
+       independent QEMU CAN-bus links.  Classic CAN and CAN FD/BRS transmit,
+       receive FIFO 0, transmit events, internal loopback, interrupt routing,
+       clock gating, reset and migration have qtests, including traffic
+       between the two controllers.  Acceptance filters, FIFO 1, dedicated
+       receive buffers, bus-error confinement/retry, bit-level arbitration and
+       precise timestamp-unit behavior remain incomplete.  A Linux
+       7.2.0-rc7-next-20260814 guest with a DT overlay probes ``can0`` and
+       ``can1`` and passes bidirectional
+       CAN FD/BRS traffic (including a 64-byte frame) plus classic CAN traffic
+       at 500 kbit/s nominal and 2 Mbit/s data rates.  The upstream Curiosity
+       board DTS leaves both CAN nodes disabled, so normal use still needs an
+       overlay or alternate DT.  Reset constants, physical interrupt behavior
+       and external-bus operation remain for board validation; that work needs
+       the appropriate header pinmux and a CAN transceiver rather than a direct
+       connection to the SoC pins.
    * - Crypto, TRNG, OTP and PUF
      - Initial
      - AES has 128/192/256-bit keys; ECB, CBC, OFB, CFB8/16/32/64/128, CTR,
@@ -573,10 +602,13 @@ phase green merely by avoiding it in the device tree.
    erratum on top of the modeled reset and SRAM remap path.  Prove cold boot
    from SD, QSPI NOR and raw NAND without using ``-kernel`` as a ROM
    substitute.
-#. **Add major external interfaces.**  Implement OHCI/EHCI/UDPHS with board
-   power and hotplug wiring, then both M_CAN instances and their shared SRAM.
-   Prove host storage/input, gadget/SAM-BA and CAN-FD traffic with existing
-   QEMU USB and CAN backends.
+#. **Complete major external interfaces.**  Prove the initial OHCI/EHCI model
+   with unmodified Linux host storage and input, then compare reset, port-power,
+   hotplug, DMA-error and interrupt behavior with the board.  Implement UDPHS
+   and prove gadget/SAM-BA operation.  Extend the initial M_CAN model with
+   acceptance filters, FIFO 1, dedicated receive buffers, error confinement,
+   retry and timestamp behavior; keep the Linux CAN-FD/QEMU-backend regression
+   passing and compare it against the physical controllers.
 #. **Complete high-bandwidth and security blocks.**  Add XLCDC, GFX2D, ISC,
    CSI2DC, MIPI CSI/DSI PHY and LVDS endpoints, complete the initial OTPC
    model, and add PUF.  Close documented crypto, TRNG, audio and GEM/PTP/TSN
@@ -606,6 +638,27 @@ are FLEXCOM0 through FLEXCOM12 respectively, so FLEXCOM0 can instead be used
 as the interactive character backend with::
 
   qemu-system-arm -M sam9x75-curiosity -serial null -serial stdio
+
+The M_CAN controllers are disconnected from an external CAN network unless a
+CAN bus is supplied.  To place both controllers on one emulated network, use::
+
+  qemu-system-arm \
+    -object can-bus,id=canbus \
+    -M sam9x75-curiosity,canbus0=canbus,canbus1=canbus \
+    -nographic
+
+On Linux hosts that network can also be connected to a SocketCAN interface
+such as ``vcan0``::
+
+  qemu-system-arm \
+    -object can-bus,id=canbus \
+    -object can-host-socketcan,id=canhost,if=vcan0,canbus=canbus \
+    -M sam9x75-curiosity,canbus0=canbus,canbus1=canbus \
+    -nographic
+
+USB keyboard, storage and other standard QEMU USB devices can attach to the
+UHPHS host ports.  The USB device controller is not yet present, so this does
+not provide a gadget or SAM-BA device-mode connection.
 
 The physical OTPC array is blank and private to the VM unless a backing image
 is selected.  For example, create an exactly 10 KiB blank image and attach it

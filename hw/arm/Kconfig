@@ -212,6 +212,7 @@ config SAM9X7
     select AT91_WDT
     select AT91_TWI
     select AT24C
+    select CAN_MCAN
     select CADENCE
     select LED
     select MCP16502
@@ -220,6 +221,8 @@ config SAM9X7
     select SSI_M25P80
     select SSI_SD
     select STELLARIS_GAMEPAD
+    select USB_EHCI_SYSBUS
+    select USB_OHCI_SYSBUS
 
 config SBSA_REF
     bool

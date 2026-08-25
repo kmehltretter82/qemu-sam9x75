@@ -37,6 +37,7 @@
 #include "hw/misc/at91_sysc.h"
 #include "hw/misc/at91_trng.h"
 #include "hw/net/cadence_gem.h"
+#include "hw/net/can/bosch_m_can.h"
 #include "hw/nvram/at91_otpc.h"
 #include "hw/rtc/at91_rtc.h"
 #include "hw/sd/at91_sdhci.h"
@@ -46,6 +47,8 @@
 #include "hw/timer/at91_pit.h"
 #include "hw/timer/at91_rtt.h"
 #include "hw/timer/at91_tcb.h"
+#include "hw/usb/hcd-ehci.h"
+#include "hw/usb/hcd-ohci.h"
 #include "hw/watchdog/at91_wdt.h"
 #include "qom/object.h"
 #include "system/memory.h"
@@ -59,6 +62,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_NUM_FLEXCOM          13
 #define SAM9X7_NUM_FLEXCOM_SPI       6
 #define SAM9X7_NUM_GMAC_QUEUES       6
+#define SAM9X7_NUM_MCAN              2
 
 #define SAM9X7_GPIO_RESET            "reset"
 #define SAM9X7_RESET_POWER           0
@@ -72,6 +76,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_SRAM0_SIZE            0x00010000
 #define SAM9X7_SRAM1_BASE            0x00400000
 #define SAM9X7_SRAM1_SIZE            0x00001000
+#define SAM9X7_UHPHS_OHCI_BASE       0x00600000
+#define SAM9X7_UHPHS_EHCI_BASE       0x00700000
+#define SAM9X7_UHPHS_WINDOW_SIZE     0x00100000
 #define SAM9X7_DDR_BASE              0x20000000
 #define SAM9X7_DDR_SIZE              0x10000000
 #define SAM9X7_NAND_BASE             0x30000000
@@ -93,6 +100,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_TDES_BASE             0xf0038000
 #define SAM9X7_CLASSD_BASE           0xf003c000
 #define SAM9X7_PIT64B1_BASE          0xf0040000
+#define SAM9X7_MCAN0_BASE            0xf8000000
+#define SAM9X7_MCAN1_BASE            0xf8004000
 #define SAM9X7_TCB_BASE              0xf8008000
 #define SAM9X7_SFR_BASE              0xf8050000
 #define SAM9X7_GMAC_BASE             0xf802c000
@@ -153,7 +162,10 @@ struct SAM9X7State {
     AT91NANDState nand;
     AT91OSPIState qspi;
     AT91XDMACState xdmac;
+    AT91UHPHSEHCIState uhphs_ehci;
+    OHCISysBusState uhphs_ohci;
     CadenceGEMState gmac;
+    BoschMCanState mcan[SAM9X7_NUM_MCAN];
     AT91FlexcomState flexcom[SAM9X7_NUM_FLEXCOM];
     AT91USARTState usart[SAM9X7_NUM_FLEXCOM];
     AT91SPIState spi[SAM9X7_NUM_FLEXCOM_SPI];
@@ -168,6 +180,7 @@ struct SAM9X7State {
     AT91WDTState wdt;
     OrIRQState sys_irq;
     OrIRQState ebi_irq;
+    OrIRQState uhphs_irq;
 
     Clock *main_xtal;
     Clock *slow_rc;
@@ -183,10 +196,13 @@ struct SAM9X7State {
     MemoryRegion boot_sram_alias;
     MemoryRegion sram0;
     MemoryRegion sram1;
+    MemoryRegion uhphs_ohci_window;
+    MemoryRegion uhphs_ehci_window;
     MemoryRegion ddr_window;
     MemoryRegion nand_window;
     MemoryRegion *memory;
     MemoryRegion *ddr_memory;
+    CanBusState *canbus[SAM9X7_NUM_MCAN];
 };
 
 bool sam9x7_core_reset_requested(const SAM9X7State *s);

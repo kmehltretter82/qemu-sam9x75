@@ -61,6 +61,7 @@ struct SAM9X75CuriosityMachineState {
     char *otpc_drive;
     SAM9X75PAC1934Route pac1934_route;
     SAM9X75M2Interface m2_interface;
+    CanBusState *canbus[SAM9X7_NUM_MCAN];
     SAM9X7State *soc;
     struct arm_boot_info boot_info;
 };
@@ -247,6 +248,12 @@ static void sam9x75_curiosity_init(MachineState *machine)
                              &error_abort);
     object_property_set_link(OBJECT(soc), "ddr-memory",
                              OBJECT(machine->ram), &error_abort);
+    for (i = 0; i < ARRAY_SIZE(board->canbus); i++) {
+        g_autofree char *name = g_strdup_printf("canbus%u", i);
+
+        object_property_set_link(OBJECT(soc), name,
+                                 OBJECT(board->canbus[i]), &error_abort);
+    }
     qdev_prop_set_chr(DEVICE(&soc->dbgu), "chardev", serial_hd(0));
     for (i = 0; i < ARRAY_SIZE(soc->usart); i++) {
         qdev_prop_set_chr(DEVICE(&soc->usart[i]), "chardev",
@@ -496,6 +503,13 @@ static void sam9x75_curiosity_machine_instance_init(Object *obj)
     board->ethernet_25mhz = true;
     board->pac1934_route = SAM9X75_PAC1934_ROUTE_SOC;
     board->m2_interface = SAM9X75_M2_INTERFACE_SDIO;
+
+    object_property_add_link(obj, "canbus0", TYPE_CAN_BUS,
+                             (Object **)&board->canbus[0],
+                             object_property_allow_set_link, 0);
+    object_property_add_link(obj, "canbus1", TYPE_CAN_BUS,
+                             (Object **)&board->canbus[1],
+                             object_property_allow_set_link, 0);
 }
 
 static void sam9x75_curiosity_machine_instance_finalize(Object *obj)
