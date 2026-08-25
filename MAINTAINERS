@@ -3023,6 +3023,7 @@ S: Maintained
 W: https://canbus.pages.fel.cvut.cz/
 F: net/can/*
 F: hw/net/can/*
+F: include/hw/net/can/*
 F: include/net/can_*.h
 F: docs/system/devices/can.rst
 
