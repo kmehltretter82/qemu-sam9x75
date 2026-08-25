@@ -19,6 +19,7 @@
 #define HW_USB_HCD_EHCI_H
 
 #include "qemu/timer.h"
+#include "hw/core/clock.h"
 #include "hw/usb/usb.h"
 #include "system/dma.h"
 #include "hw/pci/pci_device.h"
@@ -274,6 +275,11 @@ struct EHCIState {
     void *dma_error_opaque;
     void (*reset_cb)(void *opaque);
     void *reset_opaque;
+    bool (*clocked_cb)(void *opaque);
+    void *clocked_opaque;
+    bool clock_state_known;
+    bool clock_was_enabled;
+    bool clock_post_load_pending;
 
     /*
      *  EHCI spec version 1.0 Section 2.3
@@ -389,12 +395,17 @@ struct AT91UHPHSEHCIState {
     EHCISysBusState parent_obj;
 
     MemoryRegion vendor_mem;
+    Clock *pclk;
+    Clock *utmi;
+    bool legacy_clock_bypass;
     uint32_t insnreg06;
     uint32_t insnreg07;
 };
 
 void at91_uhphs_ehci_record_dma_error(AT91UHPHSEHCIState *s,
                                       uint64_t addr);
+void ehci_clock_update(EHCIState *s);
+void ehci_clock_post_load(EHCIState *s);
 
 struct SysBusEHCIClass {
     /*< private >*/

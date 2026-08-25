@@ -16,6 +16,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/usb/hcd-ehci.h"
 #include "migration/vmstate.h"
@@ -42,8 +43,23 @@ static void usb_ehci_sysbus_realize(DeviceState *dev, Error **errp)
     EHCISysBusState *i = SYS_BUS_EHCI(dev);
     EHCIState *s = &i->ehci;
 
+    if (object_dynamic_cast(OBJECT(dev), TYPE_AT91_UHPHS_EHCI)) {
+        AT91UHPHSEHCIState *at91 = AT91_UHPHS_EHCI(dev);
+
+        if (!clock_has_source(at91->pclk) ||
+            !clock_has_source(at91->utmi)) {
+            error_setg(errp, "%s: pclk and utmi clocks must be connected",
+                       TYPE_AT91_UHPHS_EHCI);
+            return;
+        }
+    }
+
     usb_ehci_realize(s, dev, errp);
+    if (*errp) {
+        return;
+    }
     sysbus_init_irq(d, &s->irq);
+    ehci_clock_update(s);
 }
 
 static void usb_ehci_sysbus_reset(DeviceState *dev)
@@ -190,13 +206,51 @@ static void ehci_at91_uhphs_reset(void *opaque)
     s->insnreg07 = 0;
 }
 
+static bool ehci_at91_uhphs_clocked(void *opaque)
+{
+    AT91UHPHSEHCIState *s = opaque;
+
+    return s->legacy_clock_bypass ||
+           (clock_is_enabled(s->pclk) && clock_is_enabled(s->utmi));
+}
+
+static void ehci_at91_uhphs_clock_changed(void *opaque, ClockEvent event)
+{
+    AT91UHPHSEHCIState *s = opaque;
+
+    ehci_clock_update(&s->parent_obj.ehci);
+}
+
+static int ehci_at91_uhphs_pre_load(void *opaque)
+{
+    AT91UHPHSEHCIState *s = opaque;
+
+    s->parent_obj.ehci.clock_post_load_pending = true;
+    return 0;
+}
+
+static int ehci_at91_uhphs_post_load(void *opaque, int version_id)
+{
+    AT91UHPHSEHCIState *s = opaque;
+
+    if (version_id < 2) {
+        s->legacy_clock_bypass = true;
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_ehci_at91_uhphs = {
     .name = "at91-uhphs-ehci",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .pre_load = ehci_at91_uhphs_pre_load,
+    .post_load = ehci_at91_uhphs_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_STRUCT(parent_obj.ehci, AT91UHPHSEHCIState, 1,
                        vmstate_ehci, EHCIState),
+        VMSTATE_CLOCK_V(pclk, AT91UHPHSEHCIState, 2),
+        VMSTATE_CLOCK_V(utmi, AT91UHPHSEHCIState, 2),
+        VMSTATE_BOOL_V(legacy_clock_bypass, AT91UHPHSEHCIState, 2),
         VMSTATE_UINT32(insnreg06, AT91UHPHSEHCIState),
         VMSTATE_UINT32(insnreg07, AT91UHPHSEHCIState),
         VMSTATE_END_OF_LIST()
@@ -212,6 +266,15 @@ static void ehci_at91_uhphs_init(Object *obj)
     i->ehci.dma_error_opaque = s;
     i->ehci.reset_cb = ehci_at91_uhphs_reset;
     i->ehci.reset_opaque = s;
+    i->ehci.clocked_cb = ehci_at91_uhphs_clocked;
+    i->ehci.clocked_opaque = s;
+
+    s->pclk = qdev_init_clock_in(DEVICE(obj), "pclk",
+                                 ehci_at91_uhphs_clock_changed, s,
+                                 ClockUpdate);
+    s->utmi = qdev_init_clock_in(DEVICE(obj), "utmi",
+                                 ehci_at91_uhphs_clock_changed, s,
+                                 ClockUpdate);
 
     /* SAM9X7 Series Data Sheet, UHPHS register reset values. */
     i->ehci.caps[0x08] = 0x26;

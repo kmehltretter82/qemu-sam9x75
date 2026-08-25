@@ -21,6 +21,7 @@
 #ifndef HCD_OHCI_H
 #define HCD_OHCI_H
 
+#include "hw/core/clock.h"
 #include "hw/core/sysbus.h"
 #include "system/dma.h"
 #include "hw/usb/usb.h"
@@ -122,6 +123,13 @@ struct OHCIState {
     uint32_t reset_port_ctrl;
     void (*dma_error_cb)(void *opaque, dma_addr_t addr);
     void *dma_error_opaque;
+    bool (*clocked_cb)(void *opaque);
+    void *clocked_opaque;
+    bool clock_state_known;
+    bool clock_was_enabled;
+    bool clock_post_load_pending;
+    bool clock_frozen;
+    uint16_t clock_frozen_remaining;
 
     void (*ohci_die)(OHCIState *ohci);
 };
@@ -141,6 +149,9 @@ struct OHCISysBusState {
     uint32_t firstport;
     dma_addr_t dma_offset;
     bool migrate_state;
+    Clock *pclk;
+    Clock *uhpck;
+    bool legacy_clock_bypass;
 };
 
 extern const VMStateDescription vmstate_ohci_state;
@@ -153,6 +164,8 @@ void usb_ohci_uninit(OHCIState *ohci);
 void ohci_bus_stop(OHCIState *ohci);
 void ohci_stop_endpoints(OHCIState *ohci);
 void ohci_hard_reset(OHCIState *ohci);
+void ohci_clock_update(OHCIState *ohci);
+void ohci_clock_post_load(OHCIState *ohci);
 void ohci_sysbus_die(struct OHCIState *ohci);
 
 #endif

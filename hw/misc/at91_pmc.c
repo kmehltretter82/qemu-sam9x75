@@ -97,6 +97,9 @@
 #define PMC_MCKR_MASK               0x00000773
 
 #define PMC_USB_MASK                0x00000f03
+#define PMC_USB_USBS_MASK           0x00000003
+#define PMC_USB_USBDIV_SHIFT        8
+#define PMC_USB_USBDIV_LENGTH       4
 
 #define PMC_SR_MOSCXTS              BIT(0)
 #define PMC_SR_MCKRDY               BIT(3)
@@ -289,6 +292,31 @@ static void at91_pmc_update_clocks(AT91PMCState *s)
     mck_hz = cpu_hz / mck_div[(s->mckr & PMC_MCKR_MDIV_MASK) >> 8];
     clock_update_hz(s->cpu, at91_pmc_clamp_hz(cpu_hz));
     clock_update_hz(s->mck, at91_pmc_clamp_hz(mck_hz));
+
+    /*
+     * UPLLCK directly supplies the high-speed UTMI transceivers.  The
+     * separate USB clock controller selects PLLACK or UPLLCK and divides it
+     * down to UHP48M for the OHCI block; UHP12M is derived internally.
+     */
+    clock_update_hz(s->utmi, at91_pmc_clamp_hz(pll_hz[PMC_UPLL]));
+    switch (s->usb & PMC_USB_USBS_MASK) {
+    case 0:
+        source_hz = pll_hz[PMC_PLLA];
+        break;
+    case 1:
+        source_hz = pll_hz[PMC_UPLL];
+        break;
+    default:
+        source_hz = 0;
+        break;
+    }
+    div = extract32(s->usb, PMC_USB_USBDIV_SHIFT,
+                    PMC_USB_USBDIV_LENGTH) + 1;
+    if (!(s->scsr & BIT(6))) {
+        source_hz = 0;
+    }
+    clock_update_hz(s->uhpck,
+                    at91_pmc_clamp_hz(source_hz / div));
 
     for (i = 0; i < AT91_PMC_NUM_PCKS; i++) {
         css = s->pck_reg[i] & 0x1f;
@@ -648,6 +676,7 @@ static void at91_pmc_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case PMC_USB:
         s->usb = value & PMC_USB_MASK;
+        at91_pmc_update_clocks(s);
         break;
     case PMC_PCK0:
     case PMC_PCK1:
@@ -807,6 +836,8 @@ static void at91_pmc_init(Object *obj)
     s->mainck = qdev_init_clock_out(dev, "mainck");
     s->cpu = qdev_init_clock_out(dev, "cpu");
     s->mck = qdev_init_clock_out(dev, "mck");
+    s->uhpck = qdev_init_clock_out(dev, "uhpck");
+    s->utmi = qdev_init_clock_out(dev, "utmi");
     for (i = 0; i < AT91_PMC_NUM_PCKS; i++) {
         g_autofree char *name = g_strdup_printf("pck[%u]", i);
 
@@ -837,13 +868,14 @@ static int at91_pmc_post_load(void *opaque, int version_id)
 {
     AT91PMCState *s = AT91_PMC(opaque);
 
+    at91_pmc_update_clocks(s);
     at91_pmc_update_irq(s);
     return 0;
 }
 
 static const VMStateDescription at91_pmc_vmstate = {
     .name = TYPE_AT91_PMC,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = at91_pmc_post_load,
     .fields = (const VMStateField[]) {
@@ -853,6 +885,8 @@ static const VMStateDescription at91_pmc_vmstate = {
         VMSTATE_CLOCK(mainck, AT91PMCState),
         VMSTATE_CLOCK(cpu, AT91PMCState),
         VMSTATE_CLOCK(mck, AT91PMCState),
+        VMSTATE_CLOCK_V(uhpck, AT91PMCState, 2),
+        VMSTATE_CLOCK_V(utmi, AT91PMCState, 2),
         VMSTATE_ARRAY_CLOCK(pck, AT91PMCState, AT91_PMC_NUM_PCKS),
         VMSTATE_ARRAY_CLOCK(pclk, AT91PMCState, AT91_PMC_NUM_PIDS),
         VMSTATE_ARRAY_CLOCK(gclk, AT91PMCState, AT91_PMC_NUM_PIDS),

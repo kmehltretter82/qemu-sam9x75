@@ -862,8 +862,16 @@ static void sam9x7_init(Object *obj)
 
     object_initialize_child(obj, "uhphs-ehci", &s->uhphs_ehci,
                             TYPE_AT91_UHPHS_EHCI);
+    qdev_connect_clock_in(DEVICE(&s->uhphs_ehci), "pclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "pclk[22]"));
+    qdev_connect_clock_in(DEVICE(&s->uhphs_ehci), "utmi",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "utmi"));
     object_initialize_child(obj, "uhphs-ohci", &s->uhphs_ohci,
                             TYPE_AT91_UHPHS_OHCI);
+    qdev_connect_clock_in(DEVICE(&s->uhphs_ohci), "pclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "pclk[22]"));
+    qdev_connect_clock_in(DEVICE(&s->uhphs_ohci), "uhpck",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "uhpck"));
     s->uhphs_ohci.ohci.dma_error_cb = sam9x7_uhphs_ohci_dma_error;
     s->uhphs_ohci.ohci.dma_error_opaque = &s->uhphs_ehci;
 

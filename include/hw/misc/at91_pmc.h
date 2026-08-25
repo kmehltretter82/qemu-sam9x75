@@ -31,6 +31,8 @@ struct AT91PMCState {
     Clock *mainck;
     Clock *cpu;
     Clock *mck;
+    Clock *uhpck;
+    Clock *utmi;
     Clock *pck[AT91_PMC_NUM_PCKS];
     Clock *pclk[AT91_PMC_NUM_PIDS];
     Clock *gclk[AT91_PMC_NUM_PIDS];

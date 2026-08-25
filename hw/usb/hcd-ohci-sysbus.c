@@ -23,6 +23,7 @@
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/usb/usb.h"
 #include "migration/vmstate.h"
 #include "hw/core/sysbus.h"
@@ -62,6 +63,12 @@ static void ohci_sysbus_realize(DeviceState *dev, Error **errp)
                    TYPE_AT91_UHPHS_OHCI);
         return;
     }
+    if (object_dynamic_cast(OBJECT(dev), TYPE_AT91_UHPHS_OHCI) &&
+        (!clock_has_source(s->pclk) || !clock_has_source(s->uhpck))) {
+        error_setg(errp, "%s: pclk and uhpck clocks must be connected",
+                   TYPE_AT91_UHPHS_OHCI);
+        return;
+    }
 
     usb_ohci_init(&s->ohci, dev, s->num_ports, s->dma_offset,
                   s->masterbus, s->firstport,
@@ -72,6 +79,7 @@ static void ohci_sysbus_realize(DeviceState *dev, Error **errp)
     }
     sysbus_init_irq(sbd, &s->ohci.irq);
     sysbus_init_mmio(sbd, &s->ohci.mem);
+    ohci_clock_update(&s->ohci);
 }
 
 static void ohci_sysbus_reset(DeviceState *dev)
@@ -106,6 +114,9 @@ static void ohci_sysbus_class_init(ObjectClass *klass, const void *data)
     device_class_set_legacy_reset(dc, ohci_sysbus_reset);
 }
 
+static bool at91_uhphs_ohci_clocked(void *opaque);
+static void at91_uhphs_ohci_clock_changed(void *opaque, ClockEvent event);
+
 static void at91_uhphs_ohci_init(Object *obj)
 {
     OHCISysBusState *s = SYSBUS_OHCI(obj);
@@ -119,6 +130,74 @@ static void at91_uhphs_ohci_init(Object *obj)
     ohci->reset_fsmps = 0;
     ohci->reset_rhdesc_a = 0x0a001203;
     ohci->reset_port_ctrl = 0x00000100;
+    ohci->clocked_cb = at91_uhphs_ohci_clocked;
+    ohci->clocked_opaque = s;
+
+    s->pclk = qdev_init_clock_in(DEVICE(obj), "pclk",
+                                 at91_uhphs_ohci_clock_changed, s,
+                                 ClockUpdate);
+    s->uhpck = qdev_init_clock_in(DEVICE(obj), "uhpck",
+                                  at91_uhphs_ohci_clock_changed, s,
+                                  ClockUpdate);
+}
+
+static bool at91_uhphs_ohci_clocked(void *opaque)
+{
+    OHCISysBusState *s = opaque;
+
+    return s->legacy_clock_bypass ||
+           (clock_is_enabled(s->pclk) && clock_is_enabled(s->uhpck));
+}
+
+static void at91_uhphs_ohci_clock_changed(void *opaque, ClockEvent event)
+{
+    OHCISysBusState *s = opaque;
+
+    ohci_clock_update(&s->ohci);
+}
+
+static int at91_uhphs_ohci_pre_load(void *opaque)
+{
+    OHCISysBusState *s = opaque;
+
+    s->ohci.clock_post_load_pending = true;
+    return 0;
+}
+
+static int at91_uhphs_ohci_post_load(void *opaque, int version_id)
+{
+    OHCISysBusState *s = opaque;
+
+    if (version_id < 2) {
+        s->legacy_clock_bypass = true;
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_at91_uhphs_ohci = {
+    /* Keep the inherited section name for version-1 stream compatibility. */
+    .name = "ohci-sysbus",
+    .version_id = 2,
+    .minimum_version_id = 1,
+    .pre_load = at91_uhphs_ohci_pre_load,
+    .post_load = at91_uhphs_ohci_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT(ohci, OHCISysBusState, 1, vmstate_ohci_state,
+                       OHCIState),
+        VMSTATE_CLOCK_V(pclk, OHCISysBusState, 2),
+        VMSTATE_CLOCK_V(uhpck, OHCISysBusState, 2),
+        VMSTATE_BOOL_V(legacy_clock_bypass, OHCISysBusState, 2),
+        VMSTATE_BOOL_V(ohci.clock_frozen, OHCISysBusState, 2),
+        VMSTATE_UINT16_V(ohci.clock_frozen_remaining, OHCISysBusState, 2),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static void at91_uhphs_ohci_class_init(ObjectClass *oc, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(oc);
+
+    dc->vmsd = &vmstate_at91_uhphs_ohci;
 }
 
 static const TypeInfo ohci_sysbus_types[] = {
@@ -132,6 +211,7 @@ static const TypeInfo ohci_sysbus_types[] = {
         .name          = TYPE_AT91_UHPHS_OHCI,
         .parent        = TYPE_SYSBUS_OHCI,
         .instance_init = at91_uhphs_ohci_init,
+        .class_init    = at91_uhphs_ohci_class_init,
     },
 };
 

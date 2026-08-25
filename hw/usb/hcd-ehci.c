@@ -405,6 +405,55 @@ static inline bool ehci_enabled(EHCIState *s)
     return s->usbcmd & USBCMD_RUNSTOP;
 }
 
+static inline bool ehci_clocked(EHCIState *s)
+{
+    return !s->clocked_cb || s->clocked_cb(s->clocked_opaque);
+}
+
+void ehci_clock_update(EHCIState *s)
+{
+    bool enabled = ehci_clocked(s);
+
+    /* Clock inputs can change before the controller has been realized. */
+    if (!s->frame_timer || !s->async_bh) {
+        return;
+    }
+    if (s->clock_post_load_pending) {
+        return;
+    }
+
+    if (s->clock_state_known && s->clock_was_enabled == enabled) {
+        return;
+    }
+    s->clock_state_known = true;
+    s->clock_was_enabled = enabled;
+    SET_LAST_RUN_CLOCK(s);
+
+    if (!enabled) {
+        timer_del(s->frame_timer);
+        qemu_bh_cancel(s->async_bh);
+        return;
+    }
+
+    if (ehci_enabled(s) || s->astate != EST_INACTIVE ||
+        s->pstate != EST_INACTIVE || s->usbsts_pending) {
+        qemu_bh_schedule(s->async_bh);
+    }
+}
+
+void ehci_clock_post_load(EHCIState *s)
+{
+    bool enabled = ehci_clocked(s);
+
+    s->clock_post_load_pending = false;
+    s->clock_state_known = true;
+    s->clock_was_enabled = enabled;
+    if (!enabled) {
+        timer_del(s->frame_timer);
+        qemu_bh_cancel(s->async_bh);
+    }
+}
+
 static inline bool ehci_async_enabled(EHCIState *s)
 {
     return ehci_enabled(s) && (s->usbcmd & USBCMD_ASE);
@@ -776,6 +825,16 @@ static void ehci_queues_rip_all(EHCIState *ehci, int async)
 
     QTAILQ_FOREACH_SAFE(q, head, next, tmp) {
         ehci_free_queue(q, warn);
+    }
+}
+
+static void ehci_queues_rip_all_quiet(EHCIState *ehci, int async)
+{
+    EHCIQueueHead *head = async ? &ehci->aqueues : &ehci->pqueues;
+    EHCIQueue *q, *tmp;
+
+    QTAILQ_FOREACH_SAFE(q, head, next, tmp) {
+        ehci_free_queue(q, NULL);
     }
 }
 
@@ -2484,6 +2543,12 @@ static void ehci_work_bh(void *opaque)
     uint64_t uframes, skipped_uframes;
     int i;
 
+    if (!ehci_clocked(ehci)) {
+        timer_del(ehci->frame_timer);
+        SET_LAST_RUN_CLOCK(ehci);
+        return;
+    }
+
     if (ehci->working) {
         return;
     }
@@ -2582,7 +2647,11 @@ static void ehci_work_timer(void *opaque)
 {
     EHCIState *ehci = opaque;
 
-    qemu_bh_schedule(ehci->async_bh);
+    if (ehci_clocked(ehci)) {
+        qemu_bh_schedule(ehci->async_bh);
+    } else {
+        SET_LAST_RUN_CLOCK(ehci);
+    }
 }
 
 static const MemoryRegionOps ehci_mmio_caps_ops = {
@@ -2644,10 +2713,13 @@ static int usb_ehci_pre_save(void *opaque)
     EHCIState *ehci = opaque;
     uint32_t new_frindex;
 
-    /* Round down frindex to a multiple of 8 for migration compatibility */
-    new_frindex = ehci->frindex & ~7;
-    ehci->last_run_ns -= (ehci->frindex - new_frindex) * UFRAME_TIMER_NS;
-    ehci->frindex = new_frindex;
+    if (ehci_clocked(ehci)) {
+        /* Round down frindex to a multiple of 8 for compatibility. */
+        new_frindex = ehci->frindex & ~7;
+        ehci->last_run_ns -= (ehci->frindex - new_frindex) *
+                             UFRAME_TIMER_NS;
+        ehci->frindex = new_frindex;
+    }
 
     if (!ehci->migrate_fetch_addr_64bit) {
         ehci->migrate_a_fetch_addr = ehci->a_fetch_addr;
@@ -2688,13 +2760,17 @@ static void usb_ehci_vm_state_change(void *opaque, bool running, RunState state)
 {
     EHCIState *ehci = opaque;
 
+    if (running && ehci->clock_post_load_pending) {
+        ehci_clock_post_load(ehci);
+    }
+
     /*
      * We don't migrate the EHCIQueue-s, instead we rebuild them for the
      * schedule in guest memory. We must do the rebuilt ASAP, so that
      * USB-devices which have async handled packages have a packet in the
      * ep queue to match the completion with.
      */
-    if (running) {
+    if (running && ehci_clocked(ehci)) {
         ehci_advance_async_state(ehci);
     }
 
@@ -2704,11 +2780,15 @@ static void usb_ehci_vm_state_change(void *opaque, bool running, RunState state)
      * will never have existed on the destination. Therefore we must flush the
      * async schedule on savevm to catch any not yet noticed unlinks.
      */
-    if (!running &&
-        (state == RUN_STATE_SAVE_VM ||
-         state == RUN_STATE_FINISH_MIGRATE)) {
-        ehci_advance_async_state(ehci);
-        ehci_queues_rip_unseen(ehci, 1);
+    if (!running && (state == RUN_STATE_SAVE_VM ||
+                     state == RUN_STATE_FINISH_MIGRATE)) {
+        if (ehci_clocked(ehci)) {
+            ehci_advance_async_state(ehci);
+            ehci_queues_rip_unseen(ehci, 1);
+        } else {
+            /* Do not traverse guest descriptors while the clock is off. */
+            ehci_queues_rip_all_quiet(ehci, 1);
+        }
     }
 }
 

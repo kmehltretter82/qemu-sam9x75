@@ -46,6 +46,12 @@
 
 static int64_t usb_frame_time;
 static int64_t usb_bit_time;
+static uint32_t ohci_get_frame_remaining(OHCIState *ohci);
+
+static inline bool ohci_clocked(OHCIState *ohci)
+{
+    return !ohci->clocked_cb || ohci->clocked_cb(ohci->clocked_opaque);
+}
 
 /* Host Controller Communications Area */
 struct ohci_hcca {
@@ -443,6 +449,8 @@ static void ohci_soft_reset(OHCIState *ohci)
     ohci->fi = 0x2edf;
     ohci->fit = 0;
     ohci->frt = 0;
+    ohci->clock_frozen = false;
+    ohci->clock_frozen_remaining = 0;
     ohci->frame_number = 0;
     ohci->pstart = 0;
     ohci->lst = OHCI_LS_THRESH;
@@ -1388,6 +1396,11 @@ static void ohci_frame_boundary(void *opaque)
     OHCIState *ohci = opaque;
     struct ohci_hcca hcca;
 
+    if (!ohci_clocked(ohci)) {
+        timer_del(ohci->eof_timer);
+        return;
+    }
+
     if (ohci_read_hcca(ohci, ohci->hcca, &hcca)) {
         trace_usb_ohci_hcca_read_error(ohci->hcca);
         ohci_die(ohci);
@@ -1466,6 +1479,13 @@ static int ohci_bus_start(OHCIState *ohci)
      * Delay the first SOF event by one frame time as linux driver is
      * not ready to receive it and can meet some race conditions
      */
+    if (!ohci_clocked(ohci)) {
+        ohci->clock_frozen_remaining = ohci->fi;
+        ohci->clock_frozen = true;
+        timer_del(ohci->eof_timer);
+        return 0;
+    }
+    ohci->clock_frozen = false;
     ohci->sof_time = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     ohci_eof_timer(ohci);
 
@@ -1479,6 +1499,71 @@ void ohci_bus_stop(OHCIState *ohci)
     timer_del(ohci->eof_timer);
 }
 
+void ohci_clock_update(OHCIState *ohci)
+{
+    bool enabled = ohci_clocked(ohci);
+
+    /* Clock inputs can change before the controller has been realized. */
+    if (!ohci->eof_timer) {
+        return;
+    }
+    if (ohci->clock_post_load_pending) {
+        return;
+    }
+
+    if (ohci->clock_state_known && ohci->clock_was_enabled == enabled) {
+        return;
+    }
+    ohci->clock_state_known = true;
+    ohci->clock_was_enabled = enabled;
+
+    if (!enabled) {
+        if ((ohci->ctl & OHCI_CTL_HCFS) == OHCI_USB_OPERATIONAL &&
+            !ohci->clock_frozen) {
+            ohci->clock_frozen_remaining =
+                ohci_get_frame_remaining(ohci) & OHCI_FMI_FI;
+            ohci->clock_frozen = true;
+        }
+        ohci_bus_stop(ohci);
+    } else if ((ohci->ctl & OHCI_CTL_HCFS) == OHCI_USB_OPERATIONAL) {
+        if (ohci->clock_frozen) {
+            int64_t elapsed = (ohci->fi -
+                               MIN(ohci->clock_frozen_remaining,
+                                   ohci->fi)) * usb_bit_time;
+
+            ohci->clock_frozen = false;
+            ohci->sof_time = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - elapsed;
+            ohci_eof_timer(ohci);
+        } else {
+            ohci_bus_start(ohci);
+        }
+    }
+}
+
+void ohci_clock_post_load(OHCIState *ohci)
+{
+    bool enabled = ohci_clocked(ohci);
+
+    ohci->clock_post_load_pending = false;
+    ohci->clock_state_known = true;
+    ohci->clock_was_enabled = enabled;
+    if ((ohci->ctl & OHCI_CTL_HCFS) == OHCI_USB_OPERATIONAL &&
+        timer_pending(ohci->eof_timer)) {
+        /* The migrated timer deadline is rebased; the raw epoch is not. */
+        ohci->sof_time = (int64_t)timer_expire_time_ns(ohci->eof_timer) -
+                         usb_frame_time;
+    }
+    if (!enabled) {
+        if ((ohci->ctl & OHCI_CTL_HCFS) == OHCI_USB_OPERATIONAL &&
+            !ohci->clock_frozen) {
+            ohci->clock_frozen_remaining =
+                ohci_get_frame_remaining(ohci) & OHCI_FMI_FI;
+            ohci->clock_frozen = true;
+        }
+        ohci_bus_stop(ohci);
+    }
+}
+
 /* Frame interval toggle is manipulated by the hcd only */
 static void ohci_set_frame_interval(OHCIState *ohci, uint16_t val)
 {
@@ -1489,6 +1574,10 @@ static void ohci_set_frame_interval(OHCIState *ohci, uint16_t val)
     }
 
     ohci->fi = val;
+    if (ohci->clock_frozen) {
+        ohci->clock_frozen_remaining = MIN(ohci->clock_frozen_remaining,
+                                           ohci->fi);
+    }
 }
 
 static void ohci_child_detach(USBPort *port, USBDevice *dev);
@@ -1598,6 +1687,9 @@ static uint32_t ohci_get_frame_remaining(OHCIState *ohci)
 
     if ((ohci->ctl & OHCI_CTL_HCFS) != OHCI_USB_OPERATIONAL) {
         return ohci->frt << 31;
+    }
+    if (ohci->clock_frozen) {
+        return (ohci->frt << 31) | ohci->clock_frozen_remaining;
     }
     /* Being in USB operational state guarantees sof_time was set already. */
     tks = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - ohci->sof_time;
@@ -2150,7 +2242,9 @@ static void ohci_async_complete_packet(USBPort *port, USBPacket *packet)
 
     trace_usb_ohci_async_complete();
     ohci->async_complete = true;
-    ohci_process_lists(ohci);
+    if (ohci_clocked(ohci)) {
+        ohci_process_lists(ohci);
+    }
 }
 
 /* Reconnect migrated child request state only long enough to cancel it. */
@@ -2255,6 +2349,10 @@ static bool ohci_async_should_cancel_for_migration(OHCIState *ohci,
 static void ohci_vm_state_change(void *opaque, bool running, RunState state)
 {
     OHCIState *ohci = opaque;
+
+    if (running && ohci->clock_post_load_pending) {
+        ohci_clock_post_load(ohci);
+    }
 
     if (!running &&
         (state == RUN_STATE_SAVE_VM || state == RUN_STATE_FINISH_MIGRATE) &&
