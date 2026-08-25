@@ -47,6 +47,7 @@
 #include "hw/timer/at91_pit.h"
 #include "hw/timer/at91_rtt.h"
 #include "hw/timer/at91_tcb.h"
+#include "hw/usb/at91-udphs.h"
 #include "hw/usb/hcd-ehci.h"
 #include "hw/usb/hcd-ohci.h"
 #include "hw/watchdog/at91_wdt.h"
@@ -76,6 +77,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_SRAM0_SIZE            0x00010000
 #define SAM9X7_SRAM1_BASE            0x00400000
 #define SAM9X7_SRAM1_SIZE            0x00001000
+#define SAM9X7_UDPHS_FIFO_BASE       0x00500000
+#define SAM9X7_UDPHS_FIFO_SIZE       0x00100000
 #define SAM9X7_UHPHS_OHCI_BASE       0x00600000
 #define SAM9X7_UHPHS_EHCI_BASE       0x00700000
 #define SAM9X7_UHPHS_WINDOW_SIZE     0x00100000
@@ -105,6 +108,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_TCB_BASE              0xf8008000
 #define SAM9X7_SFR_BASE              0xf8050000
 #define SAM9X7_GMAC_BASE             0xf802c000
+#define SAM9X7_UDPHS_BASE            0xf803c000
+#define SAM9X7_UDPHS_SIZE            0x00000400
 
 /* System peripherals. */
 #define SAM9X7_MATRIX_BASE           0xffffde00
@@ -162,6 +167,7 @@ struct SAM9X7State {
     AT91NANDState nand;
     AT91OSPIState qspi;
     AT91XDMACState xdmac;
+    AT91UDPHSState udphs;
     AT91UHPHSEHCIState uhphs_ehci;
     OHCISysBusState uhphs_ohci;
     CadenceGEMState gmac;

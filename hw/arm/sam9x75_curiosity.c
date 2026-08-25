@@ -298,6 +298,10 @@ static void sam9x75_curiosity_init(MachineState *machine)
 
     sysbus_realize(SYS_BUS_DEVICE(soc), &error_fatal);
 
+    /* J2's device-port VBUS sense is routed to PC8 on this board. */
+    qdev_connect_gpio_out_named(DEVICE(&soc->udphs), "vbus", 0,
+                                qdev_get_gpio_in(DEVICE(&soc->pio[2]), 8));
+
     if (machine->firmware) {
         sam9x75_curiosity_load_rom(machine, soc);
     }

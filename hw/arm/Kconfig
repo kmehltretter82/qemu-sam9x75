@@ -180,6 +180,7 @@ config SAM9X7
     select AT91_SHA
     select AT91_TDES
     select AT91_TRNG
+    select AT91_UDPHS
     select AT91_XDMAC
     select AT91_AIC
     select AT91_CLASSD

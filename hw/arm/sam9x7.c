@@ -392,6 +392,22 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->sfr), 0,
                        qdev_get_gpio_in(DEVICE(&s->sys_irq), 4));
 
+    object_property_set_link(OBJECT(&s->udphs), "dma-memory",
+                             OBJECT(s->memory), &error_abort);
+    qdev_connect_gpio_out_named(DEVICE(&s->udphs), "device-mode", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->uhphs_ehci), "device-mode", 0));
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->udphs), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->udphs), 0);
+    g_assert(memory_region_size(mr) == SAM9X7_UDPHS_FIFO_SIZE);
+    memory_region_add_subregion(s->memory, SAM9X7_UDPHS_FIFO_BASE, mr);
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->udphs), 1);
+    g_assert(memory_region_size(mr) == SAM9X7_UDPHS_SIZE);
+    memory_region_add_subregion(s->memory, SAM9X7_UDPHS_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->udphs), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 23));
+
     object_property_set_bool(OBJECT(&s->uhphs_ehci), "companion-enable",
                              true, &error_abort);
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->uhphs_ehci), errp)) {
@@ -859,6 +875,12 @@ static void sam9x7_init(Object *obj)
                           qdev_get_clock_out(DEVICE(&s->pmc), "gclk[42]"));
 
     object_initialize_child(obj, "sfr", &s->sfr, TYPE_AT91_SFR);
+
+    object_initialize_child(obj, "udphs", &s->udphs, TYPE_AT91_UDPHS);
+    qdev_connect_clock_in(DEVICE(&s->udphs), "pclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "pclk[23]"));
+    qdev_connect_clock_in(DEVICE(&s->udphs), "utmi",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "utmi"));
 
     object_initialize_child(obj, "uhphs-ehci", &s->uhphs_ehci,
                             TYPE_AT91_UHPHS_EHCI);
