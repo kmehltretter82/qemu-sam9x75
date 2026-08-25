@@ -19,6 +19,7 @@ struct AT91SMCState {
     SysBusDevice parent_obj;
 
     MemoryRegion mmio;
+    qemu_irq irq;
     uint32_t setup[AT91_SMC_NUM_CS];
     uint32_t pulse[AT91_SMC_NUM_CS];
     uint32_t cycle[AT91_SMC_NUM_CS];
@@ -29,6 +30,8 @@ struct AT91SMCState {
     uint32_t srier;
     uint32_t wpmr;
     uint32_t wpsr;
+    bool key1_written;
+    bool key2_written;
 };
 
 #endif /* HW_MISC_AT91_SMC_H */

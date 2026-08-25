@@ -167,6 +167,7 @@ struct SAM9X7State {
     AT91TCBState tcb;
     AT91WDTState wdt;
     OrIRQState sys_irq;
+    OrIRQState ebi_irq;
 
     Clock *main_xtal;
     Clock *slow_rc;

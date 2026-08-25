@@ -1210,10 +1210,21 @@
 #define SMC_PULSE2              0x24
 #define SMC_CYCLE2              0x28
 #define SMC_MODE2               0x2c
+#define SMC_OCMS                0x80
+#define SMC_KEY1                0x84
+#define SMC_KEY2                0x88
+#define SMC_SRIER               0x90
 #define SMC_WPMR                0xe4
 #define SMC_WPSR                0xe8
+#define SMC_OCMS_MASK           0x00000711
+#define SMC_SRIER_SRIE          BIT(0)
 #define SMC_WPMR_KEY            0x534d4300
+#define SMC_WPMR_WPEN           BIT(0)
 #define SMC_WPSR_WPVS           BIT(0)
+#define SMC_WPSR_SEQE           BIT(2)
+#define SMC_WPSR_SWE            BIT(3)
+#define SMC_WPSR_TYPE_MASK      (3U << 24)
+#define SMC_WPSR_TYPE_WRITE_RO  (1U << 24)
 
 #define PMECC_CFG               0x00
 #define PMECC_SAREA             0x04
@@ -11191,6 +11202,141 @@ static void test_smc_and_pmecc_registers(void)
     qtest_quit(qts);
 }
 
+static void test_smc_safety_and_shared_irq(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+
+    aic_configure(qts, 49, AIC_SMR_LEVEL_HIGH | 3, 0x49eb149e);
+
+    /* The A1 erratum makes OCMS the exception to SMC write protection. */
+    qtest_writel(qts, SAM9X7_SMC_BASE + SMC_WPMR,
+                 SMC_WPMR_KEY | SMC_WPMR_WPEN);
+    qtest_writel(qts, SAM9X7_SMC_BASE + SMC_OCMS, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SMC_BASE + SMC_OCMS), ==,
+                    SMC_OCMS_MASK);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SMC_BASE + SMC_WPSR), ==, 0);
+
+    /* SRIER remains protected and reports the attempted write. */
+    qtest_writel(qts, SAM9X7_SMC_BASE + SMC_SRIER, SMC_SRIER_SRIE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SMC_BASE + SMC_SRIER), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SMC_BASE + SMC_WPSR), ==,
+                    (SMC_SRIER << 8) | SMC_WPSR_WPVS);
+
+    qtest_writel(qts, SAM9X7_SMC_BASE + SMC_WPMR, SMC_WPMR_KEY);
+
+    /* Enabling SRIE immediately exposes an already-pending safety error. */
+    qtest_readl(qts, SAM9X7_SMC_BASE + SMC_KEY1);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(17));
+    qtest_writel(qts, SAM9X7_SMC_BASE + SMC_SRIER, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SMC_BASE + SMC_SRIER), ==,
+                    SMC_SRIER_SRIE);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(17));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SMC_BASE + SMC_WPSR), ==,
+                    (SMC_KEY1 << 8) | SMC_WPSR_SWE);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(17));
+    value = qtest_readl(qts, SAM9X7_SMC_BASE + SMC_WPSR);
+    g_assert_cmphex(value & (SMC_WPSR_WPVS | SMC_WPSR_SEQE |
+                            SMC_WPSR_SWE | SMC_WPSR_TYPE_MASK), ==, 0);
+
+    /* A software error must not overwrite an unread WP violation source. */
+    qtest_writel(qts, SAM9X7_SMC_BASE + SMC_WPMR,
+                 SMC_WPMR_KEY | SMC_WPMR_WPEN);
+    qtest_writel(qts, SAM9X7_SMC_BASE + SMC_PULSE2, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SMC_BASE + SMC_PULSE2), ==,
+                    0x01010101);
+    qtest_writel(qts, SAM9X7_SMC_BASE + SMC_WPMR, SMC_WPMR_KEY);
+    qtest_writel(qts, SAM9X7_SMC_BASE + SMC_WPSR, 0);
+    value = (SMC_PULSE2 << 8) | SMC_WPSR_WPVS | SMC_WPSR_SWE |
+            SMC_WPSR_TYPE_WRITE_RO;
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SMC_BASE + SMC_WPSR), ==,
+                    value);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(17));
+
+    /* Scrambling keys are unprotected and a second write is not an error. */
+    qtest_writel(qts, SAM9X7_SMC_BASE + SMC_KEY1, 0x11223344);
+    qtest_writel(qts, SAM9X7_SMC_BASE + SMC_KEY1, 0xa5a5a5a5);
+    qtest_writel(qts, SAM9X7_SMC_BASE + SMC_KEY2, 0x55667788);
+    qtest_writel(qts, SAM9X7_SMC_BASE + SMC_KEY2, 0x5a5a5a5a);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SMC_BASE + SMC_WPSR), ==, 0);
+
+    /* MPDDRC and SMC are independent producers on the shared PID49 line. */
+    qtest_writel(qts, SAM9X7_MPDDRC_BASE + MPDDRC_IER, 1);
+    qtest_readl(qts, SAM9X7_SMC_BASE + SMC_KEY1);
+    qtest_readl(qts, SAM9X7_MPDDRC_BASE + MPDDRC_IER);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(17));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SMC_BASE + SMC_WPSR), ==,
+                    (SMC_KEY1 << 8) | SMC_WPSR_SWE);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(17));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MPDDRC_BASE + MPDDRC_WPSR), ==,
+                    (MPDDRC_IER << 8) | MPDDRC_WPSR_SWE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MPDDRC_BASE + MPDDRC_ISR), ==, 1);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(17));
+
+    qtest_quit(qts);
+}
+
+static void test_smc_shared_irq_migration_and_reset(void)
+{
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+
+    aic_configure(from, 49, AIC_SMR_LEVEL_HIGH | 3, 0x49eb149e);
+    qtest_writel(from, SAM9X7_SMC_BASE + SMC_SETUP2, 0x02030405);
+    qtest_writel(from, SAM9X7_SMC_BASE + SMC_OCMS, SMC_OCMS_MASK);
+    qtest_writel(from, SAM9X7_SMC_BASE + SMC_KEY1, 0x11223344);
+    qtest_writel(from, SAM9X7_SMC_BASE + SMC_KEY2, 0x55667788);
+    qtest_writel(from, SAM9X7_SMC_BASE + SMC_SRIER, SMC_SRIER_SRIE);
+    qtest_writel(from, SAM9X7_SMC_BASE + SMC_WPMR,
+                 SMC_WPMR_KEY | SMC_WPMR_WPEN);
+    qtest_writel(from, SAM9X7_SMC_BASE + SMC_PULSE2, 0);
+
+    qtest_writel(from, SAM9X7_MPDDRC_BASE + MPDDRC_IER, 1);
+    qtest_readl(from, SAM9X7_MPDDRC_BASE + MPDDRC_IER);
+    g_assert_true(qtest_readl(from, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(17));
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SMC_BASE + SMC_SETUP2), ==,
+                    0x02030405);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SMC_BASE + SMC_OCMS), ==,
+                    SMC_OCMS_MASK);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SMC_BASE + SMC_SRIER), ==,
+                    SMC_SRIER_SRIE);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SMC_BASE + SMC_WPMR), ==,
+                    SMC_WPMR_WPEN);
+    g_assert_true(qtest_readl(to, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(17));
+
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SMC_BASE + SMC_WPSR), ==,
+                    (SMC_PULSE2 << 8) | SMC_WPSR_WPVS);
+    g_assert_true(qtest_readl(to, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(17));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_MPDDRC_BASE + MPDDRC_WPSR), ==,
+                    (MPDDRC_IER << 8) | MPDDRC_WPSR_SWE);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_MPDDRC_BASE + MPDDRC_ISR), ==, 1);
+    g_assert_false(qtest_readl(to, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(17));
+
+    qtest_system_reset(to);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SMC_BASE + SMC_SETUP2), ==,
+                    0x01010101);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SMC_BASE + SMC_PULSE2), ==,
+                    0x01010101);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SMC_BASE + SMC_CYCLE2), ==,
+                    0x00030003);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SMC_BASE + SMC_MODE2), ==,
+                    0x10001000);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SMC_BASE + SMC_OCMS), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SMC_BASE + SMC_SRIER), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SMC_BASE + SMC_WPMR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SMC_BASE + SMC_WPSR), ==, 0);
+    g_assert_false(qtest_readl(to, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(17));
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
 static void qspi_finish_transfer(QTestState *qts)
 {
     qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_CR, QSPI_CR_LASTXFER);
@@ -11548,6 +11694,10 @@ int main(int argc, char **argv)
                    test_board_memory_cs_jumpers);
     qtest_add_func("sam9x75/smc-pmecc/registers",
                    test_smc_and_pmecc_registers);
+    qtest_add_func("sam9x75/smc-pmecc/safety-and-shared-irq",
+                   test_smc_safety_and_shared_irq);
+    qtest_add_func("sam9x75/smc-pmecc/shared-irq-migration-and-reset",
+                   test_smc_shared_irq_migration_and_reset);
     qtest_add_func("sam9x75/qspi/flash-read-program-and-erase",
                    test_qspi_flash_read_program_and_erase);
 

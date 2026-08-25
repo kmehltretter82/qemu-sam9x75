@@ -129,6 +129,12 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     qdev_connect_gpio_out(DEVICE(&s->sys_irq), 0,
                           qdev_get_gpio_in(DEVICE(&s->aic), 1));
 
+    if (!qdev_realize(DEVICE(&s->ebi_irq), NULL, errp)) {
+        return;
+    }
+    qdev_connect_gpio_out(DEVICE(&s->ebi_irq), 0,
+                          qdev_get_gpio_in(DEVICE(&s->aic), 49));
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->sysc), errp)) {
         return;
     }
@@ -318,7 +324,7 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->mpddrc), 0);
     memory_region_add_subregion(s->memory, SAM9X7_MPDDRC_BASE, mr);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->mpddrc), 0,
-                       qdev_get_gpio_in(DEVICE(&s->aic), 49));
+                       qdev_get_gpio_in(DEVICE(&s->ebi_irq), 0));
 
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->pmecc), errp)) {
         return;
@@ -335,6 +341,8 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     }
     mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->smc), 0);
     memory_region_add_subregion(s->memory, SAM9X7_SMC_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->smc), 0,
+                       qdev_get_gpio_in(DEVICE(&s->ebi_irq), 1));
 
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->nand), errp)) {
         return;
@@ -588,6 +596,9 @@ static void sam9x7_init(Object *obj)
 
     object_initialize_child(obj, "sys-irq", &s->sys_irq, TYPE_OR_IRQ);
     object_property_set_int(OBJECT(&s->sys_irq), "num-lines", 8,
+                            &error_abort);
+    object_initialize_child(obj, "ebi-irq", &s->ebi_irq, TYPE_OR_IRQ);
+    object_property_set_int(OBJECT(&s->ebi_irq), "num-lines", 2,
                             &error_abort);
 
     s->main_xtal = qdev_init_clock_out(DEVICE(s), "main-xtal");
