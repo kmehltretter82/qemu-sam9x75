@@ -51,6 +51,7 @@
 #define SDMMC_CA1R_WRITE_MASK      0x00ff0077
 #define SDMMC_MCCAR_WRITE_MASK     0x00ffffff
 #define SDMMC_PVR_WRITE_MASK       0x07ff
+#define SDMMC_HC2R_WRITE_MASK      0xc000
 
 #define SDMMC_MC1R_MASK            0x000000bb
 #define SDMMC_MC1R_FCD             BIT(7)
@@ -336,6 +337,17 @@ static const MemoryRegionOps at91_sdhci_vendor_ops = {
     },
 };
 
+static void at91_sdhci_software_reset_all(SDHCIState *sdhci)
+{
+    AT91SDHCIState *s = container_of(sdhci, AT91SDHCIState, sdhci);
+
+    /* These vendor registers participate in SDMMC_SRR.SWRSTALL. */
+    s->mc1r = 0;
+    s->acr = 0;
+    s->cc2r = 0;
+    s->cacr = 0;
+}
+
 static void at91_sdhci_reset(DeviceState *dev)
 {
     AT91SDHCIState *s = AT91_SDHCI(dev);
@@ -346,10 +358,7 @@ static void at91_sdhci_reset(DeviceState *dev)
                  SDMMC_CA0R_RESET;
     s->maxcurr = 0;
     memset(s->pvr, 0, sizeof(s->pvr));
-    s->mc1r = 0;
-    s->acr = 0;
-    s->cc2r = 0;
-    s->cacr = 0;
+    at91_sdhci_software_reset_all(&s->sdhci);
     s->dbgr = 0;
     s->calcr = 0;
 
@@ -450,6 +459,8 @@ static void at91_sdhci_init(Object *obj)
     DeviceState *dev = DEVICE(obj);
 
     object_initialize_child(obj, "sdhci", &s->sdhci, TYPE_SYSBUS_SDHCI);
+    s->sdhci.software_reset_all = at91_sdhci_software_reset_all;
+    s->sdhci.hostctl2_write_mask = SDMMC_HC2R_WRITE_MASK;
     s->hclock = qdev_init_clock_in(dev, "hclock", NULL, s, ClockUpdate);
     s->gclock = qdev_init_clock_in(dev, "gclock", NULL, s, ClockUpdate);
 }

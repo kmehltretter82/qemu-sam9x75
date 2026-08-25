@@ -1161,15 +1161,23 @@ static inline void sdhci_blkgap_write(SDHCIState *s, uint8_t value)
 
 static inline void sdhci_reset_write(SDHCIState *s, uint8_t value)
 {
-    switch (value) {
-    case SDHC_RESET_ALL:
+    bool reset = false;
+
+    if (value & SDHC_RESET_ALL) {
         sdhci_reset(s);
-        break;
-    case SDHC_RESET_CMD:
+        if (s->software_reset_all) {
+            s->software_reset_all(s);
+        }
+        return;
+    }
+
+    if (value & SDHC_RESET_CMD) {
         s->prnsts &= ~SDHC_CMD_INHIBIT;
         s->norintsts &= ~SDHC_NIS_CMDCMP;
-        break;
-    case SDHC_RESET_DATA:
+        reset = true;
+    }
+    if (value & SDHC_RESET_DATA) {
+        timer_del(s->transfer_timer);
         s->data_count = 0;
         s->prnsts &= ~(SDHC_SPACE_AVAILABLE | SDHC_DATA_AVAILABLE |
                 SDHC_DOING_READ | SDHC_DOING_WRITE |
@@ -1178,7 +1186,10 @@ static inline void sdhci_reset_write(SDHCIState *s, uint8_t value)
         s->stopped_state = sdhc_not_stopped;
         s->norintsts &= ~(SDHC_NIS_WBUFRDY | SDHC_NIS_RBUFRDY |
                 SDHC_NIS_DMA | SDHC_NIS_TRSCMP | SDHC_NIS_BLKGAP);
-        break;
+        reset = true;
+    }
+    if (reset) {
+        sdhci_update_irq(s);
     }
 }
 
@@ -1189,9 +1200,14 @@ sdhci_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
     unsigned shift =  8 * (offset & 0x3);
     uint32_t mask = ~(((1ULL << (size * 8)) - 1) << shift);
     uint32_t value = val;
-    value <<= shift;
+    bool software_reset;
 
-    if (timer_pending(s->transfer_timer)) {
+    value <<= shift;
+    software_reset = offset <= SDHC_SWRST && offset + size > SDHC_SWRST &&
+                     ((value >> (8 * (SDHC_SWRST & 0x3))) &
+                      (SDHC_RESET_ALL | SDHC_RESET_CMD | SDHC_RESET_DATA));
+
+    if (timer_pending(s->transfer_timer) && !software_reset) {
         sdhci_resume_pending_transfer(s);
     }
 
@@ -1360,7 +1376,11 @@ sdhci_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
     case SDHC_ACMD12ERRSTS:
         MASKED_WRITE(s->acmd12errsts, mask, value & UINT16_MAX);
         if (s->uhs_mode >= UHS_I) {
-            MASKED_WRITE(s->hostctl2, mask >> 16, value >> 16);
+            uint16_t hostctl2_mask = (mask >> 16) |
+                                     ~s->hostctl2_write_mask;
+
+            MASKED_WRITE(s->hostctl2, hostctl2_mask,
+                         (value >> 16) & s->hostctl2_write_mask);
 
             if (FIELD_EX32(s->hostctl2, SDHC_HOSTCTL2, V18_ENA)) {
                 sdbus_set_voltage(&s->sdbus, SD_VOLTAGE_1_8V);
@@ -1421,6 +1441,7 @@ static void sdhci_init_readonly_registers(SDHCIState *s, Error **errp)
 
 void sdhci_initfn(SDHCIState *s)
 {
+    s->hostctl2_write_mask = UINT16_MAX;
     qbus_init(&s->sdbus, sizeof(s->sdbus), TYPE_SDHCI_BUS, DEVICE(s), "sd-bus");
 
     s->insert_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
@@ -1487,10 +1508,27 @@ static const VMStateDescription sdhci_pending_insert_vmstate = {
     },
 };
 
+static int sdhci_post_load(void *opaque, int version_id)
+{
+    SDHCIState *s = opaque;
+
+    if (s->uhs_mode >= UHS_I) {
+        if (FIELD_EX32(s->hostctl2, SDHC_HOSTCTL2, V18_ENA)) {
+            sdbus_set_voltage(&s->sdbus, SD_VOLTAGE_1_8V);
+        } else {
+            sdbus_set_voltage(&s->sdbus, SD_VOLTAGE_3_3V);
+        }
+    }
+    sdhci_update_irq(s);
+
+    return 0;
+}
+
 const VMStateDescription sdhci_vmstate = {
     .name = "sdhci",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .post_load = sdhci_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(sdmasysad, SDHCIState),
         VMSTATE_UINT16(blksize, SDHCIState),
@@ -1514,6 +1552,8 @@ const VMStateDescription sdhci_vmstate = {
         VMSTATE_UINT16(norintsigen, SDHCIState),
         VMSTATE_UINT16(errintsigen, SDHCIState),
         VMSTATE_UINT16(acmd12errsts, SDHCIState),
+        VMSTATE_UINT16_V(hostctl2, SDHCIState, 2),
+        VMSTATE_UINT16_V(vendor_spec, SDHCIState, 2),
         VMSTATE_UINT16(data_count, SDHCIState),
         VMSTATE_UINT64(admasysaddr, SDHCIState),
         VMSTATE_UINT8(stopped_state, SDHCIState),

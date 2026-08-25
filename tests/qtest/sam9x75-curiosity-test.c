@@ -93,6 +93,8 @@
 #define SDHCI_ERRINTSTS         0x32
 #define SDHCI_NORINTSTSEN       0x34
 #define SDHCI_ERRINTSTSEN       0x36
+#define SDHCI_NORINTSIGEN       0x38
+#define SDHCI_HOSTCTL2          0x3e
 #define SDHCI_ADMAERR           0x54
 #define SDHCI_ADMASYSADDR       0x58
 #define SDHCI_PRESET_INIT       0x60
@@ -100,6 +102,11 @@
 #define SDHCI_PRESET_HIGH_SPEED 0x64
 #define SDHCI_PRESET_SDR12      0x66
 #define SDHCI_PRESET_DDR50      0x6e
+#define SDMMC_MC1R              0x204
+#define SDMMC_ACR               0x208
+#define SDMMC_CC2R              0x20c
+#define SDMMC_CACR              0x230
+#define SDMMC_DBGR              0x234
 
 #define SDHCI_TRNS_DMA          BIT(0)
 #define SDHCI_TRNS_BLK_CNT_EN   BIT(1)
@@ -109,7 +116,13 @@
 #define SDHCI_CTRL_ADMA2_32     BIT(4)
 #define SDHCI_CLOCK_ENABLE      (BIT(2) | BIT(1) | BIT(0))
 #define SDHCI_RESET_ALL         BIT(0)
+#define SDHCI_RESET_CMD         BIT(1)
+#define SDHCI_RESET_DATA        BIT(2)
+#define SDHCI_HOSTCTL2_PRESET   BIT(15)
+#define SDHCI_HOSTCTL2_ASYNC    BIT(14)
 #define SDHCI_CARD_PRESENT      BIT(16)
+#define SDMMC_CACR_KEY          (0x46U << 8)
+#define SDMMC_CACR_CAPWREN      BIT(0)
 #define SDHCI_INT_CMD_COMPLETE  BIT(0)
 #define SDHCI_INT_XFER_COMPLETE BIT(1)
 #define SDHCI_INT_ERROR         BIT(15)
@@ -10171,6 +10184,10 @@ static void test_sdhci_preset_registers(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
 
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_HOSTCTL2, UINT16_MAX);
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE + SDHCI_HOSTCTL2),
+                    ==, SDHCI_HOSTCTL2_PRESET | SDHCI_HOSTCTL2_ASYNC);
+
     g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE +
                                 SDHCI_PRESET_INIT), ==, 0);
     g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE +
@@ -10204,6 +10221,87 @@ static void test_sdhci_preset_registers(void)
     qtest_system_reset(qts);
     g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE +
                                 SDHCI_PRESET_DEFAULT), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_sdhci_host_control2_migration(void)
+{
+    const uint16_t hostctl2 = SDHCI_HOSTCTL2_PRESET;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+
+    qtest_writew(from, SAM9X7_SDMMC0_BASE + SDHCI_HOSTCTL2, hostctl2);
+    g_assert_cmphex(qtest_readw(from, SAM9X7_SDMMC0_BASE + SDHCI_HOSTCTL2),
+                    ==, hostctl2);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_cmphex(qtest_readw(to, SAM9X7_SDMMC0_BASE + SDHCI_HOSTCTL2),
+                    ==, hostctl2);
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
+static void test_sdhci_software_reset_all(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_PRESET_DEFAULT, 0x0404);
+    qtest_writeb(qts, SAM9X7_SDMMC0_BASE + SDMMC_MC1R, 0x3b);
+    qtest_writel(qts, SAM9X7_SDMMC0_BASE + SDMMC_ACR, 3);
+    qtest_writel(qts, SAM9X7_SDMMC0_BASE + SDMMC_CC2R, 1);
+    qtest_writel(qts, SAM9X7_SDMMC0_BASE + SDMMC_CACR,
+                 SDMMC_CACR_KEY | SDMMC_CACR_CAPWREN);
+    qtest_writel(qts, SAM9X7_SDMMC0_BASE + SDMMC_DBGR, 1);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_HOSTCTL2,
+                 SDHCI_HOSTCTL2_PRESET);
+
+    qtest_writeb(qts, SAM9X7_SDMMC0_BASE + SDHCI_SWRST,
+                 SDHCI_RESET_ALL | SDHCI_RESET_CMD | SDHCI_RESET_DATA);
+
+    g_assert_cmphex(qtest_readb(qts, SAM9X7_SDMMC0_BASE + SDMMC_MC1R),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SDMMC0_BASE + SDMMC_ACR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SDMMC0_BASE + SDMMC_CC2R), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SDMMC0_BASE + SDMMC_CACR), ==, 0);
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE + SDHCI_HOSTCTL2),
+                    ==, 0);
+
+    /* SRR.SWRSTALL does not include PVR or DBGR. */
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_SDMMC0_BASE +
+                                SDHCI_PRESET_DEFAULT), ==, 0x0404);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SDMMC0_BASE + SDMMC_DBGR), ==, 1);
+
+    qtest_quit(qts);
+}
+
+static void test_sdhci_software_reset_command_irq(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    aic_configure(qts, 12, AIC_SMR_LEVEL_HIGH | 5, 0x5d5d0012);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_CLKCON,
+                 SDHCI_CLOCK_ENABLE);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_NORINTSTSEN,
+                 SDHCI_INT_CMD_COMPLETE);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_NORINTSIGEN,
+                 SDHCI_INT_CMD_COMPLETE);
+    sdhci_issue_command(qts, 0, 0, 0, 0, SDHCI_CMD_INDEX(0));
+
+    g_assert_true(qtest_readw(qts, SAM9X7_SDMMC0_BASE + SDHCI_NORINTSTS) &
+                  SDHCI_INT_CMD_COMPLETE);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(12));
+
+    qtest_writeb(qts, SAM9X7_SDMMC0_BASE + SDHCI_SWRST,
+                 SDHCI_RESET_CMD);
+    g_assert_false(qtest_readw(qts, SAM9X7_SDMMC0_BASE + SDHCI_NORINTSTS) &
+                   SDHCI_INT_CMD_COMPLETE);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(12));
 
     qtest_quit(qts);
 }
@@ -11291,6 +11389,12 @@ int main(int argc, char **argv)
                    test_sdhci_adma2_linux_nop_terminator);
     qtest_add_func("sam9x75/sdhci/preset-registers",
                    test_sdhci_preset_registers);
+    qtest_add_func("sam9x75/sdhci/host-control2-migration",
+                   test_sdhci_host_control2_migration);
+    qtest_add_func("sam9x75/sdhci/software-reset-all",
+                   test_sdhci_software_reset_all);
+    qtest_add_func("sam9x75/sdhci/software-reset-command-irq",
+                   test_sdhci_software_reset_command_irq);
     qtest_add_func("sam9x75/board/m2-interface-jumper",
                    test_board_m2_interface_jumper);
     qtest_add_func("sam9x75/nand/identification-program-and-erase",
