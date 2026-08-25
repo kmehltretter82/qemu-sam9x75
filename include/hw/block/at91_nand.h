@@ -15,6 +15,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(AT91NANDState, AT91_NAND)
 
 #define AT91_NAND_GPIO_NCE "nce"
 
+struct AT91PMECCState;
+
 #define AT91_NAND_PAGE_SIZE          4096
 #define AT91_NAND_OOB_SIZE           256
 #define AT91_NAND_PAGE_TOTAL_SIZE    (AT91_NAND_PAGE_SIZE + \
@@ -33,6 +35,7 @@ struct AT91NANDState {
 
     MemoryRegion mmio;
     BlockBackend *blk;
+    struct AT91PMECCState *pmecc;
     uint8_t **sparse_pages;
     bool raw_backend;
     bool selected;

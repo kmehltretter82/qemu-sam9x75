@@ -83,8 +83,8 @@ static bool sam9x75_curiosity_attach_sd(SAM9X7State *soc,
     return true;
 }
 
-static void sam9x75_curiosity_load_rom(MachineState *machine,
-                                        SAM9X7State *soc)
+static void sam9x75_curiosity_load_boot_rom(MachineState *machine,
+                                             SAM9X7State *soc)
 {
     g_autofree char *filename = NULL;
     Error *err = NULL;
@@ -92,7 +92,7 @@ static void sam9x75_curiosity_load_rom(MachineState *machine,
 
     filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, machine->firmware);
     if (!filename) {
-        error_report("Could not find SAM9X7 ROM image '%s'",
+        error_report("Could not find SAM9X7 boot ROM image '%s'",
                      machine->firmware);
         exit(EXIT_FAILURE);
     }
@@ -102,14 +102,14 @@ static void sam9x75_curiosity_load_rom(MachineState *machine,
         error_report_err(err);
         exit(EXIT_FAILURE);
     }
-    if (size != SAM9X7_ROM_SIZE) {
+    if (size != SAM9X7_BOOT_ROM_SIZE) {
         error_report("-bios image '%s' is %" PRId64 " bytes; SAM9X75 "
-                     "requires a complete 176 KiB ROM image",
+                     "requires a complete 80 KiB boot ROM image",
                      machine->firmware, size);
         exit(EXIT_FAILURE);
     }
     if (load_image_mr(filename, &soc->rom) != size) {
-        error_report("Failed to load SAM9X7 ROM image '%s'",
+        error_report("Failed to load SAM9X7 boot ROM image '%s'",
                      machine->firmware);
         exit(EXIT_FAILURE);
     }
@@ -303,7 +303,7 @@ static void sam9x75_curiosity_init(MachineState *machine)
                                 qdev_get_gpio_in(DEVICE(&soc->pio[2]), 8));
 
     if (machine->firmware) {
-        sam9x75_curiosity_load_rom(machine, soc);
+        sam9x75_curiosity_load_boot_rom(machine, soc);
     }
 
     /* U8 is the board's MCP16502TAB-E/S8B power-management IC. */

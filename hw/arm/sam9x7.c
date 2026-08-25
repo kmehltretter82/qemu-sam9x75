@@ -39,6 +39,56 @@ static const uint8_t sam9x7_flexcom_spi_num_cs[SAM9X7_NUM_FLEXCOM_SPI] = {
     2, 2, 2, 2, 4, 4,
 };
 
+#define SAM9X7_PMECC_GF13_INDEX_OFFSET 0x0000
+#define SAM9X7_PMECC_GF13_ALPHA_OFFSET 0x4000
+#define SAM9X7_PMECC_GF14_INDEX_OFFSET 0x8000
+#define SAM9X7_PMECC_GF14_ALPHA_OFFSET 0x10000
+
+static void sam9x7_build_pmecc_gf_table(uint8_t *rom, unsigned int m,
+                                        uint16_t primitive,
+                                        size_t index_offset,
+                                        size_t alpha_offset)
+{
+    unsigned int field_size = 1U << m;
+    unsigned int value = 1;
+    unsigned int i;
+
+    stw_le_p(rom + index_offset, UINT16_MAX);
+    for (i = 0; i < field_size - 1; i++) {
+        stw_le_p(rom + alpha_offset + i * sizeof(uint16_t), value);
+        stw_le_p(rom + index_offset + value * sizeof(uint16_t), i);
+
+        value <<= 1;
+        if (value & field_size) {
+            value ^= primitive;
+        }
+    }
+
+    g_assert(value == 1);
+    stw_le_p(rom + alpha_offset +
+             (field_size - 1) * sizeof(uint16_t), value);
+}
+
+static void sam9x7_init_pmecc_gf_tables(MemoryRegion *rom_mr)
+{
+    uint8_t *rom = memory_region_get_ram_ptr(rom_mr) +
+                   SAM9X7_BOOT_ROM_SIZE;
+
+    /*
+     * The SAM9X7 ECC ROM holds the lookup tables used by the PMECC software
+     * correction algorithm.  It is distinct from the proprietary 80 KiB
+     * boot ROM at address zero, so provide the architectural tables
+     * independently of whether boot firmware is supplied with -bios or
+     * firmware is started directly with -kernel.
+     */
+    sam9x7_build_pmecc_gf_table(rom, 13, 0x201b,
+                                SAM9X7_PMECC_GF13_INDEX_OFFSET,
+                                SAM9X7_PMECC_GF13_ALPHA_OFFSET);
+    sam9x7_build_pmecc_gf_table(rom, 14, 0x4443,
+                                SAM9X7_PMECC_GF14_INDEX_OFFSET,
+                                SAM9X7_PMECC_GF14_ALPHA_OFFSET);
+}
+
 enum {
     SAM9X7_EBI_ASSIGN_DDR,
     SAM9X7_EBI_ASSIGN_NAND_CS2,
@@ -469,6 +519,8 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->smc), 0,
                        qdev_get_gpio_in(DEVICE(&s->ebi_irq), 1));
 
+    object_property_set_link(OBJECT(&s->nand), "pmecc", OBJECT(&s->pmecc),
+                             &error_abort);
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->nand), errp)) {
         return;
     }
@@ -625,17 +677,30 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
                            qdev_get_gpio_in(DEVICE(&s->aic), pit64b_irq[i]));
     }
 
+    /*
+     * Keep one stable migration backing for both internal ROM arrays.  The
+     * hardware exposes the boot code and ECC tables through distinct guest
+     * address ranges below.
+     */
     if (!memory_region_init_rom(&s->rom, OBJECT(dev), "sam9x7.rom",
-                                SAM9X7_ROM_SIZE, errp)) {
+                                SAM9X7_BOOT_ROM_SIZE +
+                                SAM9X7_ECC_ROM_SIZE, errp)) {
         return;
     }
-    memory_region_add_subregion(s->memory, SAM9X7_ROM_BASE, &s->rom);
+    sam9x7_init_pmecc_gf_tables(&s->rom);
 
-    /* At reset the internal ROM is visible through the boot window. */
+    /* At reset the dedicated boot ROM is visible at address zero. */
     memory_region_init_alias(&s->boot_alias, OBJECT(dev),
                              "sam9x7.boot-rom-alias", &s->rom, 0,
-                             SAM9X7_ROM_SIZE);
+                             SAM9X7_BOOT_ROM_SIZE);
     memory_region_add_subregion(s->memory, SAM9X7_BOOT_BASE, &s->boot_alias);
+
+    memory_region_init_alias(&s->ecc_alias, OBJECT(dev),
+                             "sam9x7.ecc-rom-alias", &s->rom,
+                             SAM9X7_BOOT_ROM_SIZE,
+                             SAM9X7_ECC_ROM_SIZE);
+    memory_region_add_subregion(s->memory, SAM9X7_ECC_ROM_BASE,
+                                &s->ecc_alias);
 
     if (!memory_region_init_ram(&s->sram0, OBJECT(dev), "sam9x7.sram0",
                                 SAM9X7_SRAM0_SIZE, errp)) {

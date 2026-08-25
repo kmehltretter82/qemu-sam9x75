@@ -13,6 +13,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
 #include "hw/core/resettable.h"
+#include "hw/misc/at91_pmecc.h"
 #include "migration/qemu-file-types.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
@@ -518,7 +519,12 @@ static void at91_nand_data_write(AT91NANDState *s, uint8_t value)
             s->program_pos = s->program_column;
         }
         if (s->program_pos < AT91_NAND_PAGE_TOTAL_SIZE) {
-            s->program[s->program_pos++] = value;
+            uint32_t column = s->program_pos++;
+
+            s->program[column] = value;
+            if (s->pmecc) {
+                at91_pmecc_transfer_byte(s->pmecc, true, value);
+            }
         } else {
             s->status |= NAND_STATUS_FAIL;
         }
@@ -560,7 +566,13 @@ static uint8_t at91_nand_data_read(AT91NANDState *s)
     }
 
     if (s->data_pos < s->data_len) {
-        return s->data[s->data_pos++];
+        uint32_t column = s->data_pos++;
+        uint8_t value = s->data[column];
+
+        if (s->command == NAND_CMD_READ0 && s->pmecc) {
+            at91_pmecc_transfer_byte(s->pmecc, false, value);
+        }
+        return value;
     }
     return 0xff;
 }
@@ -936,6 +948,8 @@ static const VMStateDescription at91_nand_vmstate = {
 
 static const Property at91_nand_properties[] = {
     DEFINE_PROP_DRIVE("drive", AT91NANDState, blk),
+    DEFINE_PROP_LINK("pmecc", AT91NANDState, pmecc, TYPE_AT91_PMECC,
+                     AT91PMECCState *),
 };
 
 static void at91_nand_init(Object *obj)

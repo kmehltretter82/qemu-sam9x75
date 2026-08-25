@@ -71,8 +71,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 
 /* Internal memories and external-memory windows. */
 #define SAM9X7_BOOT_BASE             0x00000000
-#define SAM9X7_ROM_BASE              0x00100000
-#define SAM9X7_ROM_SIZE              0x0002c000
+#define SAM9X7_BOOT_ROM_SIZE         0x00014000
+#define SAM9X7_ECC_ROM_BASE          0x00100000
+#define SAM9X7_ECC_ROM_SIZE          0x00018000
 #define SAM9X7_SRAM0_BASE            0x00300000
 #define SAM9X7_SRAM0_SIZE            0x00010000
 #define SAM9X7_SRAM1_BASE            0x00400000
@@ -201,6 +202,7 @@ struct SAM9X7State {
 
     MemoryRegion rom;
     MemoryRegion boot_alias;
+    MemoryRegion ecc_alias;
     MemoryRegion boot_sram_alias;
     MemoryRegion sram0;
     MemoryRegion sram1;

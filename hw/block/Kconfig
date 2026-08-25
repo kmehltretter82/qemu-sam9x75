@@ -15,6 +15,7 @@ config SSI_M25P80
 
 config AT91_NAND
     bool
+    select AT91_PMECC
 
 config PFLASH_CFI01
     bool

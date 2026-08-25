@@ -17,8 +17,13 @@
 #define SOC_RESET_POWER_IRQ     0
 
 #define SAM9X7_BOOT_BASE        0x00000000
-#define SAM9X7_ROM_BASE         0x00100000
-#define SAM9X7_ROM_SIZE         0x0002c000
+#define SAM9X7_BOOT_ROM_SIZE    0x00014000
+#define SAM9X7_ECC_ROM_BASE     0x00100000
+#define SAM9X7_ECC_ROM_SIZE     0x00018000
+#define SAM9X7_GF13_INDEX       0x0000
+#define SAM9X7_GF13_ALPHA       0x4000
+#define SAM9X7_GF14_INDEX       0x8000
+#define SAM9X7_GF14_ALPHA       0x10000
 #define SAM9X7_SRAM0_BASE       0x00300000
 #define SAM9X7_SRAM1_BASE       0x00400000
 #define SAM9X7_UDPHS_FIFO_BASE  0x00500000
@@ -631,6 +636,7 @@
 #define GEM_DESCONF6            0x294
 #define GEM_INT_Q1_STATUS       0x400
 #define GEM_TRANSMIT_Q1_PTR     0x440
+#define GEM_RECEIVE_Q1_PTR      0x480
 #define GEM_INT_Q1_ENABLE       0x600
 
 #define GEM_OCTTXLO             0x100
@@ -1579,6 +1585,7 @@
 #define PMECC_SR                0x18
 #define PMECC_IER               0x1c
 #define PMECC_IMR               0x24
+#define PMECC_ISR               0x28
 #define PMECC_ECC0              0x40
 #define PMECC_BANK_COUNT        8
 #define PMECC_BANK_STRIDE       0x40
@@ -1588,16 +1595,36 @@
 #define PMECC_REM_REG_COUNT     12
 #define PMECC_CTRL_ENABLE       BIT(4)
 #define PMECC_CTRL_DISABLE      BIT(5)
+#define PMECC_CTRL_RESET        BIT(0)
+#define PMECC_CTRL_DATA         BIT(1)
+#define PMECC_SR_BUSY           BIT(0)
 #define PMECC_SR_ENABLE         BIT(4)
+#define PMECC_CFG_BCH_ERR_8     2
+#define PMECC_CFG_BCH_ERR_24    4
+#define PMECC_CFG_SECTOR_1024   BIT(4)
+#define PMECC_CFG_PAGESIZE_4    (2U << 8)
+#define PMECC_CFG_PAGESIZE_8    (3U << 8)
+#define PMECC_CFG_NAND_WRITE    BIT(12)
+#define PMECC_CFG_AUTO          BIT(20)
 
 #define PMERRLOC_CFG            0x00
 #define PMERRLOC_PRIM           0x04
 #define PMERRLOC_LEN            0x08
 #define PMERRLOC_DIS            0x0c
+#define PMERRLOC_SR             0x10
 #define PMERRLOC_IER            0x14
+#define PMERRLOC_IDR            0x18
 #define PMERRLOC_IMR            0x1c
 #define PMERRLOC_ISR            0x20
+#define PMERRLOC_SIGMA0         0x28
+#define PMERRLOC_SIGMA(n)       (PMERRLOC_SIGMA0 + (n) * 4)
+#define PMERRLOC_EL0            0x8c
+#define PMERRLOC_EL(n)          (PMERRLOC_EL0 + (n) * 4)
+#define PMERRLOC_EL_COUNT       24
 #define PMERRLOC_DONE           BIT(0)
+#define PMERRLOC_CFG_GF14       BIT(0)
+#define PMERRLOC_ERR_COUNT(n)   ((n) << 8)
+#define PMERRLOC_CFG_ERRNUM(n)  ((n) << 16)
 
 #define QSPI_CR                 0x00
 #define QSPI_MR                 0x04
@@ -1830,8 +1857,9 @@ static void test_memory_and_identification(void)
     qtest_writel(qts, SAM9X7_DDR_BASE, 0xc001d00d);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_DDR_BASE), ==, 0xc001d00d);
 
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_ROM_BASE), ==,
-                    qtest_readl(qts, SAM9X7_BOOT_BASE));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_ECC_ROM_BASE), ==,
+                    0x0000ffff);
 
     qtest_quit(qts);
 }
@@ -1948,15 +1976,18 @@ static void test_matrix_registers_and_protection(void)
 static void test_matrix_boot_remap(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
-    uint32_t rom_word = qtest_readl(qts, SAM9X7_ROM_BASE);
+    uint32_t boot_rom_word = qtest_readl(qts, SAM9X7_BOOT_BASE);
+    uint32_t ecc_rom_word = qtest_readl(qts, SAM9X7_ECC_ROM_BASE);
 
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==, rom_word);
+    g_assert_cmphex(boot_rom_word, ==, 0);
+    g_assert_cmphex(ecc_rom_word, ==, 0x0000ffff);
     qtest_writel(qts, SAM9X7_SRAM0_BASE, 0x1234abcd);
     qtest_writel(qts, SAM9X7_SRAM0_BASE + 4, 0x5678ef90);
 
     /* A non-CPU host remap must not alter the CPU's boot view. */
     qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_MRCR, BIT(0));
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==, rom_word);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==,
+                    boot_rom_word);
 
     qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_MRCR, BIT(12));
     g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==, 0x1234abcd);
@@ -1965,17 +1996,22 @@ static void test_matrix_boot_remap(void)
     qtest_writel(qts, SAM9X7_BOOT_BASE + 4, 0xa5a55a5a);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + 4), ==,
                     0xa5a55a5a);
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_ROM_BASE), ==, rom_word);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_ECC_ROM_BASE), ==,
+                    ecc_rom_word);
 
     qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_MRCR, 0);
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==, rom_word);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==,
+                    boot_rom_word);
     qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_MRCR, BIT(13));
     g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==, 0x1234abcd);
 
     qtest_system_reset(qts);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_MRCR),
                     ==, 0);
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==, rom_word);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==,
+                    boot_rom_word);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_ECC_ROM_BASE), ==,
+                    ecc_rom_word);
 
     qtest_quit(qts);
 }
@@ -2011,35 +2047,127 @@ static void test_matrix_remap_migration(void)
     qtest_quit(from);
 }
 
+static void assert_rom_galois_table(QTestState *qts, unsigned int m,
+                                    uint16_t primitive,
+                                    uint32_t index_offset,
+                                    uint32_t alpha_offset)
+{
+    unsigned int field_size = 1U << m;
+    unsigned int field_order = field_size - 1;
+    g_autofree uint16_t *index = g_new(uint16_t, field_size);
+    g_autofree uint16_t *alpha = g_new(uint16_t, field_size);
+    unsigned int expected = 1;
+    unsigned int i;
+
+    g_assert_cmpuint(index_offset + field_size * sizeof(*index), <=,
+                     SAM9X7_ECC_ROM_SIZE);
+    g_assert_cmpuint(alpha_offset + field_size * sizeof(*alpha), <=,
+                     SAM9X7_ECC_ROM_SIZE);
+    qtest_memread(qts, SAM9X7_ECC_ROM_BASE + index_offset, index,
+                  field_size * sizeof(*index));
+    qtest_memread(qts, SAM9X7_ECC_ROM_BASE + alpha_offset, alpha,
+                  field_size * sizeof(*alpha));
+    for (i = 0; i < field_size; i++) {
+        index[i] = le16_to_cpu(index[i]);
+        alpha[i] = le16_to_cpu(alpha[i]);
+    }
+
+    /* The ROM uses 0xffff for log(0), just like AT91Bootstrap build_gf(). */
+    g_assert_cmphex(index[0], ==, UINT16_MAX);
+    for (i = 0; i < field_order; i++) {
+        g_assert_cmphex(alpha[i], ==, expected);
+        g_assert_cmphex(index[expected], ==, i);
+
+        expected <<= 1;
+        if (expected & field_size) {
+            expected ^= primitive;
+        }
+    }
+    g_assert_cmphex(expected, ==, 1);
+    g_assert_cmphex(alpha[field_order], ==, 1);
+}
+
+static void test_rom_default_pmecc_galois_tables(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    /*
+     * AT91Bootstrap consumes these four little-endian short tables directly
+     * from the dedicated ECC ROM during software BCH correction.  Validate
+     * every exponent and inverse mapping, not only a handful of entries.
+     */
+    assert_rom_galois_table(qts, 13, 0x201b,
+                            SAM9X7_GF13_INDEX, SAM9X7_GF13_ALPHA);
+    assert_rom_galois_table(qts, 14, 0x4443,
+                            SAM9X7_GF14_INDEX, SAM9X7_GF14_ALPHA);
+
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_ECC_ROM_BASE +
+                                SAM9X7_GF13_ALPHA), ==, 1);
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_ECC_ROM_BASE +
+                                SAM9X7_GF14_ALPHA), ==, 1);
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_BOOT_BASE +
+                                SAM9X7_GF14_ALPHA), ==, 0);
+
+    qtest_quit(qts);
+}
+
 static void test_rom_image_loading(void)
 {
+    static const struct {
+        off_t offset;
+        uint32_t value;
+    } table_markers[] = {
+        { SAM9X7_GF13_INDEX + 0x100, 0x13a1cafe },
+        { SAM9X7_GF13_ALPHA,         0x13a2cafe },
+        { SAM9X7_GF14_INDEX,         0x14a1cafe },
+        { SAM9X7_GF14_ALPHA,         0x14a2cafe },
+    };
     const uint32_t first = cpu_to_le32(0xea000006);
     const uint32_t last = cpu_to_le32(0x9750cafe);
     g_autofree char *rom_path = NULL;
     QTestState *qts;
     GError *error = NULL;
+    unsigned int i;
     int fd;
     int ret;
 
     fd = g_file_open_tmp("sam9x75-rom-XXXXXX", &rom_path, &error);
     g_assert_no_error(error);
     g_assert_cmpint(fd, >=, 0);
-    ret = ftruncate(fd, SAM9X7_ROM_SIZE);
+    ret = ftruncate(fd, SAM9X7_BOOT_ROM_SIZE);
     g_assert_cmpint(ret, ==, 0);
     ret = pwrite(fd, &first, sizeof(first), 0);
     g_assert_cmpint(ret, ==, sizeof(first));
-    ret = pwrite(fd, &last, sizeof(last), SAM9X7_ROM_SIZE - sizeof(last));
+    ret = pwrite(fd, &last, sizeof(last),
+                 SAM9X7_BOOT_ROM_SIZE - sizeof(last));
     g_assert_cmpint(ret, ==, sizeof(last));
+    for (i = 0; i < G_N_ELEMENTS(table_markers); i++) {
+        uint32_t marker = cpu_to_le32(table_markers[i].value);
+
+        ret = pwrite(fd, &marker, sizeof(marker), table_markers[i].offset);
+        g_assert_cmpint(ret, ==, sizeof(marker));
+    }
     close(fd);
 
     qts = qtest_initf(SAM9X75_MACHINE " -bios %s", rom_path);
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_ROM_BASE), ==,
-                    le32_to_cpu(first));
     g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==,
                     le32_to_cpu(first));
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_ROM_BASE +
-                                SAM9X7_ROM_SIZE - sizeof(last)), ==,
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE +
+                                SAM9X7_BOOT_ROM_SIZE - sizeof(last)), ==,
                     le32_to_cpu(last));
+    for (i = 0; i < G_N_ELEMENTS(table_markers); i++) {
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE +
+                                    table_markers[i].offset), ==,
+                        table_markers[i].value);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_ECC_ROM_BASE +
+                                    table_markers[i].offset), !=,
+                        table_markers[i].value);
+    }
+    assert_rom_galois_table(qts, 13, 0x201b,
+                            SAM9X7_GF13_INDEX, SAM9X7_GF13_ALPHA);
+    assert_rom_galois_table(qts, 14, 0x4443,
+                            SAM9X7_GF14_INDEX, SAM9X7_GF14_ALPHA);
 
     qtest_writel(qts, SAM9X7_SRAM0_BASE, 0x12349750);
     qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_MRCR,
@@ -2048,6 +2176,16 @@ static void test_rom_image_loading(void)
     qtest_system_reset(qts);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE), ==,
                     le32_to_cpu(first));
+    for (i = 0; i < G_N_ELEMENTS(table_markers); i++) {
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_BOOT_BASE +
+                                    table_markers[i].offset), ==,
+                        table_markers[i].value);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_ECC_ROM_BASE +
+                                    table_markers[i].offset), !=,
+                        table_markers[i].value);
+    }
+    g_assert_cmphex(qtest_readw(qts, SAM9X7_ECC_ROM_BASE +
+                                SAM9X7_GF14_ALPHA), ==, 1);
 
     qtest_quit(qts);
     unlink(rom_path);
@@ -2091,7 +2229,7 @@ static void test_rom_cpu_entry(void)
     fd = g_file_open_tmp("sam9x75-rom-entry-XXXXXX", &rom_path, &error);
     g_assert_no_error(error);
     g_assert_cmpint(fd, >=, 0);
-    ret = ftruncate(fd, SAM9X7_ROM_SIZE);
+    ret = ftruncate(fd, SAM9X7_BOOT_ROM_SIZE);
     g_assert_cmpint(ret, ==, 0);
     ret = pwrite(fd, semihost_exit, sizeof(semihost_exit), 0);
     g_assert_cmpint(ret, ==, sizeof(semihost_exit));
@@ -2295,15 +2433,15 @@ static void assert_rom_image_size_rejected(off_t size)
     g_assert_true(WIFEXITED(wait_status));
     g_assert_cmpint(WEXITSTATUS(wait_status), !=, 0);
     g_assert_nonnull(g_strstr_len(stderr_text, -1,
-                                 "requires a complete 176 KiB ROM image"));
+                                 "requires a complete 80 KiB boot ROM image"));
 
     unlink(rom_path);
 }
 
 static void test_rom_image_size_validation(void)
 {
-    assert_rom_image_size_rejected(SAM9X7_ROM_SIZE - 1);
-    assert_rom_image_size_rejected(SAM9X7_ROM_SIZE + 1);
+    assert_rom_image_size_rejected(SAM9X7_BOOT_ROM_SIZE - 1);
+    assert_rom_image_size_rejected(SAM9X7_BOOT_ROM_SIZE + 1);
 }
 
 static void test_rom_boot_path_validation(void)
@@ -4942,6 +5080,32 @@ static void gem_transmit_test_frame(QTestState *qts,
     g_assert_true(qtest_readl(qts, descriptor + 4) & GEM_TX_DESC_USED);
 }
 
+static void gem_quiesce_unused_queues(QTestState *qts)
+{
+    const uint32_t tx_descriptor = SAM9X7_SRAM0_BASE + 0x7000;
+    const uint32_t rx_descriptor = SAM9X7_SRAM0_BASE + 0x7010;
+    unsigned int q;
+
+    /*
+     * The datasheet requires even unused queue pointers to reference USED
+     * descriptors.  In particular, zero aliases the boot ROM and is not an
+     * inert descriptor address.
+     */
+    qtest_writel(qts, tx_descriptor, 0);
+    qtest_writel(qts, tx_descriptor + 4,
+                 GEM_TX_DESC_USED | GEM_TX_DESC_WRAP);
+    qtest_writel(qts, rx_descriptor,
+                 GEM_RX_DESC_OWNERSHIP | GEM_RX_DESC_WRAP);
+    qtest_writel(qts, rx_descriptor + 4, 0);
+
+    for (q = 1; q < GEM_NUM_QUEUES; q++) {
+        qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TRANSMIT_Q1_PTR +
+                     (q - 1) * 4, tx_descriptor);
+        qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_RECEIVE_Q1_PTR +
+                     (q - 1) * 4, rx_descriptor);
+    }
+}
+
 static void gem_prepare_test_receive(QTestState *qts)
 {
     const uint32_t descriptor = SAM9X7_SRAM0_BASE + 0x5000;
@@ -4982,6 +5146,7 @@ static void test_gem_statistics_generated_and_clear(void)
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
     uint32_t nwcfg;
 
+    gem_quiesce_unused_queues(qts);
     nwcfg = qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_NWCFG);
     qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCFG,
                  nwcfg | GEM_NWCFG_PROMISC | GEM_NWCFG_FCS_REMOVE);
@@ -5044,6 +5209,7 @@ static void test_gem_statistics_test_controls(void)
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
     uint32_t offset;
 
+    gem_quiesce_unused_queues(qts);
     qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL, GEM_NWCTRL_WESTAT);
     qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TXCNT, 7);
     qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL, 0);
@@ -5116,6 +5282,7 @@ static void test_gem_statistics_migration(void)
                                       NULL, true);
     QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
 
+    gem_quiesce_unused_queues(from);
     qtest_irq_intercept_out_named(from, "/machine/soc/gmac", "sysbus-irq");
     qtest_irq_intercept_out_named(to, "/machine/soc/gmac", "sysbus-irq");
     qtest_writel(from, SAM9X7_GMAC_BASE + GEM_IER,
@@ -14427,9 +14594,295 @@ static void test_board_memory_cs_jumpers(void)
     qtest_quit(qts);
 }
 
+#define PMECC_TEST_SECTOR_SIZE      512
+#define PMECC_TEST_ECC_BYTES        13
+#define PMECC_TEST_ECC_AREA_SIZE    (PMECC_BANK_COUNT * \
+                                     PMECC_TEST_ECC_BYTES)
+#define PMECC_TEST_CODEWORD_BITS    (PMECC_TEST_SECTOR_SIZE * 8 + \
+                                     PMECC_TEST_ECC_BYTES * 8)
+#define PMECC_TEST_STREAM_SIZE      (NAND_PAGE_SIZE + \
+                                     PMECC_TEST_ECC_AREA_SIZE)
+#define PMECC_TEST_M14_SECTOR_SIZE  1024
+#define PMECC_TEST_M14_SECTORS      4
+#define PMECC_TEST_M14_ECC_BYTES    42
+#define PMECC_TEST_M14_ECC_AREA_SIZE \
+    (PMECC_TEST_M14_SECTORS * PMECC_TEST_M14_ECC_BYTES)
+#define PMECC_TEST_M14_CODEWORD_BITS \
+    (PMECC_TEST_M14_SECTOR_SIZE * 8 + PMECC_TEST_M14_ECC_BYTES * 8)
+#define PMECC_TEST_M14_STREAM_SIZE  \
+    (NAND_PAGE_SIZE + PMECC_TEST_M14_ECC_AREA_SIZE)
+
+typedef enum PmeccTestPattern {
+    PMECC_PATTERN_ZERO,
+    PMECC_PATTERN_FF,
+    PMECC_PATTERN_INCREMENTING,
+    PMECC_PATTERN_XORSHIFT32,
+} PmeccTestPattern;
+
+static const uint8_t pmecc_ecc_zero[PMECC_TEST_ECC_BYTES] = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+static const uint8_t pmecc_ecc_ff[PMECC_TEST_ECC_BYTES] = {
+    0x08, 0x75, 0x8b, 0x6f, 0x48, 0x36, 0xa6,
+    0xbc, 0x16, 0x61, 0x58, 0xdb, 0x52,
+};
+
+static const uint8_t pmecc_ecc_incrementing[PMECC_TEST_ECC_BYTES] = {
+    0x08, 0x50, 0x22, 0x66, 0x9c, 0xe0, 0x21,
+    0xa0, 0x6d, 0xcd, 0x6c, 0x79, 0x36,
+};
+
+static const uint8_t pmecc_ecc_xorshift32[PMECC_TEST_ECC_BYTES] = {
+    0xaa, 0x5d, 0x0f, 0xe0, 0x32, 0x76, 0x25,
+    0x0d, 0xb6, 0x05, 0xff, 0x17, 0xa7,
+};
+
+/* Independent bchlib vector for data[i] = i * 73 + 0x5a. */
+static const uint8_t pmecc_m14_t24_ecc[PMECC_TEST_M14_ECC_BYTES] = {
+    0xaa, 0x00, 0x76, 0x0c, 0x51, 0xe2, 0xfd,
+    0xe0, 0xe5, 0xfd, 0x16, 0xe0, 0x28, 0x7c,
+    0xa6, 0xc9, 0x89, 0x3c, 0x2d, 0xea, 0x3a,
+    0x33, 0x1c, 0x62, 0x40, 0x16, 0x4c, 0x2e,
+    0x48, 0xa0, 0x1d, 0xb1, 0x06, 0xb4, 0x5f,
+    0x30, 0x9c, 0xda, 0x95, 0x5b, 0x36, 0x10,
+};
+
+static const uint8_t *pmecc_expected_ecc(PmeccTestPattern pattern)
+{
+    switch (pattern) {
+    case PMECC_PATTERN_ZERO:
+        return pmecc_ecc_zero;
+    case PMECC_PATTERN_FF:
+        return pmecc_ecc_ff;
+    case PMECC_PATTERN_INCREMENTING:
+        return pmecc_ecc_incrementing;
+    case PMECC_PATTERN_XORSHIFT32:
+        return pmecc_ecc_xorshift32;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void pmecc_fill_sector(uint8_t *data, PmeccTestPattern pattern)
+{
+    uint32_t xorshift = 0x6d2b79f5;
+    unsigned int i;
+
+    for (i = 0; i < PMECC_TEST_SECTOR_SIZE; i++) {
+        switch (pattern) {
+        case PMECC_PATTERN_ZERO:
+            data[i] = 0;
+            break;
+        case PMECC_PATTERN_FF:
+            data[i] = 0xff;
+            break;
+        case PMECC_PATTERN_INCREMENTING:
+            data[i] = i;
+            break;
+        case PMECC_PATTERN_XORSHIFT32:
+            xorshift ^= xorshift << 13;
+            xorshift ^= xorshift >> 17;
+            xorshift ^= xorshift << 5;
+            data[i] = xorshift;
+            break;
+        default:
+            g_assert_not_reached();
+        }
+    }
+}
+
+static void pmecc_fill_m14_sector(uint8_t *data)
+{
+    unsigned int i;
+
+    for (i = 0; i < PMECC_TEST_M14_SECTOR_SIZE; i++) {
+        data[i] = i * 73 + 0x5a;
+    }
+}
+
+static void pmecc_assert_ecc_bytes(QTestState *qts, unsigned int bank,
+                                   const uint8_t *expected,
+                                   size_t expected_size)
+{
+    uint8_t actual[PMECC_ECC_REG_COUNT * sizeof(uint32_t)];
+    uint64_t address = SAM9X7_PMECC_BASE + PMECC_ECC_FIRST +
+                       bank * PMECC_BANK_STRIDE;
+    unsigned int i;
+
+    g_assert_cmpuint(bank, <, PMECC_BANK_COUNT);
+    g_assert_cmpuint(expected_size, <=, sizeof(actual));
+    for (i = 0; i < expected_size; i++) {
+        actual[i] = qtest_readb(qts, address + i);
+    }
+    g_assert_cmpmem(actual, expected_size, expected, expected_size);
+}
+
+static void pmecc_assert_ecc(QTestState *qts, unsigned int bank,
+                             const uint8_t expected[PMECC_TEST_ECC_BYTES])
+{
+    pmecc_assert_ecc_bytes(qts, bank, expected, PMECC_TEST_ECC_BYTES);
+}
+
+static void pmecc_assert_remainders_count(QTestState *qts,
+                                          unsigned int bank,
+                                          const uint32_t *expected,
+                                          size_t expected_count)
+{
+    uint64_t address = SAM9X7_PMECC_BASE + PMECC_REM_FIRST +
+                       bank * PMECC_BANK_STRIDE;
+    unsigned int i;
+
+    g_assert_cmpuint(bank, <, PMECC_BANK_COUNT);
+    g_assert_cmpuint(expected_count, <=, PMECC_REM_REG_COUNT);
+    for (i = 0; i < expected_count; i++) {
+        g_assert_cmphex(qtest_readl(qts, address + i * 4), ==, expected[i]);
+    }
+    for (; i < PMECC_REM_REG_COUNT; i++) {
+        g_assert_cmphex(qtest_readl(qts, address + i * 4), ==, 0);
+    }
+}
+
+static void pmecc_assert_remainders(QTestState *qts, unsigned int bank,
+                                    const uint32_t expected[4])
+{
+    pmecc_assert_remainders_count(qts, bank, expected, 4);
+}
+
+static void pmecc_start_8x512(QTestState *qts, bool write)
+{
+    uint32_t cfg = PMECC_CFG_BCH_ERR_8 | PMECC_CFG_PAGESIZE_8;
+
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CTRL,
+                 PMECC_CTRL_DISABLE | PMECC_CTRL_RESET);
+    if (write) {
+        cfg |= PMECC_CFG_NAND_WRITE;
+    } else {
+        cfg |= PMECC_CFG_AUTO;
+    }
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CFG, cfg);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_SAREA,
+                 NAND_OOB_SIZE - 1);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_SADDR, 0);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_EADDR,
+                 PMECC_TEST_ECC_AREA_SIZE - 1);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CTRL,
+                 PMECC_CTRL_ENABLE);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CTRL,
+                 PMECC_CTRL_DATA);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_SR), ==,
+                    PMECC_SR_ENABLE | PMECC_SR_BUSY);
+}
+
+static void pmecc_start_4x1024_t24(QTestState *qts, bool write)
+{
+    uint32_t cfg = PMECC_CFG_BCH_ERR_24 | PMECC_CFG_SECTOR_1024 |
+                   PMECC_CFG_PAGESIZE_4;
+
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CTRL,
+                 PMECC_CTRL_DISABLE | PMECC_CTRL_RESET);
+    if (write) {
+        cfg |= PMECC_CFG_NAND_WRITE;
+    } else {
+        cfg |= PMECC_CFG_AUTO;
+    }
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CFG, cfg);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_SAREA,
+                 NAND_OOB_SIZE - 1);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_SADDR, 0);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_EADDR,
+                 PMECC_TEST_M14_ECC_AREA_SIZE - 1);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CTRL,
+                 PMECC_CTRL_ENABLE);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CTRL,
+                 PMECC_CTRL_DATA);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_SR), ==,
+                    PMECC_SR_ENABLE | PMECC_SR_BUSY);
+}
+
+static void pmecc_program_page(QTestState *qts, uint32_t page,
+                               const uint8_t *data, size_t length)
+{
+    nand_program(qts, page, 0, data, length);
+}
+
+static void pmecc_read_stream(QTestState *qts, uint32_t page)
+{
+    unsigned int i;
+
+    pmecc_start_8x512(qts, false);
+    nand_start_read(qts, page, 0);
+    for (i = 0; i < PMECC_TEST_STREAM_SIZE; i++) {
+        qtest_readb(qts, NAND_DATA);
+    }
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_SR), ==,
+                    PMECC_SR_ENABLE);
+}
+
+static void pmecc_set_codeword_bit(uint8_t *raw, unsigned int sector,
+                                   unsigned int position)
+{
+    unsigned int bit;
+    unsigned int byte;
+
+    g_assert_cmpuint(sector, <, PMECC_BANK_COUNT);
+    g_assert_cmpuint(position, >, 0);
+    g_assert_cmpuint(position, <=, PMECC_TEST_CODEWORD_BITS);
+
+    bit = position - 1;
+    if (bit < PMECC_TEST_SECTOR_SIZE * 8) {
+        byte = sector * PMECC_TEST_SECTOR_SIZE + bit / 8;
+    } else {
+        bit -= PMECC_TEST_SECTOR_SIZE * 8;
+        byte = NAND_PAGE_SIZE + sector * PMECC_TEST_ECC_BYTES + bit / 8;
+    }
+    raw[byte] |= BIT(bit % 8);
+}
+
+static void pmecc_assert_reset_registers(QTestState *qts)
+{
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_CFG), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_SAREA), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_SADDR), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_EADDR), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_SR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_ISR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_ECC0), ==,
+                    UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_REM_FIRST),
+                    ==, 0);
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_CFG),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_PRIM),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_LEN),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_SR),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_IMR),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_ISR),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_PMERRLOC_BASE + PMERRLOC_SIGMA0), ==,
+                    1);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_PMERRLOC_BASE + PMERRLOC_SIGMA(1)), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_EL0),
+                    ==, 0);
+}
+
 static void test_smc_and_pmecc_registers(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
 
     g_assert_cmphex(qtest_readl(qts, SAM9X7_SMC_BASE + SMC_SETUP2), ==,
                     0x01010101);
@@ -14461,6 +14914,7 @@ static void test_smc_and_pmecc_registers(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_SMC_BASE + SMC_WPSR), ==,
                     (SMC_PULSE2 << 8) | SMC_WPSR_WPVS);
 
+    pmecc_assert_reset_registers(qts);
     qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CFG, UINT32_MAX);
     qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_SAREA, UINT32_MAX);
     qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_SADDR, 0x1a5);
@@ -14479,10 +14933,47 @@ static void test_smc_and_pmecc_registers(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_ECC0), ==,
                     UINT32_MAX);
 
+    /* Use a valid BCH8/512, eight-sector profile for the enabled checks. */
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CFG,
+                 PMECC_CFG_BCH_ERR_8 | PMECC_CFG_PAGESIZE_8);
     qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CTRL,
                  PMECC_CTRL_ENABLE);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_SR), ==,
                     PMECC_SR_ENABLE);
+
+    /*
+     * AT91Bootstrap switches read/write mode with an enabled CFG RMW.  Only
+     * AUTO and NANDWR are live; geometry and SPAREEN remain protected.
+     */
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CFG, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_CFG), ==,
+                    PMECC_CFG_AUTO | PMECC_CFG_NAND_WRITE |
+                    PMECC_CFG_PAGESIZE_8 | PMECC_CFG_BCH_ERR_8);
+    value = qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_CFG);
+    value |= PMECC_CFG_NAND_WRITE;
+    value &= ~PMECC_CFG_AUTO;
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CFG, value);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_CFG), ==,
+                    PMECC_CFG_NAND_WRITE | PMECC_CFG_PAGESIZE_8 |
+                    PMECC_CFG_BCH_ERR_8);
+    value = qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_CFG);
+    value |= PMECC_CFG_AUTO;
+    value &= ~PMECC_CFG_NAND_WRITE;
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CFG, value);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_CFG), ==,
+                    PMECC_CFG_AUTO | PMECC_CFG_PAGESIZE_8 |
+                    PMECC_CFG_BCH_ERR_8);
+
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_SAREA, 0);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_SADDR, 0);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_EADDR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_SAREA), ==,
+                    0x1ff);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_SADDR), ==,
+                    0x1a5);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_EADDR), ==,
+                    0x1e7);
+
     qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_IER, BIT(0));
     g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_IMR), ==,
                     BIT(0));
@@ -14492,6 +14983,8 @@ static void test_smc_and_pmecc_registers(void)
 
     qtest_writel(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_CFG, UINT32_MAX);
     qtest_writel(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_PRIM, 0x2345);
+    qtest_writel(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_SIGMA0, 0x2345);
+    qtest_writel(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_EL0, 0x2345);
     qtest_writel(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_IER, PMERRLOC_DONE);
     qtest_writel(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_LEN, 0x3456);
     g_assert_cmphex(qtest_readl(qts,
@@ -14499,7 +14992,12 @@ static void test_smc_and_pmecc_registers(void)
                     0x001f0001);
     g_assert_cmphex(qtest_readl(qts,
                                SAM9X7_PMERRLOC_BASE + PMERRLOC_PRIM), ==,
-                    0x2345);
+                    0);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_PMERRLOC_BASE + PMERRLOC_SIGMA0), ==,
+                    1);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_PMERRLOC_BASE + PMERRLOC_EL0), ==, 0);
     g_assert_cmphex(qtest_readl(qts,
                                SAM9X7_PMERRLOC_BASE + PMERRLOC_LEN), ==,
                     0x3456);
@@ -14511,7 +15009,14 @@ static void test_smc_and_pmecc_registers(void)
                     PMERRLOC_DONE);
     qtest_writel(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_DIS, 0);
     g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_PMERRLOC_BASE + PMERRLOC_ISR), ==,
+                    PMERRLOC_DONE);
+    qtest_writel(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_DIS, BIT(0));
+    g_assert_cmphex(qtest_readl(qts,
                                SAM9X7_PMERRLOC_BASE + PMERRLOC_ISR), ==, 0);
+
+    qtest_system_reset(qts);
+    pmecc_assert_reset_registers(qts);
 
     qtest_quit(qts);
 }
@@ -14573,6 +15078,601 @@ static void test_pmecc_banked_windows(void)
         g_assert_nonnull(strstr(log, message));
     }
     g_assert_cmpint(g_unlink(log_path), ==, 0);
+}
+
+static void pmerrloc_run_vector(QTestState *qts, const uint16_t *sigma,
+                                unsigned int degree,
+                                const uint16_t *locations,
+                                unsigned int location_count,
+                                uint32_t field_cfg, uint32_t length)
+{
+    unsigned int i;
+
+    qtest_writel(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_CFG,
+                 field_cfg | PMERRLOC_CFG_ERRNUM(degree));
+    for (i = 1; i <= degree; i++) {
+        qtest_writel(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_SIGMA(i),
+                     sigma[i - 1]);
+    }
+    qtest_writel(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_LEN,
+                 length);
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_SR),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_ISR),
+                    ==, PMERRLOC_DONE |
+                        PMERRLOC_ERR_COUNT(location_count));
+    for (i = 0; i < location_count; i++) {
+        g_assert_cmphex(qtest_readl(qts,
+                                   SAM9X7_PMERRLOC_BASE + PMERRLOC_EL(i)),
+                        ==, locations[i]);
+    }
+    for (; i < PMERRLOC_EL_COUNT; i++) {
+        g_assert_cmphex(qtest_readl(qts,
+                                   SAM9X7_PMERRLOC_BASE + PMERRLOC_EL(i)),
+                        ==, 0);
+    }
+}
+
+static void test_pmerrloc_frozen_chien_vectors(void)
+{
+    static const uint16_t q1_sigma[] = { 0x1a22 };
+    static const uint16_t q1_locations[] = { 1 };
+    static const uint16_t q1_q9_sigma[] = { 0x17fd, 0x076b };
+    static const uint16_t q1_q9_locations[] = { 1, 9 };
+    static const uint16_t q4097_sigma[] = { 0x141b };
+    static const uint16_t q4097_locations[] = { 4097 };
+    static const uint16_t eight_sigma[] = {
+        0x10ee, 0x11be, 0x13ee, 0x10ed,
+        0x1bb5, 0x03fe, 0x0ba1, 0x11b8,
+    };
+    static const uint16_t eight_locations[] = {
+        1, 8, 9, 1024, 2048, 4096, 4097, 4200,
+    };
+    static const uint16_t nine_sigma[] = {
+        0x10ec, 0x1cbc, 0x0279, 0x0dfb,
+        0x154d, 0x0c34, 0x00ca, 0x1d89,
+    };
+    static const uint16_t nine_locations[] = { 3736 };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    qtest_irq_intercept_out_named(qts, "/machine/soc/pmecc",
+                                  "sysbus-irq");
+    qtest_writel(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_IER,
+                 PMERRLOC_DONE);
+
+    pmerrloc_run_vector(qts, q1_sigma, G_N_ELEMENTS(q1_sigma),
+                        q1_locations, G_N_ELEMENTS(q1_locations), 0,
+                        PMECC_TEST_CODEWORD_BITS);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    /* ELDIS is command-like: zero is a no-op, while bit 0 stops/clears. */
+    qtest_writel(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_DIS, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_ISR),
+                    ==, PMERRLOC_DONE | PMERRLOC_ERR_COUNT(1));
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_writel(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_DIS, BIT(0));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_ISR),
+                    ==, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    pmerrloc_run_vector(qts, q4097_sigma, G_N_ELEMENTS(q4097_sigma),
+                        q4097_locations, G_N_ELEMENTS(q4097_locations), 0,
+                        PMECC_TEST_CODEWORD_BITS);
+    g_assert_true(qtest_get_irq(qts, 0));
+    pmerrloc_run_vector(qts, q1_q9_sigma, G_N_ELEMENTS(q1_q9_sigma),
+                        q1_q9_locations, G_N_ELEMENTS(q1_q9_locations), 0,
+                        PMECC_TEST_CODEWORD_BITS);
+    g_assert_true(qtest_get_irq(qts, 0));
+    pmerrloc_run_vector(qts, eight_sigma, G_N_ELEMENTS(eight_sigma),
+                        eight_locations, G_N_ELEMENTS(eight_locations), 0,
+                        PMECC_TEST_CODEWORD_BITS);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    /* Nine corruptions exceed BCH8: degree 8 finds just one Chien root. */
+    pmerrloc_run_vector(qts, nine_sigma, G_N_ELEMENTS(nine_sigma),
+                        nine_locations, G_N_ELEMENTS(nine_locations), 0,
+                        PMECC_TEST_CODEWORD_BITS);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_writel(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_IDR,
+                 PMERRLOC_DONE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_IMR),
+                    ==, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_quit(qts);
+}
+
+static void test_pmecc_nand_write_ecc_vectors(void)
+{
+    static const PmeccTestPattern patterns[PMECC_BANK_COUNT] = {
+        PMECC_PATTERN_FF,
+        PMECC_PATTERN_INCREMENTING,
+        PMECC_PATTERN_XORSHIFT32,
+        PMECC_PATTERN_ZERO,
+        PMECC_PATTERN_ZERO,
+        PMECC_PATTERN_XORSHIFT32,
+        PMECC_PATTERN_INCREMENTING,
+        PMECC_PATTERN_FF,
+    };
+    g_autofree uint8_t *page = g_malloc(NAND_PAGE_SIZE);
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int bank;
+    unsigned int i;
+
+    for (bank = 0; bank < PMECC_BANK_COUNT; bank++) {
+        pmecc_fill_sector(page + bank * PMECC_TEST_SECTOR_SIZE,
+                          patterns[bank]);
+    }
+
+    ebi_enable_nand(qts);
+    pmecc_start_8x512(qts, true);
+    pmecc_program_page(qts, 0, page, NAND_PAGE_SIZE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_SR), ==,
+                    PMECC_SR_ENABLE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_ISR), ==,
+                    0);
+    for (bank = 0; bank < PMECC_BANK_COUNT; bank++) {
+        uint64_t ecc = SAM9X7_PMECC_BASE + PMECC_ECC_FIRST +
+                       bank * PMECC_BANK_STRIDE;
+
+        pmecc_assert_ecc(qts, bank, pmecc_expected_ecc(patterns[bank]));
+        for (i = PMECC_TEST_ECC_BYTES; i < PMECC_ECC_REG_COUNT * 4; i++) {
+            g_assert_cmphex(qtest_readb(qts, ecc + i), ==, 0xff);
+        }
+    }
+
+    qtest_quit(qts);
+}
+
+static void test_pmecc_m14_t24_write_vector(void)
+{
+    g_autofree uint8_t *page = g_malloc(NAND_PAGE_SIZE);
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int bank;
+    unsigned int i;
+
+    for (bank = 0; bank < PMECC_TEST_M14_SECTORS; bank++) {
+        pmecc_fill_m14_sector(page + bank * PMECC_TEST_M14_SECTOR_SIZE);
+    }
+
+    ebi_enable_nand(qts);
+    pmecc_start_4x1024_t24(qts, true);
+    pmecc_program_page(qts, 0, page, NAND_PAGE_SIZE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_SR), ==,
+                    PMECC_SR_ENABLE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_ISR), ==,
+                    0);
+
+    for (bank = 0; bank < PMECC_TEST_M14_SECTORS; bank++) {
+        uint64_t ecc = SAM9X7_PMECC_BASE + PMECC_ECC_FIRST +
+                       bank * PMECC_BANK_STRIDE;
+
+        pmecc_assert_ecc_bytes(qts, bank, pmecc_m14_t24_ecc,
+                               sizeof(pmecc_m14_t24_ecc));
+        for (i = PMECC_TEST_M14_ECC_BYTES;
+             i < PMECC_ECC_REG_COUNT * sizeof(uint32_t); i++) {
+            g_assert_cmphex(qtest_readb(qts, ecc + i), ==, UINT8_MAX);
+        }
+    }
+    for (; bank < PMECC_BANK_COUNT; bank++) {
+        uint64_t ecc = SAM9X7_PMECC_BASE + PMECC_ECC_FIRST +
+                       bank * PMECC_BANK_STRIDE;
+
+        for (i = 0; i < PMECC_ECC_REG_COUNT * sizeof(uint32_t); i++) {
+            g_assert_cmphex(qtest_readb(qts, ecc + i), ==, UINT8_MAX);
+        }
+    }
+
+    qtest_quit(qts);
+}
+
+static void test_pmecc_m14_t24_one_bit_read(void)
+{
+    /* Independent GF(2^14) residue recurrence for codeword position 1. */
+    static const uint32_t expected_remainders[PMECC_REM_REG_COUNT] = {
+        0x09d1258f, 0x307e0b32, 0x1be13ed7, 0x2efe102d,
+        0x20642fcb, 0x09ac038a, 0x0d410716, 0x05871598,
+        0x25a22f90, 0x2481073a, 0x1ae21580, 0x117612e4,
+    };
+    static const uint32_t zero_remainders[PMECC_REM_REG_COUNT];
+    static const uint16_t sigma[] = { 0x258f };
+    static const uint16_t locations[] = { 1 };
+    g_autofree uint8_t *page = g_malloc(NAND_PAGE_SIZE);
+    g_autofree uint8_t *raw = g_malloc(PMECC_TEST_M14_STREAM_SIZE);
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int error_position;
+    unsigned int bank;
+    unsigned int i;
+
+    for (bank = 0; bank < PMECC_TEST_M14_SECTORS; bank++) {
+        pmecc_fill_m14_sector(page + bank * PMECC_TEST_M14_SECTOR_SIZE);
+    }
+    memcpy(raw, page, NAND_PAGE_SIZE);
+    for (bank = 0; bank < PMECC_TEST_M14_SECTORS; bank++) {
+        memcpy(raw + NAND_PAGE_SIZE + bank * PMECC_TEST_M14_ECC_BYTES,
+               pmecc_m14_t24_ecc, sizeof(pmecc_m14_t24_ecc));
+    }
+
+    /* One-based codeword position 1 is data byte 0, bit 0. */
+    raw[0] ^= BIT(0);
+
+    ebi_enable_nand(qts);
+    pmecc_program_page(qts, 0, raw, PMECC_TEST_M14_STREAM_SIZE);
+    pmecc_start_4x1024_t24(qts, false);
+    nand_start_read(qts, 0, 0);
+    for (i = 0; i < PMECC_TEST_M14_STREAM_SIZE; i++) {
+        qtest_readb(qts, NAND_DATA);
+    }
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_SR), ==,
+                    PMECC_SR_ENABLE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_ISR), ==,
+                    BIT(0));
+    pmecc_assert_remainders_count(qts, 0, expected_remainders,
+                                  G_N_ELEMENTS(expected_remainders));
+    for (bank = 1; bank < PMECC_BANK_COUNT; bank++) {
+        pmecc_assert_remainders_count(qts, bank, zero_remainders,
+                                      G_N_ELEMENTS(zero_remainders));
+    }
+
+    pmerrloc_run_vector(qts, sigma, G_N_ELEMENTS(sigma), locations,
+                        G_N_ELEMENTS(locations), PMERRLOC_CFG_GF14,
+                        PMECC_TEST_M14_CODEWORD_BITS);
+
+    /* Mirror AT91Bootstrap's one-based EL correction convention. */
+    error_position = qtest_readl(qts, SAM9X7_PMERRLOC_BASE +
+                                  PMERRLOC_EL(0));
+    raw[(error_position - 1) / 8] ^= BIT((error_position - 1) % 8);
+    g_assert_cmpmem(raw, NAND_PAGE_SIZE, page, NAND_PAGE_SIZE);
+
+    qtest_quit(qts);
+}
+
+static void test_pmecc_nand_read_remainder_vectors(void)
+{
+    static const struct {
+        unsigned int positions[9];
+        unsigned int count;
+        uint32_t remainders[4];
+    } vectors[] = {
+        {
+            .positions = { 1 },
+            .count = 1,
+            .remainders = {
+                0x0ac11a22, 0x02ee1dd2, 0x1ada0ce8, 0x0ea81cc6,
+            },
+        },
+        {
+            .positions = { 4097 },
+            .count = 1,
+            .remainders = {
+                0x1944141b, 0x004a12cb, 0x005307b3, 0x1aab0a4f,
+            },
+        },
+        {
+            .positions = { 1, 8, 9, 1024, 2048, 4096, 4097, 4200 },
+            .count = 8,
+            .remainders = {
+                0x1a8f10ee, 0x08bd1617, 0x0cbb00ac, 0x0c5e10f3,
+            },
+        },
+        {
+            .positions = {
+                1, 8, 9, 1024, 2048, 4096, 4097, 4200, 4199,
+            },
+            .count = 9,
+            .remainders = {
+                0x1a8d10ec, 0x08bf1615, 0x0cb900ae, 0x0c5c10f1,
+            },
+        },
+    };
+    static const uint32_t zero_remainders[4];
+    g_autofree uint8_t *raw = g_malloc0(PMECC_TEST_STREAM_SIZE);
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int vector;
+    unsigned int bank;
+    unsigned int i;
+
+    ebi_enable_nand(qts);
+    for (vector = 0; vector < G_N_ELEMENTS(vectors); vector++) {
+        memset(raw, 0, PMECC_TEST_STREAM_SIZE);
+        for (i = 0; i < vectors[vector].count; i++) {
+            pmecc_set_codeword_bit(raw, 0,
+                                   vectors[vector].positions[i]);
+        }
+        pmecc_program_page(qts, vector, raw, PMECC_TEST_STREAM_SIZE);
+    }
+
+    for (vector = 0; vector < G_N_ELEMENTS(vectors); vector++) {
+        pmecc_read_stream(qts, vector);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_ISR),
+                        ==, BIT(0));
+        pmecc_assert_remainders(qts, 0, vectors[vector].remainders);
+        for (bank = 1; bank < PMECC_BANK_COUNT; bank++) {
+            pmecc_assert_remainders(qts, bank, zero_remainders);
+        }
+    }
+
+    qtest_quit(qts);
+}
+
+static void test_pmecc_bootstrap_eight_data_errors(void)
+{
+    static const uint16_t sigma[] = {
+        0x0d55, 0x17c4, 0x0443, 0x0e7b,
+        0x07d9, 0x0156, 0x1c89, 0x0a0c,
+    };
+    static const uint16_t locations[] = {
+        1, 9, 17, 25, 33, 41, 49, 57,
+    };
+    static const uint32_t expected_remainders[4] = {
+        0x1fcc0d55, 0x0d5c182b, 0x012d0587, 0x17c719df,
+    };
+    const unsigned int ecc_start = NAND_OOB_SIZE -
+                                   PMECC_TEST_ECC_AREA_SIZE;
+    uint8_t original[PMECC_TEST_SECTOR_SIZE];
+    uint8_t corrected[PMECC_TEST_SECTOR_SIZE];
+    g_autofree uint8_t *raw = g_malloc(NAND_PAGE_TOTAL_SIZE);
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int bit;
+    unsigned int byte;
+    unsigned int i;
+
+    /*
+     * This is the same linear error vector as the boot failure: the LSB in
+     * each of sector bytes 0..7.  Use an independently frozen incrementing
+     * codeword so both data values and ECC are nontrivial.
+     */
+    memset(raw, 0, NAND_PAGE_SIZE);
+    memset(raw + NAND_PAGE_SIZE, 0xff, NAND_OOB_SIZE);
+    pmecc_fill_sector(original, PMECC_PATTERN_INCREMENTING);
+    memcpy(raw, original, sizeof(original));
+    memcpy(raw + NAND_PAGE_SIZE + ecc_start, pmecc_ecc_incrementing,
+           sizeof(pmecc_ecc_incrementing));
+    memset(raw + NAND_PAGE_SIZE + ecc_start + PMECC_TEST_ECC_BYTES, 0,
+           PMECC_TEST_ECC_AREA_SIZE - PMECC_TEST_ECC_BYTES);
+    for (i = 0; i < 8; i++) {
+        raw[i] ^= BIT(0);
+    }
+    memcpy(corrected, raw, sizeof(corrected));
+
+    ebi_enable_nand(qts);
+    pmecc_program_page(qts, 0, raw, NAND_PAGE_TOTAL_SIZE);
+
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CTRL,
+                 PMECC_CTRL_DISABLE | PMECC_CTRL_RESET);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CFG,
+                 PMECC_CFG_BCH_ERR_8 | PMECC_CFG_PAGESIZE_8 |
+                 PMECC_CFG_AUTO);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_SAREA,
+                 NAND_OOB_SIZE - 1);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_SADDR, ecc_start);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_EADDR,
+                 NAND_OOB_SIZE - 1);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CTRL,
+                 PMECC_CTRL_ENABLE);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CTRL, PMECC_CTRL_DATA);
+
+    nand_start_read(qts, 0, 0);
+    for (i = 0; i < NAND_PAGE_TOTAL_SIZE; i++) {
+        qtest_readb(qts, NAND_DATA);
+    }
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_ISR), ==,
+                    BIT(0));
+    pmecc_assert_remainders(qts, 0, expected_remainders);
+
+    /* Frozen output of Bootstrap's GenSyn/substitute/get_sigma pipeline. */
+    pmerrloc_run_vector(qts, sigma, G_N_ELEMENTS(sigma), locations,
+                        G_N_ELEMENTS(locations), 0,
+                        PMECC_TEST_CODEWORD_BITS);
+
+    /* Mirror AT91Bootstrap ErrorCorrection() exactly. */
+    for (i = 0; i < G_N_ELEMENTS(locations); i++) {
+        uint32_t error_position = qtest_readl(
+            qts, SAM9X7_PMERRLOC_BASE + PMERRLOC_EL(i));
+
+        byte = (error_position - 1) / 8;
+        bit = (error_position - 1) % 8;
+        g_assert_cmpuint(byte, <, sizeof(corrected));
+        corrected[byte] ^= BIT(bit);
+    }
+    g_assert_cmpmem(corrected, sizeof(corrected), original,
+                    sizeof(original));
+
+    qtest_quit(qts);
+}
+
+static void test_pmecc_bootstrap_oob_only_data_phase(void)
+{
+    g_autofree char *log_path = NULL;
+    g_autofree char *log = NULL;
+    QTestState *qts;
+    GError *error = NULL;
+    uint32_t cfg;
+    unsigned int i;
+    int fd;
+
+    fd = g_file_open_tmp("sam9x75-pmecc-oob-log-XXXXXX", &log_path,
+                         &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+
+    qts = qtest_initf(SAM9X75_MACHINE " -d guest_errors -D %s",
+                      log_path);
+    ebi_enable_nand(qts);
+
+    /*
+     * AT91Bootstrap calls pmecc_enable(0) even for a ZONE_INFO-only read,
+     * then starts NAND at the first OOB byte.  PMECC sees those as logical
+     * DATA bytes 0..255; it has no visibility of NAND column 4096.
+     */
+    pmecc_start_8x512(qts, false);
+    nand_start_read(qts, 0, NAND_PAGE_SIZE);
+    for (i = 0; i < NAND_OOB_SIZE; i++) {
+        qtest_readb(qts, NAND_DATA);
+    }
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_SR), ==,
+                    PMECC_SR_ENABLE | PMECC_SR_BUSY);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_ISR), ==,
+                    0);
+
+    /* The next Bootstrap pmecc_enable(0) discards that partial phase. */
+    cfg = qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_CFG);
+    cfg |= PMECC_CFG_AUTO;
+    cfg &= ~PMECC_CFG_NAND_WRITE;
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CFG, cfg);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CTRL, PMECC_CTRL_RESET);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CTRL, PMECC_CTRL_ENABLE);
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CTRL, PMECC_CTRL_DATA);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_SR), ==,
+                    PMECC_SR_ENABLE | PMECC_SR_BUSY);
+
+    nand_start_read(qts, 1, 0);
+    for (i = 0; i < PMECC_TEST_STREAM_SIZE; i++) {
+        qtest_readb(qts, NAND_DATA);
+    }
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_SR), ==,
+                    PMECC_SR_ENABLE);
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(log_path, &log, NULL, &error));
+    g_assert_no_error(error);
+    g_assert_cmpstr(log, ==, "");
+    g_assert_cmpint(g_unlink(log_path), ==, 0);
+}
+
+static void test_pmecc_sector_irqs(void)
+{
+    static const uint32_t q1_remainders[4] = {
+        0x0ac11a22, 0x02ee1dd2, 0x1ada0ce8, 0x0ea81cc6,
+    };
+    static const uint32_t zero_remainders[4];
+    g_autofree uint8_t *raw = g_malloc0(PMECC_TEST_STREAM_SIZE);
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int bank;
+
+    for (bank = 1; bank < PMECC_BANK_COUNT; bank++) {
+        pmecc_set_codeword_bit(raw, bank, 1);
+    }
+
+    ebi_enable_nand(qts);
+    pmecc_program_page(qts, 0, raw, PMECC_TEST_STREAM_SIZE);
+    qtest_irq_intercept_out_named(qts, "/machine/soc/pmecc",
+                                  "sysbus-irq");
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_IER, BIT(0));
+    pmecc_read_stream(qts, 0);
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_ISR), ==,
+                    0xfe);
+    g_assert_true(qtest_get_irq(qts, 0));
+    pmecc_assert_remainders(qts, 0, zero_remainders);
+    for (bank = 1; bank < PMECC_BANK_COUNT; bank++) {
+        pmecc_assert_remainders(qts, bank, q1_remainders);
+    }
+
+    qtest_writel(qts, SAM9X7_PMECC_BASE + PMECC_CTRL, PMECC_CTRL_RESET);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE + PMECC_ISR), ==, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_quit(qts);
+}
+
+static void test_pmecc_nand_write_stream_migration(void)
+{
+    static const PmeccTestPattern patterns[PMECC_BANK_COUNT] = {
+        PMECC_PATTERN_XORSHIFT32,
+        PMECC_PATTERN_ZERO,
+        PMECC_PATTERN_FF,
+        PMECC_PATTERN_INCREMENTING,
+        PMECC_PATTERN_INCREMENTING,
+        PMECC_PATTERN_FF,
+        PMECC_PATTERN_ZERO,
+        PMECC_PATTERN_XORSHIFT32,
+    };
+    const unsigned int split = 777;
+    g_autofree uint8_t *page = g_malloc(NAND_PAGE_SIZE);
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    unsigned int bank;
+    unsigned int i;
+
+    for (bank = 0; bank < PMECC_BANK_COUNT; bank++) {
+        pmecc_fill_sector(page + bank * PMECC_TEST_SECTOR_SIZE,
+                          patterns[bank]);
+    }
+
+    ebi_enable_nand(from);
+    pmecc_start_8x512(from, true);
+    nand_command(from, NAND_CMD_PROGRAM_START);
+    nand_page_address(from, 0, 0);
+    for (i = 0; i < split; i++) {
+        qtest_writeb(from, NAND_DATA, page[i]);
+    }
+    g_assert_cmphex(qtest_readl(from, SAM9X7_PMECC_BASE + PMECC_SR), ==,
+                    PMECC_SR_ENABLE | PMECC_SR_BUSY);
+
+    nand_migrate(from, to);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMECC_BASE + PMECC_SR), ==,
+                    PMECC_SR_ENABLE | PMECC_SR_BUSY);
+    for (; i < NAND_PAGE_SIZE; i++) {
+        qtest_writeb(to, NAND_DATA, page[i]);
+    }
+    nand_command(to, NAND_CMD_PAGE_PROGRAM);
+    nand_command(to, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, NAND_STATUS_IDLE);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMECC_BASE + PMECC_SR), ==,
+                    PMECC_SR_ENABLE);
+    for (bank = 0; bank < PMECC_BANK_COUNT; bank++) {
+        pmecc_assert_ecc(to, bank, pmecc_expected_ecc(patterns[bank]));
+    }
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
+static void test_pmecc_nand_read_stream_migration(void)
+{
+    static const unsigned int positions[] = {
+        1, 8, 9, 1024, 2048, 4096, 4097, 4200,
+    };
+    static const uint32_t expected_remainders[4] = {
+        0x1a8f10ee, 0x08bd1617, 0x0cbb00ac, 0x0c5e10f3,
+    };
+    const unsigned int split = NAND_PAGE_SIZE + 7;
+    g_autofree uint8_t *raw = g_malloc0(PMECC_TEST_STREAM_SIZE);
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    unsigned int i;
+
+    for (i = 0; i < G_N_ELEMENTS(positions); i++) {
+        pmecc_set_codeword_bit(raw, 0, positions[i]);
+    }
+
+    ebi_enable_nand(from);
+    pmecc_program_page(from, 0, raw, PMECC_TEST_STREAM_SIZE);
+    pmecc_start_8x512(from, false);
+    nand_start_read(from, 0, 0);
+    for (i = 0; i < split; i++) {
+        qtest_readb(from, NAND_DATA);
+    }
+    g_assert_cmphex(qtest_readl(from, SAM9X7_PMECC_BASE + PMECC_SR), ==,
+                    PMECC_SR_ENABLE | PMECC_SR_BUSY);
+
+    nand_migrate(from, to);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMECC_BASE + PMECC_SR), ==,
+                    PMECC_SR_ENABLE | PMECC_SR_BUSY);
+    for (; i < PMECC_TEST_STREAM_SIZE; i++) {
+        qtest_readb(to, NAND_DATA);
+    }
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMECC_BASE + PMECC_SR), ==,
+                    PMECC_SR_ENABLE);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMECC_BASE + PMECC_ISR), ==,
+                    BIT(0));
+    pmecc_assert_remainders(to, 0, expected_remainders);
+
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
 static void test_smc_safety_and_shared_irq(void)
@@ -19398,6 +20498,8 @@ int main(int argc, char **argv)
     qtest_add_func("sam9x75/matrix/boot-remap", test_matrix_boot_remap);
     qtest_add_func("sam9x75/matrix/remap-migration",
                    test_matrix_remap_migration);
+    qtest_add_func("sam9x75/rom/default-pmecc-galois-tables",
+                   test_rom_default_pmecc_galois_tables);
     qtest_add_func("sam9x75/rom/supplied-image", test_rom_image_loading);
     qtest_add_func("sam9x75/rom/cpu-entry", test_rom_cpu_entry);
     qtest_add_func("sam9x75/boot/direct-linux-ddr-assignment",
@@ -19753,6 +20855,26 @@ int main(int argc, char **argv)
                    test_smc_and_pmecc_registers);
     qtest_add_func("sam9x75/smc-pmecc/banked-windows",
                    test_pmecc_banked_windows);
+    qtest_add_func("sam9x75/smc-pmecc/pmerrloc-frozen-chien-vectors",
+                   test_pmerrloc_frozen_chien_vectors);
+    qtest_add_func("sam9x75/smc-pmecc/nand-write-ecc-vectors",
+                   test_pmecc_nand_write_ecc_vectors);
+    qtest_add_func("sam9x75/smc-pmecc/m14-t24-write-vector",
+                   test_pmecc_m14_t24_write_vector);
+    qtest_add_func("sam9x75/smc-pmecc/m14-t24-one-bit-read",
+                   test_pmecc_m14_t24_one_bit_read);
+    qtest_add_func("sam9x75/smc-pmecc/nand-read-remainder-vectors",
+                   test_pmecc_nand_read_remainder_vectors);
+    qtest_add_func("sam9x75/smc-pmecc/bootstrap-eight-data-errors",
+                   test_pmecc_bootstrap_eight_data_errors);
+    qtest_add_func("sam9x75/smc-pmecc/bootstrap-oob-only-data-phase",
+                   test_pmecc_bootstrap_oob_only_data_phase);
+    qtest_add_func("sam9x75/smc-pmecc/sector-irqs",
+                   test_pmecc_sector_irqs);
+    qtest_add_func("sam9x75/smc-pmecc/nand-write-stream-migration",
+                   test_pmecc_nand_write_stream_migration);
+    qtest_add_func("sam9x75/smc-pmecc/nand-read-stream-migration",
+                   test_pmecc_nand_read_stream_migration);
     qtest_add_func("sam9x75/smc-pmecc/safety-and-shared-irq",
                    test_smc_safety_and_shared_irq);
     qtest_add_func("sam9x75/smc-pmecc/shared-irq-migration-and-reset",
