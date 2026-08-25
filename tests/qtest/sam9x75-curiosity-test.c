@@ -175,6 +175,9 @@
 #define AIC_ICCR                0x48
 #define AIC_ISCR                0x4c
 #define AIC_FFER                0x50
+#define AIC_SVRRER              0x60
+#define AIC_SVRRDR              0x64
+#define AIC_SVRRSR              0x68
 #define AIC_DCR                 0x6c
 #define AIC_WPMR                0xe4
 #define AIC_WPSR                0xe8
@@ -454,6 +457,7 @@
 #define AIC_SMR_EDGE_RISING     (3U << 5)
 #define AIC_CISR_FIQ            BIT(0)
 #define AIC_CISR_IRQ            BIT(1)
+#define AIC_DCR_PROT            BIT(0)
 #define AIC_DCR_GMSK            BIT(1)
 #define AIC_WPMR_KEY            0x41494300
 
@@ -4525,6 +4529,137 @@ static void test_aic_priority_and_nesting(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_CISR), ==, 0);
 
     qtest_quit(qts);
+}
+
+static void test_aic_vector_return_and_protected_mode(void)
+{
+    const uint32_t vector5 = 0x55555555;
+    const uint32_t vector6 = 0x66666666;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    aic_configure(qts, 5, AIC_SMR_EDGE_RISING | 2, vector5);
+    aic_configure(qts, 6, AIC_SMR_EDGE_RISING | 5, vector6);
+
+    aic_select(qts, 5);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_SVRRSR), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_SVRRER), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_SVRRDR), ==,
+                    0);
+    qtest_writel(qts, SAM9X7_AIC_BASE + AIC_SVRRER, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_SVRRSR), ==,
+                    0);
+    qtest_writel(qts, SAM9X7_AIC_BASE + AIC_SVRRER, 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_SVRRSR), ==,
+                    1);
+
+    /* The vector-return choice is indexed by the source selected in SSR. */
+    aic_select(qts, 6);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_SVRRSR), ==,
+                    0);
+    qtest_writel(qts, SAM9X7_AIC_BASE + AIC_SVRRER, 1);
+    qtest_writel(qts, SAM9X7_AIC_BASE + AIC_SVRRDR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_SVRRSR), ==,
+                    1);
+    qtest_writel(qts, SAM9X7_AIC_BASE + AIC_SVRRDR, 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_SVRRSR), ==,
+                    0);
+    aic_select(qts, 5);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_SVRRSR), ==,
+                    1);
+
+    aic_set_input(qts, 5, 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IVR), ==, 5);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_ISR), ==, 5);
+    qtest_writel(qts, SAM9X7_AIC_BASE + AIC_IVR, 0xdeadbeef);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_ISR), ==, 5);
+    qtest_writel(qts, SAM9X7_AIC_BASE + AIC_EOICR, 0);
+    aic_set_input(qts, 5, 0);
+
+    qtest_writel(qts, SAM9X7_AIC_BASE + AIC_SVRRDR, 1);
+    aic_set_input(qts, 5, 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IVR), ==,
+                    vector5);
+    qtest_writel(qts, SAM9X7_AIC_BASE + AIC_EOICR, 0);
+    aic_set_input(qts, 5, 0);
+
+    aic_select(qts, 6);
+    qtest_writel(qts, SAM9X7_AIC_BASE + AIC_SVRRER, 1);
+    qtest_writel(qts, SAM9X7_AIC_BASE + AIC_DCR, AIC_DCR_PROT);
+    aic_set_input(qts, 6, 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IVR), ==, 6);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_ISR), ==, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(6));
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_CISR) &
+                  AIC_CISR_IRQ);
+
+    /* Extra protected reads only replace the memorized interrupt. */
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IVR), ==, 6);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_ISR), ==, 0);
+    qtest_writel(qts, SAM9X7_AIC_BASE + AIC_IVR, 0xcafef00d);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_ISR), ==, 6);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(6));
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_CISR) &
+                   AIC_CISR_IRQ);
+
+    /* A second protected write has no previously memorized interrupt. */
+    qtest_writel(qts, SAM9X7_AIC_BASE + AIC_IVR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_ISR), ==, 6);
+    qtest_writel(qts, SAM9X7_AIC_BASE + AIC_EOICR, 0);
+    aic_set_input(qts, 6, 0);
+
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_SSR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_DCR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_SVRRSR), ==,
+                    0);
+    aic_select(qts, 5);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_SVRRSR), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_ISR), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_aic_protected_read_write_migration(void)
+{
+    const uint32_t vector = 0x77777777;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+
+    aic_configure(from, 7, AIC_SMR_EDGE_RISING | 4, vector);
+    qtest_writel(from, SAM9X7_AIC_BASE + AIC_SVRRER, 1);
+    qtest_writel(from, SAM9X7_AIC_BASE + AIC_DCR, AIC_DCR_PROT);
+    aic_set_input(from, 7, 1);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_AIC_BASE + AIC_IVR), ==, 7);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_AIC_BASE + AIC_ISR), ==, 0);
+    g_assert_true(qtest_readl(from, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(7));
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_cmphex(qtest_readl(to, SAM9X7_AIC_BASE + AIC_SSR), ==, 7);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_AIC_BASE + AIC_DCR), ==,
+                    AIC_DCR_PROT);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_AIC_BASE + AIC_SVRRSR), ==, 1);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_AIC_BASE + AIC_ISR), ==, 0);
+    g_assert_true(qtest_readl(to, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(7));
+    g_assert_true(qtest_readl(to, SAM9X7_AIC_BASE + AIC_CISR) &
+                  AIC_CISR_IRQ);
+
+    qtest_writel(to, SAM9X7_AIC_BASE + AIC_IVR, 0xa5a5a5a5);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_AIC_BASE + AIC_ISR), ==, 7);
+    g_assert_false(qtest_readl(to, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(7));
+    g_assert_false(qtest_readl(to, SAM9X7_AIC_BASE + AIC_CISR) &
+                   AIC_CISR_IRQ);
+    qtest_writel(to, SAM9X7_AIC_BASE + AIC_EOICR, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_AIC_BASE + AIC_ISR), ==, 0);
+
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
 static void test_aic_fiq_mask_and_write_protection(void)
@@ -19150,6 +19285,10 @@ int main(int argc, char **argv)
                    test_aic_dbgu_integration);
     qtest_add_func("sam9x75/aic/priority-and-nesting",
                    test_aic_priority_and_nesting);
+    qtest_add_func("sam9x75/aic/vector-return-and-protected-mode",
+                   test_aic_vector_return_and_protected_mode);
+    qtest_add_func("sam9x75/aic/protected-read-write-migration",
+                   test_aic_protected_read_write_migration);
     qtest_add_func("sam9x75/aic/fiq-mask-and-write-protection",
                    test_aic_fiq_mask_and_write_protection);
     qtest_add_func("sam9x75/gem/registers-mdio-dma-and-irqs",

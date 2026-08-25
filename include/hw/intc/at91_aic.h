@@ -29,11 +29,13 @@ struct AT91AIC5State {
     uint32_t edge_pending[AT91_AIC5_NUM_SOURCES / 32];
     uint32_t enabled[AT91_AIC5_NUM_SOURCES / 32];
     uint32_t fast_forcing[AT91_AIC5_NUM_SOURCES / 32];
+    uint32_t source_index_return[AT91_AIC5_NUM_SOURCES / 32];
 
     uint8_t active_source[AT91_AIC5_PRIORITY_LEVELS];
     uint8_t active_priority[AT91_AIC5_PRIORITY_LEVELS];
     uint8_t stack_depth;
     uint8_t selected_source;
+    int16_t protected_source;
 
     uint32_t spurious_vector;
     uint32_t debug_control;

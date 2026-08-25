@@ -35,6 +35,9 @@ enum {
     AIC_FFER  = 0x50,
     AIC_FFDR  = 0x54,
     AIC_FFSR  = 0x58,
+    AIC_SVRRER = 0x60,
+    AIC_SVRRDR = 0x64,
+    AIC_SVRRSR = 0x68,
     AIC_DCR   = 0x6c,
     AIC_WPMR  = 0xe4,
     AIC_WPSR  = 0xe8,
@@ -228,13 +231,25 @@ static void at91_aic_set_irq(void *opaque, int source, int level)
     at91_aic_update(s);
 }
 
-static uint32_t at91_aic_read_ivr(AT91AIC5State *s)
+static uint32_t at91_aic_irq_vector(AT91AIC5State *s, int source)
 {
-    int source = at91_aic_irq_candidate(s);
+    if (source < 0) {
+        return s->spurious_vector;
+    }
+
+    if (at91_aic_bit_test(s->source_index_return, source)) {
+        return source;
+    }
+
+    return s->source_vector[source];
+}
+
+static void at91_aic_acknowledge_irq(AT91AIC5State *s, int source)
+{
     unsigned int priority;
 
     if (source < 0) {
-        return s->spurious_vector;
+        return;
     }
 
     priority = s->source_mode[source] & AIC_SMR_PRIORITY_MASK;
@@ -248,7 +263,21 @@ static uint32_t at91_aic_read_ivr(AT91AIC5State *s)
     }
 
     at91_aic_update(s);
-    return s->source_vector[source];
+}
+
+static uint32_t at91_aic_read_ivr(AT91AIC5State *s)
+{
+    int source = at91_aic_irq_candidate(s);
+    uint32_t vector = at91_aic_irq_vector(s, source);
+
+    if (s->debug_control & AIC_DCR_PROT) {
+        /* The matching IVR write performs the deferred push and acknowledge. */
+        s->protected_source = source;
+    } else {
+        at91_aic_acknowledge_irq(s, source);
+    }
+
+    return vector;
 }
 
 static uint32_t at91_aic_read_fvr(AT91AIC5State *s)
@@ -315,6 +344,9 @@ static uint64_t at91_aic_read(void *opaque, hwaddr offset,
     case AIC_FFSR:
         value = at91_aic_bit_test(s->fast_forcing, source);
         break;
+    case AIC_SVRRSR:
+        value = at91_aic_bit_test(s->source_index_return, source);
+        break;
     case AIC_DCR:
         value = s->debug_control;
         break;
@@ -332,6 +364,8 @@ static uint64_t at91_aic_read(void *opaque, hwaddr offset,
     case AIC_ISCR:
     case AIC_FFER:
     case AIC_FFDR:
+    case AIC_SVRRER:
+    case AIC_SVRRDR:
         /* Write-only registers read as zero. */
         break;
     default:
@@ -429,8 +463,21 @@ static void at91_aic_write(void *opaque, hwaddr offset, uint64_t value,
             at91_aic_update(s);
         }
         break;
+    case AIC_SVRRER:
+        if (v & 1) {
+            at91_aic_bit_set(s->source_index_return, source, true);
+        }
+        break;
+    case AIC_SVRRDR:
+        if (v & 1) {
+            at91_aic_bit_set(s->source_index_return, source, false);
+        }
+        break;
     case AIC_DCR:
         s->debug_control = v & (AIC_DCR_PROT | AIC_DCR_GMSK);
+        if (!(s->debug_control & AIC_DCR_PROT)) {
+            s->protected_source = -1;
+        }
         at91_aic_update(s);
         break;
     case AIC_WPMR:
@@ -439,6 +486,14 @@ static void at91_aic_write(void *opaque, hwaddr offset, uint64_t value,
         }
         break;
     case AIC_IVR:
+        if (s->debug_control & AIC_DCR_PROT) {
+            int protected_source = s->protected_source;
+
+            s->protected_source = -1;
+            at91_aic_acknowledge_irq(s, protected_source);
+        }
+        /* IVR writes have no effect outside protection mode. */
+        break;
     case AIC_FVR:
     case AIC_ISR:
     case AIC_IPR0:
@@ -448,6 +503,7 @@ static void at91_aic_write(void *opaque, hwaddr offset, uint64_t value,
     case AIC_IMR:
     case AIC_CISR:
     case AIC_FFSR:
+    case AIC_SVRRSR:
     case AIC_WPSR:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "%s: write to read-only offset 0x%" HWADDR_PRIx "\n",
@@ -481,6 +537,7 @@ static void at91_aic_reset(DeviceState *dev)
     memset(s->edge_pending, 0, sizeof(s->edge_pending));
     memset(s->enabled, 0, sizeof(s->enabled));
     memset(s->fast_forcing, 0, sizeof(s->fast_forcing));
+    memset(s->source_index_return, 0, sizeof(s->source_index_return));
     memset(s->active_source, 0, sizeof(s->active_source));
     memset(s->active_priority, 0, sizeof(s->active_priority));
 
@@ -490,6 +547,7 @@ static void at91_aic_reset(DeviceState *dev)
 
     s->stack_depth = 0;
     s->selected_source = 0;
+    s->protected_source = -1;
     s->spurious_vector = 0;
     s->debug_control = 0;
     s->write_protection_mode = 0;
@@ -501,13 +559,17 @@ static int at91_aic_post_load(void *opaque, int version_id)
 {
     AT91AIC5State *s = opaque;
 
+    if (version_id < 2) {
+        memset(s->source_index_return, 0, sizeof(s->source_index_return));
+        s->protected_source = -1;
+    }
     at91_aic_update(s);
     return 0;
 }
 
 static const VMStateDescription vmstate_at91_aic = {
     .name = TYPE_AT91_AIC5,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = at91_aic_post_load,
     .fields = (const VMStateField[]) {
@@ -523,12 +585,15 @@ static const VMStateDescription vmstate_at91_aic = {
                              AT91_AIC5_NUM_SOURCES / 32),
         VMSTATE_UINT32_ARRAY(fast_forcing, AT91AIC5State,
                              AT91_AIC5_NUM_SOURCES / 32),
+        VMSTATE_UINT32_ARRAY_V(source_index_return, AT91AIC5State,
+                               AT91_AIC5_NUM_SOURCES / 32, 2),
         VMSTATE_UINT8_ARRAY(active_source, AT91AIC5State,
                             AT91_AIC5_PRIORITY_LEVELS),
         VMSTATE_UINT8_ARRAY(active_priority, AT91AIC5State,
                             AT91_AIC5_PRIORITY_LEVELS),
         VMSTATE_UINT8(stack_depth, AT91AIC5State),
         VMSTATE_UINT8(selected_source, AT91AIC5State),
+        VMSTATE_INT16_V(protected_source, AT91AIC5State, 2),
         VMSTATE_UINT32(spurious_vector, AT91AIC5State),
         VMSTATE_UINT32(debug_control, AT91AIC5State),
         VMSTATE_UINT32(write_protection_mode, AT91AIC5State),
