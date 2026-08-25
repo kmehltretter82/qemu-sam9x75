@@ -69,8 +69,17 @@ Support matrix
      - Required coverage
    * - ARM926EJ-S
      - Initial
-     - VFP disabled; MIDR, CTR, CP15 reset, cache/MMU, FCSE, Jazelle and
-       unaligned-access behavior remain under audit.
+     - VFP is disabled.  The Armv5 and Armv6 short-descriptor walkers fetch and
+       classify an L2 descriptor before applying the domain access control
+       inherited from L1.  On the physical ARM926EJ-S, a valid coarse L1 entry
+       in no-access domain 4 followed by an invalid L2 entry produced DFSR
+       ``0x47`` (L2 translation fault), rather than the premature page-domain
+       fault formerly returned by QEMU.  Bare-metal TCG tests also preserve
+       valid-page, section-domain and external-L2-walk priorities.  MIDR, CTR,
+       the remaining CP15 reset state, cache/MMU corner cases, FCSE, Jazelle
+       and unaligned-access behavior remain under audit.  Nested stage-2 walk
+       fault-level preservation in the Armv6 walker is a separate generic
+       QEMU follow-up and does not affect this ARM926 configuration.
    * - ROM and boot window
      - Initial
      - The 176 KiB ROM is mapped at its physical address and through the reset
@@ -237,20 +246,37 @@ Support matrix
        Host preset registers, the SAM9X7 Host Control 2 writable mask, combined
        command/data/all software reset, the vendor registers covered by
        ``SWRSTALL``, and the Linux ADMA descriptor form are covered.  Writable
-       Host Control 2 state survives migration.  The unmodified
+       Host Control 2 state survives migration.  A physical Curiosity LAN Kit
+       exposed Linux's valid ``END|NOP`` descriptor with zero length.  One
+       captured 4 KiB transfer advanced the system address past that
+       terminator to table base plus 16 bytes with no ADMA error.  A wider run
+       captured 83,837 snapshots, including 2,055 snapshots of tables
+       containing 128 transfer descriptors; every snapshot contained the same
+       zero-length terminator and reported no ADMA or error-interrupt status.
+       Descriptor-fetch
+       and data-transfer bus faults stop ADMA in the documented fetch and
+       transfer states respectively; they cannot spuriously process ``INT`` or
+       ``END``, complete the transfer, or retry after the fault.  Incomplete
+       descriptor tables report an ADMA length mismatch without raising
+       transfer-complete; ``INT`` still raises DMA status when its descriptor
+       line itself completed.  The unmodified
        AT91Bootstrap SD/ADMA path was validated before exact EBI decode was
        introduced and is pending a repeat with the pinned artifacts.  SDIO
        I/O functions, full M.2
-       ``mmc_spi`` guest integration, DMA fault termination and dynamic
-       card-detect/media-change completeness remain under audit.
+       ``mmc_spi`` guest integration and dynamic card-detect/media-change
+       completeness remain under audit.
    * - OSPI/QSPI NOR
      - Initial
      - Controller and XIP windows, SST26VF064BEUI identity, SFDP/EUI data,
        program/erase and U-Boot probing are modeled.  Erase commands select the
        containing erase unit even for unaligned addresses, with an end-of-flash
        bounds regression test.  The EUI-48 follows the configured GEM MAC
-       address.  Persistence with a drive, all protocol widths and the ROM
-       quad-mode erratum need further coverage.
+       address.  Controller status follows the documented read-clear and
+       command-clear rules, including overrun, last-write, timeout, transmit
+       readiness and chip-select autoclear flags; IRQ, reset and migration
+       tests cover those transitions.  Persistence with a drive, all protocol
+       widths, timeout generation, the enable-time ``RFRSHD`` policy with
+       ``DQSDLYEN`` clear, and the ROM quad-mode erratum need further coverage.
    * - EBI/SMC and raw NAND
      - Initial
      - The Curiosity U5 interface occupies the complete 256 MiB CS2 window and
@@ -302,9 +328,26 @@ Support matrix
        U-Boot obtains a DHCP lease and exchanges packets.  J12 defaults closed
        and supplies the LAN8840's required 25 MHz reference clock;
        opening it makes MDIO inaccessible and prevents external RGMII
-       traffic.  LAN8840 MMD/RGMII delay registers, PHY reset-value fidelity,
-       checksum corner cases, filtering, PTP/TSN and hardware comparison
-       remain.
+       traffic.
+
+       Statistics implement their documented 32-, 18-, 16-, 10- and 8-bit
+       widths, saturation, read-to-clear behavior, ``WESTAT``, ``INCSTAT`` and
+       ``CLRSTAT``.  The octet counters use the documented 48-bit low/high
+       order; VMState version 5 converts the reversed version 4 representation
+       and restores the interrupt outputs.  DMA-backed tests cover IPv4/IPv6
+       multicast, broadcast exclusion, command ordering, counter limits and
+       migration, including a real version 4 source binary.
+
+       Physical hardware confirmed the octet-half order, read-to-clear and
+       clear-all behavior, and counting both ``01:00:5e`` and ``33:33``
+       destinations by the Ethernet I/G bit.  Broadcast exclusion and the
+       ordering of commands combined in one ``NWCTRL`` write remain model
+       conventions pending direct hardware checks.  Priority-queue interrupt
+       mask reset values also need an early bare-metal read: the SAM9X75 device
+       pack exposes five priority-queue masks with ``0x000008e6`` valid bits,
+       so the generic Q1-only ``0x00000ce6`` behavior must not simply be copied
+       to every queue.  LAN8840 MMD/RGMII delay registers, PHY reset-value
+       fidelity, checksum corner cases, filtering and PTP/TSN remain.
    * - USB host and device
      - Missing
      - OHCI, EHCI, UDPHS, port power, hotplug, gadget mode and SAM-BA path.
@@ -428,6 +471,29 @@ Support matrix
        and migration, and clears on controller reset.  The global UHC
        read/program/refresh disables and the special-packet program,
        invalidation and lock-command gates are enforced.
+
+       The four documented device-unique-ID registers at ``0x60``--``0x6c``
+       are read-only and configurable through QOM properties; their default is
+       zero because the data-sheet reset value depends on hardware
+       configuration.  Aligned reserved words in the documented register
+       aperture decode as read-zero/write-ignore rather than bad offsets.  The
+       data sheet marks ``0x70``--``0xe3`` reserved, although nonzero,
+       potentially device-specific contents were observed at some of those
+       offsets and deliberately not captured.  Physical silicon reports the
+       otherwise undocumented read-only version value ``0x00000202`` at
+       ``0xfc``.
+
+       Hardware also confirmed that each ``DR`` read increments ``AR.DADDR``
+       when ``AR.INCRT`` is clear, and that the observed ``WPSR.SWE`` flag
+       clears on read.  A 32-bit ``AR`` write made from a Linux userspace
+       ``/dev/mem`` mapping raised an external abort twice, while an unkeyed
+       ``CR.REFRESH`` write did not.  SAM9X75 uses an Arm926EJ-S processor and
+       has no TrustZone secure/non-secure worlds, and DS60001813E specifies
+       ``AR`` as read/write without an access restriction.  Arm926EJ-S does
+       expose the core's user/privileged mode on the AHB ``HPROT`` attributes,
+       so an undocumented privilege check remains possible.  QEMU therefore
+       remains permissive until the same access is compared from privileged
+       kernel and bare-metal code and the aborting bus transaction is isolated.
 
        The maximum-address pre-programming probe exposes raw bits at the
        prospective packet tail.  Corrupt-header reads also expose the
