@@ -4885,6 +4885,172 @@ static void test_flexcom_usart_xdmac_requests_and_mode_gating(void)
     qtest_quit(qts);
 }
 
+static void test_xdmac_flexcom_live_migration(void)
+{
+    static const uint8_t payload[] = { 0x21, 0x43, 0x65, 0x87 };
+    const uint32_t tx_source = SAM9X7_DDR_BASE + 0x11b00;
+    const uint32_t rx_target = SAM9X7_DDR_BASE + 0x11c00;
+    const uint32_t rx_descriptor = SAM9X7_DDR_BASE + 0x11d00;
+    const uint64_t tx_channel = XDMAC_CHANNEL(0);
+    const uint64_t rx_channel = XDMAC_CHANNEL(1);
+    const uint32_t tx_config = XDMAC_CC_TYPE_PER |
+                               XDMAC_CC_DSYNC_MEM2PER |
+                               XDMAC_CC_PERID(0) | XDMAC_CC_SAM_INC;
+    const uint32_t rx_config = XDMAC_CC_TYPE_PER |
+                               XDMAC_CC_PERID(1) | XDMAC_CC_DAM_INC;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    uint32_t descriptor[5] = { 0 };
+    uint8_t result[sizeof(payload)] = { 0 };
+    uint64_t character_ns;
+    int64_t from_clock;
+    uint32_t value;
+    unsigned int i;
+
+    pmc_write_pcr(from, 20, PMC_PCR_EN);
+    pmc_write_pcr(from, 5, PMC_PCR_EN);
+    aic_configure(from, 20, AIC_SMR_LEVEL_HIGH | 3, 0x20202020);
+    qtest_writeb(from, SAM9X7_FLEXCOM0_BASE + FLEX_MR, FLEX_MODE_USART);
+    qtest_writel(from, SAM9X7_USART0_BASE + US_MR, US_MR_NORMAL_LOCAL);
+    qtest_writel(from, SAM9X7_USART0_BASE + US_BRGR, 217);
+    qtest_writel(from, SAM9X7_USART0_BASE + US_CR,
+                 US_CR_FIFOEN | US_CR_RXEN | US_CR_TXEN);
+    character_ns = usart_cycles_to_ns(from, 5, 16 * 217 * 10);
+    g_assert_true(qtest_readl(from, SAM9X7_USART0_BASE + US_CSR) &
+                  US_INT_TXRDY);
+
+    qtest_memwrite(from, tx_source, payload, sizeof(payload));
+    qtest_memwrite(from, rx_target, result, sizeof(result));
+    descriptor[1] = cpu_to_le32(XDMAC_MBR_UBC_NSEN |
+                                XDMAC_MBR_UBC_NDEN |
+                                XDMAC_MBR_UBC_NDV2 |
+                                sizeof(payload));
+    descriptor[2] = cpu_to_le32(SAM9X7_USART0_BASE + US_RHR);
+    descriptor[3] = cpu_to_le32(rx_target);
+    descriptor[4] = cpu_to_le32(rx_config);
+    qtest_memwrite(from, rx_descriptor, descriptor, sizeof(descriptor));
+
+    qtest_writel(from, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CNDA,
+                 rx_descriptor);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CNDC,
+                 XDMAC_CNDC_NDE | XDMAC_CNDC_NDSUP |
+                 XDMAC_CNDC_NDDUP | XDMAC_CNDC_NDVIEW2);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CIE,
+                 XDMAC_INT_LIS);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(1));
+    xdmac_waitl(from, rx_channel + XDMAC_CC,
+                XDMAC_CC_INITD, XDMAC_CC_INITD);
+
+    qtest_writel(from, SAM9X7_XDMAC_BASE + XDMAC_GRWS, BIT(0));
+    qtest_writel(from, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CSA,
+                 tx_source);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CDA,
+                 SAM9X7_USART0_BASE + US_THR);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CUBC,
+                 sizeof(payload));
+    qtest_writel(from, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CC,
+                 tx_config);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CIE,
+                 XDMAC_INT_BIS);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + XDMAC_GIE, BIT(0) | BIT(1));
+    qtest_writel(from, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
+
+    g_assert_cmphex(qtest_readl(from, SAM9X7_XDMAC_BASE + XDMAC_GS), ==,
+                    BIT(0) | BIT(1));
+    g_assert_cmphex(qtest_readl(from, SAM9X7_XDMAC_BASE + XDMAC_GRS), ==,
+                    BIT(0));
+    g_assert_cmphex(qtest_readl(from, SAM9X7_XDMAC_BASE + XDMAC_GWS), ==,
+                    BIT(0));
+    g_assert_cmphex(qtest_readl(from,
+                                SAM9X7_XDMAC_BASE + tx_channel +
+                                XDMAC_CUBC), ==, sizeof(payload));
+    g_assert_cmphex(qtest_readl(from,
+                                SAM9X7_XDMAC_BASE + rx_channel +
+                                XDMAC_CUBC), ==, sizeof(payload));
+    from_clock = qtest_clock_step(from, 1);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_cmphex(qtest_readl(to, SAM9X7_FLEXCOM0_BASE + FLEX_MR), ==,
+                    FLEX_MODE_USART);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_XDMAC_BASE + XDMAC_GS), ==,
+                    BIT(0) | BIT(1));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_XDMAC_BASE + XDMAC_GRS), ==,
+                    BIT(0));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_XDMAC_BASE + XDMAC_GWS), ==,
+                    BIT(0));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_XDMAC_BASE + XDMAC_GIM), ==,
+                    BIT(0) | BIT(1));
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + tx_channel +
+                                XDMAC_CIM), ==, XDMAC_INT_BIS);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + rx_channel +
+                                XDMAC_CIM), ==, XDMAC_INT_LIS);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + tx_channel +
+                                XDMAC_CSA), ==, tx_source);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + tx_channel +
+                                XDMAC_CUBC), ==, sizeof(payload));
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + tx_channel +
+                                XDMAC_CC), ==,
+                    tx_config | XDMAC_CC_INITD);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + rx_channel +
+                                XDMAC_CNDA), ==, 0);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + rx_channel +
+                                XDMAC_CNDC), ==,
+                    XDMAC_CNDC_NDSUP | XDMAC_CNDC_NDDUP |
+                    XDMAC_CNDC_NDVIEW2);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + rx_channel +
+                                XDMAC_CSA), ==,
+                    SAM9X7_USART0_BASE + US_RHR);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + rx_channel +
+                                XDMAC_CDA), ==, rx_target);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + rx_channel +
+                                XDMAC_CUBC), ==, sizeof(payload));
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + rx_channel +
+                                XDMAC_CC), ==,
+                    rx_config | XDMAC_CC_INITD);
+
+    /* Align independent qtest clocks before resuming the suspended TX. */
+    g_assert_cmpint(qtest_clock_set(to, from_clock), ==, from_clock);
+    qtest_writel(to, SAM9X7_XDMAC_BASE + XDMAC_GRWR, BIT(0));
+    xdmac_waitl(to, XDMAC_GS, BIT(0), 0);
+    g_assert_true(qtest_readl(to, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(1));
+    g_assert_true(qtest_readl(to, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(20));
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + tx_channel +
+                                XDMAC_CIS), ==, XDMAC_INT_BIS);
+    g_assert_false(qtest_readl(to, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(20));
+
+    for (i = 0; i < sizeof(payload); i++) {
+        qtest_clock_step(to, character_ns);
+    }
+    xdmac_waitl(to, XDMAC_GS, BIT(1), 0);
+    qtest_memread(to, rx_target, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), payload, sizeof(payload));
+    g_assert_true(qtest_readl(to, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(20));
+    value = qtest_readl(to,
+                        SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CIS);
+    g_assert_cmphex(value & (XDMAC_INT_BIS | XDMAC_INT_LIS), ==,
+                    XDMAC_INT_BIS | XDMAC_INT_LIS);
+    g_assert_false(qtest_readl(to, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(20));
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
 static void test_flexcom_spi_xdmac_requests_and_mode_gating(void)
 {
     const uint32_t tx_source = SAM9X7_DDR_BASE + 0xf1a0;
@@ -5818,6 +5984,109 @@ static void test_xdmac_pacing_striding_and_errors(void)
     g_assert_false(value & XDMAC_INT_RBEIS);
     qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, BIT(7));
     g_assert_false(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(7));
+
+    qtest_quit(qts);
+}
+
+static void test_xdmac_fair_scheduling_and_flush_scope(void)
+{
+    const uint32_t ring_desc = SAM9X7_DDR_BASE + 0x11600;
+    const uint32_t ring_src = SAM9X7_DDR_BASE + 0x11700;
+    const uint32_t ring_dst = SAM9X7_DDR_BASE + 0x11800;
+    const uint32_t finite_src = SAM9X7_DDR_BASE + 0x11900;
+    const uint32_t finite_dst = SAM9X7_DDR_BASE + 0x11a00;
+    const uint64_t ch0 = XDMAC_CHANNEL(0);
+    const uint64_t ch1 = XDMAC_CHANNEL(1);
+    const uint64_t ch2 = XDMAC_CHANNEL(2);
+    uint32_t descriptor[5] = { 0 };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+
+    qtest_writel(qts, ring_src, 0x11223344);
+    qtest_writel(qts, ring_dst, 0);
+    descriptor[0] = cpu_to_le32(ring_desc);
+    descriptor[1] = cpu_to_le32(XDMAC_MBR_UBC_NDE |
+                                XDMAC_MBR_UBC_NSEN |
+                                XDMAC_MBR_UBC_NDEN |
+                                XDMAC_MBR_UBC_NDV2 | 1);
+    descriptor[2] = cpu_to_le32(ring_src);
+    descriptor[3] = cpu_to_le32(ring_dst);
+    descriptor[4] = cpu_to_le32(XDMAC_CC_PERID(0x7f) |
+                                XDMAC_CC_SAM_INC |
+                                XDMAC_CC_DAM_INC |
+                                XDMAC_CC_DWIDTH_WORD);
+    qtest_memwrite(qts, ring_desc, descriptor, sizeof(descriptor));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch0 + XDMAC_CNDA, ring_desc);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch0 + XDMAC_CNDC,
+                 XDMAC_CNDC_NDE | XDMAC_CNDC_NDSUP |
+                 XDMAC_CNDC_NDDUP | XDMAC_CNDC_NDVIEW2);
+
+    qtest_writel(qts, finite_src, 0xa1b2c3d4);
+    qtest_writel(qts, finite_dst, 0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CSA, finite_src);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CDA, finite_dst);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CUBC, 1);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CC,
+                 XDMAC_CC_PERID(0x7f) | XDMAC_CC_SAM_INC |
+                 XDMAC_CC_DAM_INC | XDMAC_CC_DWIDTH_WORD);
+
+    /* A self-looping channel must not starve a finite higher channel. */
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0) | BIT(1));
+    xdmac_waitl(qts, XDMAC_GS, BIT(1), 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(0));
+    g_assert_cmphex(qtest_readl(qts, finite_dst), ==, 0xa1b2c3d4);
+    g_assert_cmphex(qtest_readl(qts, ring_dst), ==, 0x11223344);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, BIT(0));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + ch0 + XDMAC_CIS) &
+                  XDMAC_INT_DIS);
+
+    /* A suspended source-peripheral flush completes even with an empty FIFO. */
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CSA, finite_src);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CDA, finite_dst);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CUBC, 1);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_SWREQ);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GRWS, BIT(2));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(2));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GRS) & BIT(2));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GWS) & BIT(2));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWF, BIT(2));
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + ch2 + XDMAC_CIS), ==,
+                    XDMAC_INT_FIS);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, BIT(2));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CIS) &
+                  XDMAC_INT_DIS);
+
+    /* Flush requests after disable and on other transfer types are ignored. */
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWF, BIT(2));
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + ch2 + XDMAC_CIS), ==, 0);
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CUBC, 1);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_DSYNC_MEM2PER |
+                 XDMAC_CC_SWREQ);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(2));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWF, BIT(2));
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + ch2 + XDMAC_CIS), ==, 0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, BIT(2));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CIS) &
+                  XDMAC_INT_DIS);
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GRS, BIT(2));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CUBC, 1);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CC,
+                 XDMAC_CC_PERID(0x7f));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(2));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWF, BIT(2));
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + ch2 + XDMAC_CIS), ==, 0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, BIT(2));
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CIS) &
+                  XDMAC_INT_DIS);
 
     qtest_quit(qts);
 }
@@ -10800,6 +11069,10 @@ int main(int argc, char **argv)
                    test_xdmac_registers_memcpy_and_descriptors);
     qtest_add_func("sam9x75/xdmac/pacing-striding-and-errors",
                    test_xdmac_pacing_striding_and_errors);
+    qtest_add_func("sam9x75/xdmac/fair-scheduling-and-flush-scope",
+                   test_xdmac_fair_scheduling_and_flush_scope);
+    qtest_add_func("sam9x75/xdmac/flexcom-live-migration",
+                   test_xdmac_flexcom_live_migration);
     qtest_add_func("sam9x75/aes/registers-ecb-irq-and-protection",
                    test_aes_registers_ecb_irq_and_protection);
     qtest_add_func("sam9x75/aes/chaining-gcm-and-xdmac",

@@ -180,12 +180,21 @@ Support matrix
      - Initial
      - All 16 channels expose global/channel control, clock gating, memory copy
        and memset, byte/halfword/word widths, address modes and 2D strides,
-       software and external-request pacing, suspend/resume/flush/disable,
-       linked-list descriptor views, completion/error interrupts and migration
-       state.  DBGU, every FLEXCOM USART, SPI and TWI personality, I2SMCC,
-       Class-D, AES, SHA and TDES request lines are wired; the remaining
-       peripheral request lines, security policy, microblock/burst timing and
-       coherency effects remain missing.
+       software and external-request pacing, linked-list descriptor views and
+       completion/error interrupts.  Register-level suspend, resume and disable
+       are present.  GSWF accepts only enabled source-peripheral-synchronized
+       channels and, because channel FIFOs are not modeled, reports FIS
+       immediately.  Bounded per-channel work prevents a continuously runnable
+       channel from starving its peers.  Migration is exercised with an enabled
+       receive descriptor awaiting FLEXCOM0 USART data and an enabled, suspended
+       USART transmit channel that resumes and completes after migration.  DBGU,
+       every FLEXCOM USART, SPI and TWI personality, I2SMCC, Class-D, AES, SHA and
+       TDES request lines are wired.  The 4 KiB multiport FIFO datapath,
+       including its GTYPE-reported 256-byte per-channel allocation, independent
+       read/write scheduling and suspend/drain behavior, RDIP/WRIP visibility,
+       GWAC pool weighting and CNDC/descriptor QOS effects, the remaining
+       peripheral request lines, security policy, bus/burst and arbitration
+       timing, and coherency effects remain missing.
    * - SDMMC0 and SDMMC1
      - Initial
      - Both SAM9X7 hosts, removable-card attachment and PA23 card detect are
@@ -423,10 +432,11 @@ phase green merely by avoiding it in the device tree.
 #. **Complete reusable data paths.**  The SPI personality and SSI host path now
    exist on all FLEXCOM instances.  Finish its client, CRC and two-pin modes;
    finish synchronous and protocol-specific USART behavior; complete TWI
-   client/SMBus/PEC and high-speed/arbitration behavior; and wire every
-   remaining documented XDMAC request.  Complete SSC, TC1, external timer
-   pins, PWM and ADC so expansion-board drivers can use normal QEMU chardev,
-   SSI, I2C and analog/digital endpoint abstractions.
+   client/SMBus/PEC and high-speed/arbitration behavior; complete the XDMAC
+   channel FIFOs, independent read/write pipelines and GWAC/CNDC.QOS behavior;
+   and wire every remaining documented XDMAC request.  Complete SSC, TC1,
+   external timer pins, PWM and ADC so expansion-board drivers can use normal
+   QEMU chardev, SSI, I2C and analog/digital endpoint abstractions.
 #. **Close storage and memory-controller fidelity.**  Complete SDHCI command,
    error, media-change and migration behavior; complete NAND OOB, bad-block,
    ready/busy timing, PMECC generation/correction and DMA; finish SMC, matrix
@@ -507,9 +517,9 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The normal-path board qtests in the 106-test suite and this boot are clean of
-SAM9X75 model warnings with ``-d unimp,guest_errors``; intentional negative
-and unsupported-command qtests exercise the corresponding diagnostics.
+The normal-path board qtests in the full suite and this boot are clean of
+SAM9X75 model warnings with ``-d unimp,guest_errors``; intentional negative and
+unsupported-command qtests exercise the corresponding diagnostics.
 Generic SD diagnostics still report the expected failed MMC/SDIO probes
 against a memory-only SD card.  ``-kernel`` remains a development entry path
 and is not a substitute for ROM media selection.
@@ -606,6 +616,39 @@ size before configuring DMA makes the channel word-wide as required by the
 data sheet.  Qtests cover the working 32-bit linked-descriptor path and the
 mismatched mode's three-byte stall; the Linux ordering fix remains a separate
 guest change to validate on the physical board.
+
+The XDMAC transfer width encoded as ``CC.DWIDTH=3`` also requires a physical
+board result before it can be modeled.  The SAM9X7 data sheet and device pack
+define only byte, halfword and word widths, while the upstream Linux
+``at_xdmac`` driver selects the fourth encoding for 8-byte-aligned memcpy,
+memset and interleaved transfers.  Run a RAM-resident 64-byte memcpy with
+8-byte-aligned source and destination, ``CC.DWIDTH=3`` and a microblock length
+of eight; record ``CC``, ``CUBC``, ``CIS``, ``GS`` and the destination bytes.
+Repeat with ``CC.DWIDTH=2`` and a microblock length of 16 as the control.  In
+particular, determine whether the first case copies 64 bytes as dword transfers,
+copies only 32 bytes by aliasing word transfers, raises ``RBEIS`` or has another
+effect.  Do not add a guessed fourth width to QEMU until this differential
+result is available.
+
+XDMAC FIFO and maintenance behavior should be compared with an uncached SRAM
+destination.  Use FLEXCOM0 USART local loopback to feed fewer bytes than a
+16-data memory burst into an active peripheral-to-memory channel, apply read
+suspend, then write ``GSWF``.  Record the destination bytes, ``CC`` (including
+``RDIP`` and ``WRIP``), ``CUBC``, ``GS``, ``GRS``, ``GWS`` and ``CIS`` before
+and after: pending data must drain, ``FIS`` must assert and the channel must
+remain enabled.  Repeat with an empty suspended source-peripheral channel,
+after ``GD``, and with enabled memory-to-peripheral and read/write-suspended
+memory-to-memory channels.  Read ``CIS`` to clear it between cases.  These cases
+distinguish an accepted empty flush from the documented ignored scopes and
+capture disable/flush ordering.
+
+For scheduler characterization, run equal long descriptor chains with ``QOS``
+values 0--3, vary ``GWAC.PW0`` through ``PW3``, and record completion order and
+bandwidth.  Do not expect QEMU's 16-operation channel quantum on hardware: it
+is an emulator liveness bound, not modeled SAM9X7 arbitration.  Migration has
+no physical-board counterpart; the qtest migrates an enabled FLEXCOM0 USART
+receive descriptor plus an enabled, suspended transmit channel and proves both
+transfers complete after resume on the destination.
 
 By default a valid SHDWC shutdown command requests a normal QEMU guest
 shutdown.  Backup-domain wake-up experiments can leave the process running

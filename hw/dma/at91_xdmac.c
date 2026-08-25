@@ -120,6 +120,8 @@
 #define XDMAC_AM_UBS_DS         3
 
 #define XDMAC_BH_WORK_LIMIT     4096
+/* Bound work so a continuously runnable channel cannot starve the others. */
+#define XDMAC_CHANNEL_WORK_QUANTUM 16
 
 static uint32_t at91_xdmac_global_status(AT91XDMACState *s)
 {
@@ -162,6 +164,11 @@ static unsigned int at91_xdmac_perid(const AT91XDMACChannel *ch)
 static bool at91_xdmac_is_peripheral(const AT91XDMACChannel *ch)
 {
     return ch->cc & XDMAC_CC_TYPE;
+}
+
+static bool at91_xdmac_is_source_peripheral(const AT91XDMACChannel *ch)
+{
+    return at91_xdmac_is_peripheral(ch) && !(ch->cc & XDMAC_CC_DSYNC);
 }
 
 static bool at91_xdmac_channel_suspended(AT91XDMACState *s,
@@ -478,7 +485,10 @@ static void at91_xdmac_bh(void *opaque)
         bool progress = false;
 
         for (i = 0; i < ARRAY_SIZE(s->channel) && budget; i++) {
-            unsigned int used = at91_xdmac_run_channel(s, i, budget);
+            unsigned int channel_budget = MIN(budget,
+                                               XDMAC_CHANNEL_WORK_QUANTUM);
+            unsigned int used = at91_xdmac_run_channel(s, i,
+                                                        channel_budget);
 
             budget -= used;
             progress |= used != 0;
@@ -805,8 +815,17 @@ static void at91_xdmac_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case XDMAC_GSWF:
         for (index = 0; index < ARRAY_SIZE(s->channel); index++) {
-            if (mask & BIT(index)) {
-                s->channel[index].cis |= XDMAC_CIS_FIS;
+            AT91XDMACChannel *ch = &s->channel[index];
+
+            /*
+             * The SAM9X7 flush command only applies to an active
+             * peripheral-to-memory channel.  This model does not yet
+             * buffer reads in the channel FIFO, so a relevant request
+             * completes immediately with an empty FIFO.
+             */
+            if ((mask & BIT(index)) && ch->enabled &&
+                at91_xdmac_is_source_peripheral(ch)) {
+                ch->cis |= XDMAC_CIS_FIS;
             }
         }
         at91_xdmac_update_irq(s);
