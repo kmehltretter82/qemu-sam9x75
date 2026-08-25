@@ -222,20 +222,28 @@ Support matrix
        and memset, byte/halfword/word widths, address modes and 2D strides,
        software and external-request pacing, linked-list descriptor views and
        completion/error interrupts.  Register-level suspend, resume and disable
-       are present.  GSWF accepts only enabled source-peripheral-synchronized
-       channels and, because channel FIFOs are not modeled, reports FIS
-       immediately.  Bounded per-channel work prevents a continuously runnable
-       channel from starving its peers.  Migration is exercised with an enabled
-       receive descriptor awaiting FLEXCOM0 USART data and an enabled, suspended
-       USART transmit channel that resumes and completes after migration.  DBGU,
-       all thirteen FLEXCOM USART and TWI personalities, the six FLEXCOM0--5
-       SPI personalities, I2SMCC, Class-D, AES, SHA and TDES request lines are
-       wired.  The 4 KiB multiport FIFO datapath,
-       including its GTYPE-reported 256-byte per-channel allocation, independent
-       read/write scheduling and suspend/drain behavior, RDIP/WRIP visibility,
-       GWAC pool weighting and CNDC/descriptor QOS effects, the remaining
-       peripheral request lines, security policy, bus/burst and arbitration
-       timing, and coherency effects remain missing.
+       are present.  Simple non-descriptor, single-microblock
+       peripheral-to-memory channels use the GTYPE-reported 256-byte
+       per-channel FIFO.  MBSIZE staging, byte/halfword/word residue,
+       independent GRS/GWS read/write suspension, GSWF snapshot drain and FIS,
+       graceful GD/DIS ordering, RDIP/WRIP state, write errors and live FIFO
+       migration are covered.  Waiting source reads can proceed while a finite
+       flush snapshot drains; GD preserves an already scheduled final flush
+       write so FIS precedes DIS.  CUBC and the destination address advance
+       only after a successful destination write.  Bounded per-channel work
+       prevents a continuously runnable channel from starving its peers.
+       Migration also exercises an enabled receive descriptor awaiting
+       FLEXCOM0 USART data and an enabled, suspended USART transmit channel
+       that resumes and completes after migration.  DBGU, all thirteen
+       FLEXCOM USART and TWI personalities, the six FLEXCOM0--5 SPI
+       personalities, I2SMCC, Class-D, AES, SHA and TDES request lines are
+       wired.  Descriptor and multi-microblock channels still use the older
+       atomic path, so Linux cyclic receive does not yet have FIFO-aware
+       residue.  GWAC pool weighting and CNDC/descriptor QOS effects, the
+       remaining peripheral request lines, security policy, bus/burst and
+       arbitration timing, and coherency effects remain missing.  DMA memory
+       accesses are synchronous in QEMU, so positive RDIP/WRIP intervals can
+       be too short for software to sample.
    * - SDMMC0 and SDMMC1
      - Initial
      - Both SAM9X7 hosts, removable-card attachment and PA23 card detect are
@@ -367,8 +375,29 @@ Support matrix
        the OHCI 48/12 MHz path.  Disabling a required clock freezes rather
        than advances a schedule, re-enabling resumes without catch-up, and
        clock state migrates.  Physical-board host-controller clock, reset,
-       power and DMA behavior has not yet been compared.  UDPHS, gadget mode
-       and the SAM-BA device path remain missing.
+       power and DMA behavior has not yet been compared.
+
+       UDPHS exposes the documented 1 MiB endpoint-FIFO aperture at
+       ``0x00500000``, its 1 KiB register aperture at ``0xf803c000``,
+       endpoints 0--6, internal DMA-channel register files 1--6, PID 23 and
+       UTMI clocks, and AIC source 23.  A raw-token USB gadget bridge lets an
+       emulated host deliver staged endpoint-zero SETUP transactions and PIO
+       IN/OUT packets instead of collapsing control transfers in the generic
+       USB-device layer.  Complete control-IN and control-OUT stages, legal
+       endpoint modes, multi-bank PIO, FIFO byte counts and endpoint
+       interrupts are covered.  Direct-buffer and three-word linked-descriptor
+       DMA implement IN prefetch/refill, OUT drain, 64 KiB counts, ZLP and
+       short-packet completion, read-to-clear status, chaining, memory errors
+       and active migration.  DMA execution is synchronous, ``BURST_LCK`` has
+       no timing effect and ``INTDIS_DMA`` request suppression is not yet
+       modeled.  Isochronous microframe/DATAX/MDATA termination,
+       SOF/suspend/resume timing, a host-facing USB cable backend and SAM-BA
+       remain.  ``UDPHS_CTRL.EN_UDPHS`` disconnects and blocks UHPHS
+       high-speed Port A while UDPHS owns the shared UTMI transceiver,
+       matching the hardware mux.  Gadget-bridge cable presence drives the
+       board's active-high VBUS sense on PC8.  The controller, shared-port mux,
+       VBUS path and DMA behavior still need comparison with the physical
+       board.
    * - I2C board devices
      - Initial
      - The exact MCP16502TAB-E/S8B PMIC is present on FLEXCOM6 with OTP
@@ -596,8 +625,9 @@ phase green merely by avoiding it in the device tree.
    and protocol-specific USART behavior and enforce the documented
    per-instance USART feature matrix once unsupported-register readback has
    been measured; complete TWI
-   client/SMBus/PEC and high-speed/arbitration behavior; complete the XDMAC
-   channel FIFOs, independent read/write pipelines and GWAC/CNDC.QOS behavior;
+   client/SMBus/PEC and high-speed/arbitration behavior; extend the XDMAC FIFO
+   path to descriptors, cyclic and multi-microblock transfers and complete
+   GWAC/CNDC.QOS behavior;
    and wire every remaining documented XDMAC request.  Complete SSC, TC1,
    external timer pins, PWM and ADC so expansion-board drivers can use normal
    QEMU chardev, SSI, I2C and analog/digital endpoint abstractions.
@@ -614,8 +644,9 @@ phase green merely by avoiding it in the device tree.
    substitute.
 #. **Complete major external interfaces.**  Prove the initial OHCI/EHCI model
    with unmodified Linux host storage and input, then compare reset, port-power,
-   hotplug, DMA-error and interrupt behavior with the board.  Implement UDPHS
-   and prove gadget/SAM-BA operation.  Extend M_CAN with error confinement,
+   hotplug, DMA-error and interrupt behavior with the board.  Complete UDPHS
+   isochronous and suspend/resume timing, add a host-facing cable backend, and
+   prove gadget/SAM-BA operation.  Extend M_CAN with error confinement,
    retry, timestamp synchronization and debug-message behavior; keep the Linux
    CAN-FD/QEMU-backend regression passing and compare it against the physical
    controllers.
@@ -667,8 +698,22 @@ such as ``vcan0``::
     -nographic
 
 USB keyboard, storage and other standard QEMU USB devices can attach to the
-UHPHS host ports.  The USB device controller is not yet present, so this does
-not provide a gadget or SAM-BA device-mode connection.
+UHPHS host ports.  UDPHS is present, but a cable is not created automatically
+and QEMU does not yet expose it directly to a physical host.  For controller
+development, its raw-token bridge can be linked to an emulated USB host bus;
+this loopback example attaches it to UHPHS Port B::
+
+  qemu-system-arm \
+    -M sam9x75-curiosity \
+    -device at91-udphs-gadget,udphs=/machine/soc/udphs,bus=usb-bus.0,port=2 \
+    -nographic
+
+Guest firmware must still enable PID 23, UPLL and UDPHS before tokens are
+accepted.  The loopback is a test topology, not a physical-board topology.
+On silicon ``UDPHS_CTRL.EN_UDPHS`` takes the shared UTMI transceiver away from
+UHPHS high-speed Port A; the model disconnects and blocks that port while
+device mode is selected.  Port B is used above so the emulated host can act as
+a protocol test peer.
 
 The physical OTPC array is blank and private to the VM unless a backing image
 is selected.  For example, create an exactly 10 KiB blank image and attach it
