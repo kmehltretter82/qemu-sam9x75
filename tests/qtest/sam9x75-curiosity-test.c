@@ -629,6 +629,7 @@
 #define OTPC_UID3R              0x6c
 #define OTPC_WPMR               0xe4
 #define OTPC_WPSR               0xe8
+#define OTPC_VERSION            0xfc
 
 #define OTPC_CR_PGM             BIT(0)
 #define OTPC_CR_CKSGEN          BIT(1)
@@ -692,6 +693,7 @@
 #define OTPC_WPSR_READ_WO       0
 #define OTPC_WPSR_WRITE_RO      1
 #define OTPC_WPSR_KEY_ERROR     3
+#define OTPC_VERSION_RESET      0x00000202
 #define OTPC_WPSR_ECLASS        BIT(31)
 
 #define PMC_PLL_CTRL0           0x0c
@@ -9064,6 +9066,160 @@ static void test_otpc_backend_validation(void)
         "write-enable requires a writable OTP drive");
 }
 
+static void test_otpc_identification_and_reserved_offsets(void)
+{
+    static const struct {
+        unsigned int first;
+        unsigned int last;
+    } reserved_ranges[] = {
+        { 0x28, 0x2c },
+        { 0x38, 0x3c },
+        { 0x44, 0x4c },
+        { 0x58, 0x5c },
+        { 0x70, 0xe0 },
+        { 0xec, 0xf8 },
+    };
+    static const uint32_t uids[] = {
+        0x01234567,
+        0x89abcdef,
+        0x55aa9750,
+        0xfedcba98,
+    };
+    g_autofree char *log_path = NULL;
+    g_autofree char *log = NULL;
+    QTestState *qts;
+    GError *error = NULL;
+    uint32_t value;
+    unsigned int range;
+    unsigned int offset;
+    unsigned int i;
+    int fd;
+
+    fd = g_file_open_tmp("sam9x75-otpc-log-XXXXXX", &log_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+
+    qts = qtest_initf(SAM9X75_MACHINE
+                      " -global at91-otpc.uid0=0x%08x"
+                      " -global at91-otpc.uid1=0x%08x"
+                      " -global at91-otpc.uid2=0x%08x"
+                      " -global at91-otpc.uid3=0x%08x"
+                      " -d guest_errors -D %s",
+                      uids[0], uids[1], uids[2], uids[3], log_path);
+
+    for (i = 0; i < ARRAY_SIZE(uids); i++) {
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UID0R +
+                                    i * sizeof(uint32_t)), ==, uids[i]);
+        qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_UID0R +
+                     i * sizeof(uint32_t), ~uids[i]);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UID0R +
+                                    i * sizeof(uint32_t)), ==, uids[i]);
+        value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR);
+        g_assert_cmphex(value & (OTPC_WPSR_SWE |
+                                 OTPC_WPSR_SWETYP(0xf) |
+                                 OTPC_WPSR_ECLASS), ==,
+                        OTPC_WPSR_SWE |
+                        OTPC_WPSR_SWETYP(OTPC_WPSR_WRITE_RO));
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                        OTPC_INT_SECE);
+    }
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_VERSION), ==,
+                    OTPC_VERSION_RESET);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_VERSION, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_VERSION), ==,
+                    OTPC_VERSION_RESET);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR);
+    g_assert_cmphex(value & (OTPC_WPSR_SWE |
+                             OTPC_WPSR_SWETYP(0xf) |
+                             OTPC_WPSR_ECLASS), ==,
+                    OTPC_WPSR_SWE |
+                    OTPC_WPSR_SWETYP(OTPC_WPSR_WRITE_RO));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_SECE);
+
+    qtest_system_reset(qts);
+    for (i = 0; i < ARRAY_SIZE(uids); i++) {
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_UID0R +
+                                    i * sizeof(uint32_t)), ==, uids[i]);
+    }
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_VERSION), ==,
+                    OTPC_VERSION_RESET);
+
+    for (range = 0; range < ARRAY_SIZE(reserved_ranges); range++) {
+        for (offset = reserved_ranges[range].first;
+             offset <= reserved_ranges[range].last;
+             offset += sizeof(uint32_t)) {
+            g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + offset), ==,
+                            0);
+            qtest_writel(qts, SAM9X7_OTPC_BASE + offset, UINT32_MAX);
+            g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + offset), ==,
+                            0);
+        }
+    }
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==, 0);
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(log_path, &log, NULL, &error));
+    g_assert_no_error(error);
+    g_assert_null(strstr(log, "at91-otpc"));
+    g_clear_pointer(&log, g_free);
+
+    qts = qtest_initf(SAM9X75_MACHINE " -d guest_errors -D %s", log_path);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + 0x100), ==, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + 0x100, UINT32_MAX);
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(log_path, &log, NULL, &error));
+    g_assert_no_error(error);
+    g_assert_nonnull(strstr(log, "read from bad offset 0x100"));
+    g_assert_nonnull(strstr(log, "write to bad offset 0x100"));
+    g_assert_cmpint(g_unlink(log_path), ==, 0);
+}
+
+static void test_otpc_identification_migration(void)
+{
+    static const uint32_t uids[] = {
+        0x76543210,
+        0xfedcba98,
+        0x0badcafe,
+        0x55aa33cc,
+    };
+    const char *args = SAM9X75_MACHINE
+        " -global at91-otpc.uid0=0x76543210"
+        " -global at91-otpc.uid1=0xfedcba98"
+        " -global at91-otpc.uid2=0x0badcafe"
+        " -global at91-otpc.uid3=0x55aa33cc";
+    QTestState *from = qtest_init(args);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    unsigned int i;
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    for (i = 0; i < ARRAY_SIZE(uids); i++) {
+        g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_UID0R +
+                                    i * sizeof(uint32_t)), ==, uids[i]);
+    }
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_VERSION), ==,
+                    OTPC_VERSION_RESET);
+
+    qtest_system_reset(to);
+    for (i = 0; i < ARRAY_SIZE(uids); i++) {
+        g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_UID0R +
+                                    i * sizeof(uint32_t)), ==, uids[i]);
+    }
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_VERSION), ==,
+                    OTPC_VERSION_RESET);
+
+    qtest_quit(from);
+    qtest_quit(to);
+}
+
 static void test_otpc_registers_protection_and_irq(void)
 {
     const uint32_t protection = OTPC_WPMR_WPCFEN |
@@ -12821,6 +12977,10 @@ int main(int argc, char **argv)
                    test_otpc_physical_backend_fault_latch);
     qtest_add_func("sam9x75/otpc/backend-validation",
                    test_otpc_backend_validation);
+    qtest_add_func("sam9x75/otpc/identification-and-reserved-offsets",
+                   test_otpc_identification_and_reserved_offsets);
+    qtest_add_func("sam9x75/otpc/identification-migration",
+                   test_otpc_identification_migration);
     qtest_add_func("sam9x75/otpc/emulation-scan-and-read",
                    test_otpc_emulation_scan_and_read);
     qtest_add_func("sam9x75/otpc/corruption-bounds-and-reset",

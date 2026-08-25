@@ -40,6 +40,10 @@
 #define OTPC_UID3R              0x6c
 #define OTPC_WPMR               0xe4
 #define OTPC_WPSR               0xe8
+/* Physical SAM9X75 silicon exposes its IP revision at this offset. */
+#define OTPC_VERSION            0xfc
+
+#define OTPC_VERSION_RESET      0x00000202
 
 /* Masks from the SAM9X7 device pack. */
 #define OTPC_CR_MASK            0xffff93d7
@@ -994,6 +998,24 @@ static void at91_otpc_control_write(AT91OTPCState *s, uint32_t value)
     }
 }
 
+static bool at91_otpc_offset_is_reserved(hwaddr offset)
+{
+    if (offset & (sizeof(uint32_t) - 1)) {
+        return false;
+    }
+
+    /*
+     * DS60001813E defines these gaps as reserved.  The aligned words after
+     * WPSR are also decoded holes before the silicon VERSION register.
+     */
+    return (offset >= 0x28 && offset <= 0x2c) ||
+           (offset >= 0x38 && offset <= 0x3c) ||
+           (offset >= 0x44 && offset <= 0x4c) ||
+           (offset >= 0x58 && offset <= 0x5c) ||
+           (offset >= 0x70 && offset <= 0xe0) ||
+           (offset >= 0xec && offset <= 0xf8);
+}
+
 static uint64_t at91_otpc_read(void *opaque, hwaddr offset,
                                unsigned int size)
 {
@@ -1052,7 +1074,12 @@ static uint64_t at91_otpc_read(void *opaque, hwaddr offset,
         value = s->wpsr & OTPC_WPSR_MASK;
         s->wpsr &= ~OTPC_WPSR_CLEARED_MASK;
         return value;
+    case OTPC_VERSION:
+        return OTPC_VERSION_RESET;
     default:
+        if (at91_otpc_offset_is_reserved(offset)) {
+            return 0;
+        }
         qemu_log_mask(LOG_GUEST_ERROR,
                       TYPE_AT91_OTPC ": read from bad offset 0x%"
                       HWADDR_PRIx "\n", offset);
@@ -1145,9 +1172,13 @@ static void at91_otpc_write(void *opaque, hwaddr offset, uint64_t value,
     case OTPC_UID2R:
     case OTPC_UID3R:
     case OTPC_WPSR:
+    case OTPC_VERSION:
         at91_otpc_report_software_error(s, OTPC_SWE_WRITE_RO, false);
         break;
     default:
+        if (at91_otpc_offset_is_reserved(offset)) {
+            break;
+        }
         qemu_log_mask(LOG_GUEST_ERROR,
                       TYPE_AT91_OTPC ": write to bad offset 0x%"
                       HWADDR_PRIx "\n", offset);
