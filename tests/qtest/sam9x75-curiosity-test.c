@@ -183,6 +183,8 @@
 #define UHPFS_HC_CONTROL_HEAD   0x20
 #define UHPFS_HC_BULK_HEAD      0x28
 #define UHPFS_HC_FM_INTERVAL    0x34
+#define UHPFS_HC_FM_REMAINING   0x38
+#define UHPFS_HC_FM_NUMBER      0x3c
 #define UHPFS_HC_LS_THRESHOLD   0x44
 #define UHPFS_HC_RH_DESC_A      0x48
 #define UHPFS_HC_RH_DESC_B      0x4c
@@ -251,9 +253,19 @@
 #define MCAN_ILS                0x058
 #define MCAN_ILE                0x05c
 #define MCAN_GFC                0x080
+#define MCAN_SIDFC              0x084
+#define MCAN_XIDFC              0x088
+#define MCAN_XIDAM              0x090
+#define MCAN_HPMS               0x094
+#define MCAN_NDAT1              0x098
+#define MCAN_NDAT2              0x09c
 #define MCAN_RXF0C              0x0a0
 #define MCAN_RXF0S              0x0a4
 #define MCAN_RXF0A              0x0a8
+#define MCAN_RXBC               0x0ac
+#define MCAN_RXF1C              0x0b0
+#define MCAN_RXF1S              0x0b4
+#define MCAN_RXF1A              0x0b8
 #define MCAN_RXESC              0x0bc
 #define MCAN_TXBC               0x0c0
 #define MCAN_TXFQS              0x0c4
@@ -261,6 +273,7 @@
 #define MCAN_TXBRP              0x0cc
 #define MCAN_TXBAR              0x0d0
 #define MCAN_TXBTO              0x0d8
+#define MCAN_TXBCF              0x0dc
 #define MCAN_TXBTIE             0x0e0
 #define MCAN_TXEFC              0x0f0
 #define MCAN_TXEFS              0x0f4
@@ -275,18 +288,51 @@
 #define MCAN_CCCR_BRSE          BIT(9)
 #define MCAN_TEST_LBCK          BIT(4)
 #define MCAN_IR_RF0N            BIT(0)
+#define MCAN_IR_RF0W            BIT(1)
+#define MCAN_IR_RF0F            BIT(2)
+#define MCAN_IR_RF0L            BIT(3)
+#define MCAN_IR_RF1N            BIT(4)
+#define MCAN_IR_RF1W            BIT(5)
+#define MCAN_IR_RF1F            BIT(6)
+#define MCAN_IR_RF1L            BIT(7)
+#define MCAN_IR_HPM             BIT(8)
 #define MCAN_IR_TC              BIT(9)
 #define MCAN_IR_TEFN            BIT(12)
 #define MCAN_IR_MRAF            BIT(17)
+#define MCAN_IR_DRX             BIT(19)
 #define MCAN_ILE_EINT0          BIT(0)
 #define MCAN_ILE_EINT1          BIT(1)
 #define MCAN_ELEMENT_EFC        BIT(23)
+#define MCAN_ELEMENT_RTR        BIT(29)
+#define MCAN_ELEMENT_XTD        BIT(30)
 #define MCAN_ELEMENT_FDF        BIT(21)
 #define MCAN_ELEMENT_BRS        BIT(20)
 #define MCAN_ELEMENT_MM(marker) ((uint32_t)(marker) << 24)
 #define MCAN_ELEMENT_DLC(dlc)   ((uint32_t)(dlc) << 16)
 #define MCAN_TX_EVENT_ET_TX     BIT(22)
 #define MCAN_RXF0C_SIZE(size)   ((uint32_t)(size) << 16)
+#define MCAN_RXF1C_SIZE(size)   ((uint32_t)(size) << 16)
+#define MCAN_RXFC_WATERMARK(wm) ((uint32_t)(wm) << 24)
+#define MCAN_RXFC_OVERWRITE     BIT(31)
+#define MCAN_SIDFC_SIZE(size)   ((uint32_t)(size) << 16)
+#define MCAN_XIDFC_SIZE(size)   ((uint32_t)(size) << 16)
+#define MCAN_STD_FILTER(type, action, id1, id2) \
+    (((uint32_t)(type) << 30) | ((uint32_t)(action) << 27) | \
+     ((uint32_t)(id1) << 16) | (id2))
+#define MCAN_EXT_FILTER0(action, id1) \
+    (((uint32_t)(action) << 29) | (id1))
+#define MCAN_EXT_FILTER1(type, id2) \
+    (((uint32_t)(type) << 30) | (id2))
+#define MCAN_FILTER_FIFO0       1
+#define MCAN_FILTER_FIFO1       2
+#define MCAN_FILTER_REJECT      3
+#define MCAN_FILTER_PRIORITY    4
+#define MCAN_FILTER_PRIO_FIFO0  5
+#define MCAN_FILTER_PRIO_FIFO1  6
+#define MCAN_FILTER_RX_BUFFER   7
+#define MCAN_RXFS_STATUS(fill, get, put) \
+    ((uint32_t)(fill) | ((uint32_t)(get) << 8) | \
+     ((uint32_t)(put) << 16))
 #define MCAN_TXBC_FIFO_SIZE(size) ((uint32_t)(size) << 24)
 #define MCAN_TXEFC_SIZE(size)   ((uint32_t)(size) << 16)
 #define MCAN_TXEFS_STATUS(fill, get, put) \
@@ -847,6 +893,9 @@
 #define OTPC_VERSION_RESET      0x00000202
 #define OTPC_WPSR_ECLASS        BIT(31)
 
+#define PMC_SCER                0x00
+#define PMC_SCDR                0x04
+#define PMC_SCSR                0x08
 #define PMC_PLL_CTRL0           0x0c
 #define PMC_PLL_CTRL1           0x10
 #define PMC_PLL_ACR             0x18
@@ -875,6 +924,9 @@
 #define PMC_PLL_ACR_RESET       0x00020033
 #define PMC_PLL_UPDT_UPDATE     BIT(8)
 #define PMC_PLL_UPDT_MASK       0x003f0007
+#define PMC_SC_UHP              BIT(6)
+#define PMC_USB_USBS_UPLL       1
+#define PMC_USB_USBDIV(value)   ((value) << 8)
 #define PMC_MOR_MOSCXTEN        BIT(0)
 #define PMC_MOR_MOSCRCEN        BIT(3)
 #define PMC_MOR_ALWAYS_ONE      BIT(5)
@@ -4799,6 +4851,29 @@ static void pmc_write_pcr(QTestState *qts, unsigned int id, uint32_t config)
                  PMC_PCR_CMD | id | config);
 }
 
+static void pmc_configure_usb_host(QTestState *qts)
+{
+    const uint32_t selector = 1 | (0x3fU << 16);
+
+    pmc_write_pcr(qts, 22, PMC_PCR_EN);
+
+    /* 24 MHz * (39 + 1), followed by UPLL's fixed /2 = 480 MHz. */
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT, selector);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_ACR, 0x12023010);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_CTRL1, 39U << 24);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT,
+                 selector | PMC_PLL_UPDT_UPDATE);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_CTRL0,
+                 PMC_PLL_CTRL0_ENLOCK | PMC_PLL_CTRL0_ENPLL |
+                 PMC_PLL_CTRL0_ENPLLCK);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT,
+                 selector | PMC_PLL_UPDT_UPDATE);
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_USB,
+                 PMC_USB_USBS_UPLL | PMC_USB_USBDIV(9));
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_SCER, PMC_SC_UHP);
+}
+
 static void test_pmc_clock_tree_and_protection(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -4898,6 +4973,24 @@ static void test_pmc_clock_tree_and_protection(void)
     g_assert_cmpuint(get_clock_period(qts,
                                      "/machine/soc/pmc/gclk[37]"), ==,
                      CLOCK_PERIOD_FROM_HZ(8000000));
+
+    pmc_configure_usb_host(qts);
+    g_assert_true(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SCSR) &
+                  PMC_SC_UHP);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_USB), ==,
+                    PMC_USB_USBS_UPLL | PMC_USB_USBDIV(9));
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/pmc/utmi"), ==,
+                     CLOCK_PERIOD_FROM_HZ(480000000));
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/pmc/uhpck"), ==,
+                     CLOCK_PERIOD_FROM_HZ(48000000));
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_SCDR, PMC_SC_UHP);
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/pmc/uhpck"), ==,
+                     0);
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/pmc/utmi"), ==,
+                     CLOCK_PERIOD_FROM_HZ(480000000));
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_SCER, PMC_SC_UHP);
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/pmc/uhpck"), ==,
+                     CLOCK_PERIOD_FROM_HZ(48000000));
 
     aic_configure(qts, 1, AIC_SMR_LEVEL_HIGH | 1, 0x01010101);
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_IER, PMC_SR_MCKRDY);
@@ -13475,10 +13568,86 @@ static void test_uhphs_power_connection_lifecycle(void)
     qtest_quit(qts);
 }
 
+static void test_uhphs_pmc_clock_gating(void)
+{
+    const uint32_t hcca = SAM9X7_SRAM0_BASE + 0x2000;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t ehci_frame;
+    uint32_t ohci_frame;
+    uint32_t ohci_remaining;
+
+    qtest_memset(qts, SAM9X7_SRAM0_BASE, 1, 0x1000);
+    qtest_memset(qts, hcca, 0, 0x100);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_PERIODICLISTBASE,
+                 SAM9X7_SRAM0_BASE);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_USBCMD,
+                 UHPHS_USBCMD_RUN | UHPHS_USBCMD_PSE);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_HCCA, hcca);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_CONTROL,
+                 UHPFS_CONTROL_OPERATIONAL);
+
+    /* The register interfaces remain visible, but neither schedule runs. */
+    qtest_clock_step(qts, 20 * 1000000LL);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE + 0x1c), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                                UHPFS_HC_FM_NUMBER), ==, 0);
+
+    pmc_configure_usb_host(qts);
+    qtest_clock_step(qts, 20 * 1000000LL);
+    ehci_frame = qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE + 0x1c);
+    ohci_frame = qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                             UHPFS_HC_FM_NUMBER);
+    g_assert_cmphex(ehci_frame, >, 0);
+    g_assert_cmphex(ohci_frame, >, 0);
+
+    /* SCER.UHP supplies OHCI's 48/12 MHz clocks, not EHCI's UTMI path. */
+    qtest_clock_step(qts, 250000);
+    ehci_frame = qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE + 0x1c);
+    ohci_frame = qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                             UHPFS_HC_FM_NUMBER);
+    ohci_remaining = qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                                 UHPFS_HC_FM_REMAINING);
+    g_assert_cmphex(ohci_remaining & 0x3fff, >, 0);
+    g_assert_cmphex(ohci_remaining & 0x3fff, <, 0x2edf);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_SCDR, PMC_SC_UHP);
+    ohci_remaining = qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                                 UHPFS_HC_FM_REMAINING);
+    qtest_clock_step(qts, 20 * 1000000LL);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                                UHPFS_HC_FM_NUMBER), ==, ohci_frame);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                                UHPFS_HC_FM_REMAINING), ==,
+                    ohci_remaining);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE + 0x1c), !=,
+                    ehci_frame);
+
+    /* The PID-22 peripheral clock is common to both host interfaces. */
+    pmc_write_pcr(qts, 22, 0);
+    ehci_frame = qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE + 0x1c);
+    qtest_clock_step(qts, 20 * 1000000LL);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE + 0x1c), ==,
+                    ehci_frame);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                                UHPFS_HC_FM_NUMBER), ==, ohci_frame);
+
+    pmc_write_pcr(qts, 22, PMC_PCR_EN);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_SCER, PMC_SC_UHP);
+    qtest_clock_step(qts, 20 * 1000000LL);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE + 0x1c), !=,
+                    ehci_frame);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                                UHPFS_HC_FM_NUMBER), !=, ohci_frame);
+
+    qtest_quit(qts);
+}
+
 static void test_uhphs_ehci_frame_list_size(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
     uint32_t frindex;
+
+    pmc_configure_usb_host(qts);
 
     /* Every little-endian entry has the terminate bit set. */
     qtest_memset(qts, SAM9X7_SRAM0_BASE, 1, 0x1000);
@@ -13510,6 +13679,7 @@ static void test_uhphs_ehci_dma_error(void)
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
     uint32_t status;
 
+    pmc_configure_usb_host(qts);
     aic_configure(qts, 22, AIC_SMR_LEVEL_HIGH | 5, 0x5d5d0022);
     qtest_qmp_device_add(qts, "usb-kbd", "sam9x75-dma-usb-kbd",
                          "{'bus': 'usb-bus.0', 'port': '2'}");
@@ -13550,6 +13720,7 @@ static void test_uhphs_ehci_dma_error(void)
                    UHPHS_INSNREG06_AHB_ERR);
 
     qtest_system_reset(qts);
+    pmc_configure_usb_host(qts);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE +
                                 UHPHS_INSNREG06), ==, 0);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE +
@@ -13591,6 +13762,7 @@ static void test_uhphs_ehci_dma_error(void)
     qtest_qmp_device_del(qts, "sam9x75-dma-usb-kbd");
 
     qtest_system_reset(qts);
+    pmc_configure_usb_host(qts);
     qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_HCCA,
                  invalid_dma);
     qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_CONTROL,
@@ -13611,6 +13783,128 @@ static void test_uhphs_ehci_dma_error(void)
                                 UHPHS_INSNREG07), ==, 0);
 
     qtest_quit(qts);
+}
+
+static void test_uhphs_gated_async_migration(void)
+{
+    const uint32_t invalid_dma = 0x10000000;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    uint32_t status;
+
+    /* A gated controller must not traverse this invalid async schedule. */
+    qtest_writel(from, SAM9X7_UHPHS_EHCI_BASE + UHPHS_ASYNCLISTADDR,
+                 invalid_dma);
+    qtest_writel(from, SAM9X7_UHPHS_EHCI_BASE + UHPHS_USBINTR,
+                 UHPHS_USBSTS_HSE);
+    qtest_writel(from, SAM9X7_UHPHS_EHCI_BASE + UHPHS_USBCMD,
+                 UHPHS_USBCMD_RUN | UHPHS_USBCMD_ASE);
+    qtest_clock_step(from, 20 * 1000000LL);
+    g_assert_false(qtest_readl(from, SAM9X7_UHPHS_EHCI_BASE +
+                               UHPHS_USBSTS) & UHPHS_USBSTS_HSE);
+    g_assert_false(qtest_readl(from, SAM9X7_UHPHS_EHCI_BASE +
+                               UHPHS_INSNREG06) &
+                   UHPHS_INSNREG06_AHB_ERR);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_false(qtest_readl(to, SAM9X7_UHPHS_EHCI_BASE +
+                               UHPHS_USBSTS) & UHPHS_USBSTS_HSE);
+    g_assert_false(qtest_readl(to, SAM9X7_UHPHS_EHCI_BASE +
+                               UHPHS_INSNREG06) &
+                   UHPHS_INSNREG06_AHB_ERR);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UHPHS_EHCI_BASE +
+                                UHPHS_ASYNCLISTADDR), ==, invalid_dma);
+
+    /* Restoring the clocks releases the deferred schedule and its fault. */
+    pmc_configure_usb_host(to);
+    qtest_clock_step(to, 1);
+    qtest_clock_step_next(to);
+    status = qtest_readl(to, SAM9X7_UHPHS_EHCI_BASE + UHPHS_USBSTS);
+    g_assert_true(status & UHPHS_USBSTS_HSE);
+    g_assert_true(qtest_readl(to, SAM9X7_UHPHS_EHCI_BASE +
+                              UHPHS_INSNREG06) &
+                  UHPHS_INSNREG06_AHB_ERR);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UHPHS_EHCI_BASE +
+                                UHPHS_INSNREG07), ==, invalid_dma);
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
+static void test_uhphs_frame_phase_migration(void)
+{
+    const uint32_t hcca = SAM9X7_SRAM0_BASE + 0x2000;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    uint32_t ehci_frame;
+    uint32_t ohci_frame;
+    uint32_t ohci_remaining;
+    int64_t from_clock;
+
+    qtest_clock_step(from, 5 * 1000000LL);
+    pmc_configure_usb_host(from);
+    qtest_memset(from, SAM9X7_SRAM0_BASE, 1, 0x1000);
+    qtest_memset(from, hcca, 0, 0x100);
+    qtest_writel(from, SAM9X7_UHPHS_EHCI_BASE + UHPHS_PERIODICLISTBASE,
+                 SAM9X7_SRAM0_BASE);
+    qtest_writel(from, SAM9X7_UHPHS_EHCI_BASE + UHPHS_USBCMD,
+                 UHPHS_USBCMD_RUN | UHPHS_USBCMD_PSE);
+    qtest_writel(from, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_HCCA, hcca);
+    qtest_writel(from, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_CONTROL,
+                 UHPFS_CONTROL_OPERATIONAL);
+
+    qtest_clock_step(from, 1);
+    qtest_clock_step(from, 2 * 1000000LL);
+    ehci_frame = qtest_readl(from, SAM9X7_UHPHS_EHCI_BASE + 0x1c);
+    g_assert_cmphex(ehci_frame, >=, 8);
+    from_clock = qtest_clock_step(from, 7 * 125000LL);
+    ohci_frame = qtest_readl(from, SAM9X7_UHPHS_OHCI_BASE +
+                             UHPFS_HC_FM_NUMBER);
+    ohci_remaining = qtest_readl(from, SAM9X7_UHPHS_OHCI_BASE +
+                                 UHPFS_HC_FM_REMAINING);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    /* qtest virtual clocks are independent; align the destination clock. */
+    g_assert_cmpint(qtest_clock_set(to, from_clock), ==, from_clock);
+
+    /* Both host controllers preserve the elapsed part of their frame. */
+    g_assert_cmpuint(get_clock_period(to, "/machine/soc/uhphs-ohci/pclk"),
+                     !=, 0);
+    g_assert_cmpuint(get_clock_period(to, "/machine/soc/uhphs-ohci/uhpck"),
+                     !=, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UHPHS_EHCI_BASE + 0x1c), ==,
+                    ehci_frame);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UHPHS_OHCI_BASE +
+                                UHPFS_HC_FM_NUMBER), ==, ohci_frame);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UHPHS_OHCI_BASE +
+                                UHPFS_HC_FM_REMAINING), ==,
+                    ohci_remaining);
+
+    qtest_clock_step(to, 100000);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UHPHS_EHCI_BASE + 0x1c), ==,
+                    ehci_frame);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UHPHS_OHCI_BASE +
+                                UHPFS_HC_FM_NUMBER), ==, ohci_frame);
+    qtest_clock_step(to, 50000);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UHPHS_OHCI_BASE +
+                                UHPFS_HC_FM_NUMBER), ==,
+                    (ohci_frame + 1) & 0xffff);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UHPHS_EHCI_BASE + 0x1c), ==,
+                    ehci_frame);
+    qtest_clock_step(to, 2050000);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UHPHS_EHCI_BASE + 0x1c), ==,
+                    (ehci_frame + 24) & 0x3ff8);
+
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
 /*
@@ -13743,6 +14037,7 @@ static void test_uhphs_ohci_active_async_migration(void)
         " -device usb-storage,id=sam9x75-ohci-msd,drive=usb-disk,"
         "bus=usb-bus.0,port=2,werror=stop -incoming defer");
 
+    pmc_configure_usb_host(from);
     qtest_memset(from, hcca, 0, 0x800);
     qtest_writel(from, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_HCCA, hcca);
     qtest_writel(from, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_RH_PORT(1),
@@ -13883,6 +14178,7 @@ static void test_uhphs_migration(void)
     QTestState *from = qtest_init(SAM9X75_MACHINE);
     QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
 
+    pmc_configure_usb_host(from);
     aic_configure(from, 22, AIC_SMR_LEVEL_HIGH | 5, 0x5d5d0022);
     qtest_writel(from, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_HCCA,
                  hcca);
@@ -13985,6 +14281,51 @@ static void mcan_write_tx_element(QTestState *qts, uint32_t offset,
         qtest_writel(qts, SAM9X7_SRAM0_BASE + offset + 8 + i * 4,
                      data[i]);
     }
+}
+
+static void mcan_begin_loopback_configuration(QTestState *qts,
+                                               uint64_t base)
+{
+    const uint32_t mode = MCAN_CCCR_TEST | MCAN_CCCR_MON;
+
+    qtest_writel(qts, base + MCAN_CCCR,
+                 MCAN_CCCR_INIT | MCAN_CCCR_CCE);
+    qtest_writel(qts, base + MCAN_CCCR,
+                 MCAN_CCCR_INIT | MCAN_CCCR_CCE | mode);
+}
+
+static void mcan_end_loopback_configuration(QTestState *qts,
+                                             uint64_t base)
+{
+    const uint32_t mode = MCAN_CCCR_TEST | MCAN_CCCR_MON;
+
+    qtest_writel(qts, base + MCAN_TEST, MCAN_TEST_LBCK);
+    qtest_writel(qts, base + MCAN_CCCR, mode);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_CCCR), ==, mode);
+}
+
+static void mcan_loopback_frame(QTestState *qts, uint64_t base,
+                                uint32_t tx_offset, uint32_t id,
+                                bool extended, bool remote, uint32_t data)
+{
+    uint32_t word0 = extended ? (id & 0x1fffffff) | MCAN_ELEMENT_XTD :
+                                (id & 0x7ff) << 18;
+    uint32_t word1 = remote ? 0 : MCAN_ELEMENT_DLC(4);
+
+    if (remote) {
+        word0 |= MCAN_ELEMENT_RTR;
+    }
+    mcan_write_tx_element(qts, tx_offset, word0, word1, &data,
+                          remote ? 0 : 1);
+    qtest_writel(qts, base + MCAN_TXBAR, BIT(0));
+    g_assert_true(qtest_readl(qts, base + MCAN_TXBTO) & BIT(0));
+}
+
+static void mcan_set_gfc(QTestState *qts, uint64_t base, uint32_t gfc)
+{
+    mcan_begin_loopback_configuration(qts, base);
+    qtest_writel(qts, base + MCAN_GFC, gfc);
+    mcan_end_loopback_configuration(qts, base);
 }
 
 static void test_mcan_registers_configuration_and_reset(void)
@@ -14176,6 +14517,33 @@ static void test_mcan_linux_v33_tx_event_fifo(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_MCAN0_BASE + MCAN_TXEFS), ==,
                     MCAN_TXEFS_STATUS(0, 2, 2));
 
+    /* Asserting CCE resets handler status, while IR remains latched. */
+    mcan_write_tx_element(qts, tx_offset + 2 * tx_element_size,
+                          word0[0], word1[0] | MCAN_ELEMENT_MM(2),
+                          data0, ARRAY_SIZE(data0));
+    qtest_writel(qts, SAM9X7_MCAN0_BASE + MCAN_TXBAR, BIT(2));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MCAN0_BASE + MCAN_TXEFS), ==,
+                    MCAN_TXEFS_STATUS(1, 2, 3));
+    g_assert_true(qtest_readl(qts, SAM9X7_MCAN0_BASE + MCAN_TXBTO) &
+                  BIT(2));
+    qtest_writel(qts, SAM9X7_MCAN0_BASE + MCAN_CCCR,
+                 MCAN_CCCR_INIT | MCAN_CCCR_CCE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MCAN0_BASE + MCAN_TXEFS), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MCAN0_BASE + MCAN_TXFQS), ==,
+                    32);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MCAN0_BASE + MCAN_TXBRP), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MCAN0_BASE + MCAN_TXBTO), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MCAN0_BASE + MCAN_TXBCF), ==,
+                    0);
+    g_assert_true(qtest_readl(qts, SAM9X7_MCAN0_BASE + MCAN_IR) &
+                  MCAN_IR_TEFN);
+    qtest_writel(qts, SAM9X7_MCAN0_BASE + MCAN_TXBAR, BIT(3));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MCAN0_BASE + MCAN_TXBRP), ==,
+                    0);
+
     qtest_quit(qts);
 }
 
@@ -14243,6 +14611,473 @@ static void test_mcan_external_can_fd(void)
     g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR2) & BIT(5));
 
     qtest_quit(qts);
+}
+
+static void test_mcan_acceptance_filters_and_gfc(void)
+{
+    const uint64_t base = SAM9X7_MCAN0_BASE;
+    const uint32_t sid_offset = 0x2000;
+    const uint32_t xid_offset = 0x2100;
+    const uint32_t rxf0_offset = 0x3000;
+    const uint32_t rxf1_offset = 0x3100;
+    const uint32_t tx_offset = 0x4000;
+    static const uint32_t standard_filters[] = {
+        MCAN_STD_FILTER(0, MCAN_FILTER_FIFO0, 0x100, 0x10f),
+        MCAN_STD_FILTER(1, MCAN_FILTER_FIFO1, 0x200, 0x201),
+        MCAN_STD_FILTER(2, MCAN_FILTER_REJECT, 0x300, 0x7f0),
+        MCAN_STD_FILTER(0, MCAN_FILTER_PRIO_FIFO0, 0x400, 0x40f),
+        MCAN_STD_FILTER(3, MCAN_FILTER_FIFO0, 0x555, 0x555),
+    };
+    static const uint32_t extended_filters[][2] = {
+        {
+            MCAN_EXT_FILTER0(MCAN_FILTER_FIFO0, 0x100),
+            MCAN_EXT_FILTER1(0, 0x10f),
+        }, {
+            MCAN_EXT_FILTER0(MCAN_FILTER_FIFO1, 0x222),
+            MCAN_EXT_FILTER1(1, 0x333),
+        }, {
+            MCAN_EXT_FILTER0(MCAN_FILTER_REJECT, 0x400),
+            MCAN_EXT_FILTER1(2, 0x700),
+        }, {
+            MCAN_EXT_FILTER0(MCAN_FILTER_PRIO_FIFO1, 0x1abc000),
+            MCAN_EXT_FILTER1(3, 0x1abc00f),
+        }, {
+            MCAN_EXT_FILTER0(MCAN_FILTER_PRIORITY, 0x777),
+            MCAN_EXT_FILTER1(1, 0x777),
+        },
+    };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int i;
+
+    mcan_enable_clocks(qts, 29);
+    for (i = 0; i < ARRAY_SIZE(standard_filters); i++) {
+        qtest_writel(qts, SAM9X7_SRAM0_BASE + sid_offset + i * 4,
+                     standard_filters[i]);
+    }
+    for (i = 0; i < ARRAY_SIZE(extended_filters); i++) {
+        qtest_writel(qts, SAM9X7_SRAM0_BASE + xid_offset + i * 8,
+                     extended_filters[i][0]);
+        qtest_writel(qts, SAM9X7_SRAM0_BASE + xid_offset + i * 8 + 4,
+                     extended_filters[i][1]);
+    }
+
+    mcan_begin_loopback_configuration(qts, base);
+    qtest_writel(qts, base + MCAN_SIDFC,
+                 sid_offset | MCAN_SIDFC_SIZE(ARRAY_SIZE(standard_filters)));
+    qtest_writel(qts, base + MCAN_XIDFC,
+                 xid_offset | MCAN_XIDFC_SIZE(ARRAY_SIZE(extended_filters)));
+    qtest_writel(qts, base + MCAN_XIDAM, 0xfff);
+    qtest_writel(qts, base + MCAN_GFC,
+                 BIT(1) | (2U << 2) | (1U << 4));
+    qtest_writel(qts, base + MCAN_RXESC, 0);
+    qtest_writel(qts, base + MCAN_RXF0C,
+                 rxf0_offset | MCAN_RXF0C_SIZE(8));
+    qtest_writel(qts, base + MCAN_RXF1C,
+                 rxf1_offset | MCAN_RXF1C_SIZE(8));
+    qtest_writel(qts, base + MCAN_TXESC, 0);
+    qtest_writel(qts, base + MCAN_TXBC,
+                 tx_offset | MCAN_TXBC_FIFO_SIZE(1));
+    mcan_end_loopback_configuration(qts, base);
+
+    mcan_loopback_frame(qts, base, tx_offset, 0x105, false, false,
+                        0x11111111);
+    mcan_loopback_frame(qts, base, tx_offset, 0x201, false, false,
+                        0x22222222);
+    mcan_loopback_frame(qts, base, tx_offset, 0x305, false, false,
+                        0x33333333);
+    /* SFT=3 disables element 4, so this follows GFC.ANFS to FIFO 1. */
+    mcan_loopback_frame(qts, base, tx_offset, 0x555, false, false,
+                        0x44444444);
+    /* RRFS rejects the matching remote frame before the filter list. */
+    mcan_loopback_frame(qts, base, tx_offset, 0x105, false, true, 0);
+    mcan_loopback_frame(qts, base, tx_offset, 0x405, false, false,
+                        0x55555555);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_HPMS), ==, 0x00000381);
+    g_assert_true(qtest_readl(qts, base + MCAN_IR) & MCAN_IR_HPM);
+    qtest_writel(qts, base + MCAN_IR, MCAN_IR_HPM);
+
+    /* XIDAM maps this identifier into the range of extended filter 0. */
+    mcan_loopback_frame(qts, base, tx_offset, 0x12340105, true, false,
+                        0x66666666);
+    mcan_loopback_frame(qts, base, tx_offset, 0x222, true, false,
+                        0x77777777);
+    mcan_loopback_frame(qts, base, tx_offset, 0x456, true, false,
+                        0x88888888);
+    /* EFT=3 bypasses XIDAM for this range. */
+    mcan_loopback_frame(qts, base, tx_offset, 0x1abc005, true, false,
+                        0x99999999);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_HPMS), ==, 0x000083c3);
+    qtest_writel(qts, base + MCAN_IR, MCAN_IR_HPM);
+    mcan_loopback_frame(qts, base, tx_offset, 0x777, true, false,
+                        0xaaaaaaaa);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_HPMS), ==, 0x00008400);
+    mcan_loopback_frame(qts, base, tx_offset, 0x888, true, false,
+                        0xbbbbbbbb);
+
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF0S) & 0x003f3f7f,
+                    ==, MCAN_RXFS_STATUS(3, 0, 3));
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF1S) & 0x003f3f7f,
+                    ==, MCAN_RXFS_STATUS(4, 0, 4));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + rxf0_offset + 4),
+                    ==, MCAN_ELEMENT_DLC(4));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + rxf0_offset +
+                                16 + 4),
+                    ==, (3U << 24) | MCAN_ELEMENT_DLC(4));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + rxf1_offset + 4),
+                    ==, (1U << 24) | MCAN_ELEMENT_DLC(4));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + rxf1_offset +
+                                16 + 4),
+                    ==, BIT(31) | MCAN_ELEMENT_DLC(4));
+
+    /* Exercise both accepting GFC actions, then both reject encodings. */
+    mcan_set_gfc(qts, base, 1U << 2);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_HPMS), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF0S) & 0x003f3f7f,
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF1S) & 0x003f3f7f,
+                    ==, 0);
+    mcan_loopback_frame(qts, base, tx_offset, 0x600, false, false,
+                        0xcccccccc);
+    mcan_loopback_frame(qts, base, tx_offset, 0x888, true, false,
+                        0xdddddddd);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF0S) & 0x7f, ==, 1);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF1S) & 0x7f, ==, 1);
+    g_assert_true(qtest_readl(qts, SAM9X7_SRAM0_BASE + rxf0_offset + 4) &
+                  BIT(31));
+    g_assert_true(qtest_readl(qts, SAM9X7_SRAM0_BASE + rxf1_offset + 4) &
+                  BIT(31));
+
+    mcan_set_gfc(qts, base, (3U << 2) | (2U << 4));
+    mcan_loopback_frame(qts, base, tx_offset, 0x601, false, false,
+                        0xeeeeeeee);
+    mcan_loopback_frame(qts, base, tx_offset, 0x889, true, false,
+                        0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF0S) & 0x7f, ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF1S) & 0x7f, ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_mcan_dedicated_rx_buffers(void)
+{
+    const uint64_t base = SAM9X7_MCAN0_BASE;
+    const uint32_t sid_offset = 0x2000;
+    const uint32_t xid_offset = 0x2100;
+    const uint32_t rxf1_offset = 0x3200;
+    const uint32_t rxb_offset = 0x3400;
+    const uint32_t tx_offset = 0x4000;
+    const uint32_t element_size = 20;
+    static const uint32_t standard_filters[] = {
+        MCAN_STD_FILTER(0, MCAN_FILTER_RX_BUFFER, 0x123, 37),
+        MCAN_STD_FILTER(0, MCAN_FILTER_RX_BUFFER, 0x123, 5),
+        MCAN_STD_FILTER(1, MCAN_FILTER_FIFO1, 0x123, 0x123),
+    };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int i;
+
+    mcan_enable_clocks(qts, 29);
+    for (i = 0; i < ARRAY_SIZE(standard_filters); i++) {
+        qtest_writel(qts, SAM9X7_SRAM0_BASE + sid_offset + i * 4,
+                     standard_filters[i]);
+    }
+    qtest_writel(qts, SAM9X7_SRAM0_BASE + xid_offset,
+                 MCAN_EXT_FILTER0(MCAN_FILTER_RX_BUFFER, 0x12345));
+    qtest_writel(qts, SAM9X7_SRAM0_BASE + xid_offset + 4,
+                 MCAN_EXT_FILTER1(0, 63));
+
+    mcan_begin_loopback_configuration(qts, base);
+    qtest_writel(qts, base + MCAN_SIDFC,
+                 sid_offset | MCAN_SIDFC_SIZE(ARRAY_SIZE(standard_filters)));
+    qtest_writel(qts, base + MCAN_XIDFC,
+                 xid_offset | MCAN_XIDFC_SIZE(1));
+    qtest_writel(qts, base + MCAN_XIDAM, 0x1fffffff);
+    qtest_writel(qts, base + MCAN_GFC, (2U << 2) | (2U << 4));
+    qtest_writel(qts, base + MCAN_RXESC, 1U << 8);
+    qtest_writel(qts, base + MCAN_RXBC, rxb_offset);
+    qtest_writel(qts, base + MCAN_RXF1C,
+                 rxf1_offset | MCAN_RXF1C_SIZE(4));
+    qtest_writel(qts, base + MCAN_TXESC, 0);
+    qtest_writel(qts, base + MCAN_TXBC,
+                 tx_offset | MCAN_TXBC_FIFO_SIZE(1));
+    mcan_end_loopback_configuration(qts, base);
+
+    mcan_loopback_frame(qts, base, tx_offset, 0x123, false, false,
+                        0x11112222);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_NDAT2), ==, BIT(5));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + rxb_offset +
+                                37 * element_size + 8),
+                    ==, 0x11112222);
+    g_assert_true(qtest_readl(qts, base + MCAN_IR) & MCAN_IR_DRX);
+
+    /* A set NDAT locks that buffer, so filtering continues at element 1. */
+    mcan_loopback_frame(qts, base, tx_offset, 0x123, false, false,
+                        0x33334444);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_NDAT1), ==, BIT(5));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + rxb_offset +
+                                5 * element_size + 8),
+                    ==, 0x33334444);
+
+    /* With both buffers locked, the following filter routes to FIFO 1. */
+    mcan_loopback_frame(qts, base, tx_offset, 0x123, false, false,
+                        0x55556666);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF1S) & 0x7f, ==, 1);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + rxf1_offset + 4),
+                    ==, (2U << 24) | MCAN_ELEMENT_DLC(4));
+
+    qtest_writel(qts, base + MCAN_NDAT2, BIT(5));
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_NDAT2), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_NDAT1), ==, BIT(5));
+    mcan_loopback_frame(qts, base, tx_offset, 0x123, false, false,
+                        0x77778888);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_NDAT2), ==, BIT(5));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + rxb_offset +
+                                37 * element_size + 8),
+                    ==, 0x77778888);
+
+    qtest_writel(qts, base + MCAN_NDAT1, BIT(5));
+    qtest_writel(qts, base + MCAN_NDAT2, BIT(5));
+    mcan_loopback_frame(qts, base, tx_offset, 0x12345, true, false,
+                        0x9999aaaa);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_NDAT2), ==, BIT(31));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + rxb_offset +
+                                63 * element_size),
+                    ==, MCAN_ELEMENT_XTD | 0x12345);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + rxb_offset +
+                                63 * element_size + 8),
+                    ==, 0x9999aaaa);
+    qtest_writel(qts, base + MCAN_NDAT2, 0);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_NDAT2), ==, BIT(31));
+    qtest_writel(qts, base + MCAN_NDAT2, BIT(31));
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_NDAT2), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_mcan_rx_fifo_overflow_and_watermarks(void)
+{
+    const uint64_t base = SAM9X7_MCAN0_BASE;
+    const uint32_t rxf0_offset = 0x3000;
+    const uint32_t rxf1_offset = 0x3100;
+    const uint32_t tx_offset = 0x4000;
+    const uint32_t rxf0_ir = MCAN_IR_RF0N | MCAN_IR_RF0W |
+                             MCAN_IR_RF0F | MCAN_IR_RF0L;
+    const uint32_t rxf1_ir = MCAN_IR_RF1N | MCAN_IR_RF1W |
+                             MCAN_IR_RF1F | MCAN_IR_RF1L;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    mcan_enable_clocks(qts, 29);
+    mcan_begin_loopback_configuration(qts, base);
+    qtest_writel(qts, base + MCAN_GFC, 1U << 2);
+    qtest_writel(qts, base + MCAN_RXESC, 0);
+    qtest_writel(qts, base + MCAN_RXF0C,
+                 rxf0_offset | MCAN_RXF0C_SIZE(2) |
+                 MCAN_RXFC_WATERMARK(1));
+    qtest_writel(qts, base + MCAN_RXF1C,
+                 rxf1_offset | MCAN_RXF1C_SIZE(2) |
+                 MCAN_RXFC_WATERMARK(2) | MCAN_RXFC_OVERWRITE);
+    qtest_writel(qts, base + MCAN_TXESC, 0);
+    qtest_writel(qts, base + MCAN_TXBC,
+                 tx_offset | MCAN_TXBC_FIFO_SIZE(1));
+    mcan_end_loopback_configuration(qts, base);
+
+    mcan_loopback_frame(qts, base, tx_offset, 0x101, false, false,
+                        0x11111111);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF0S), ==,
+                    MCAN_RXFS_STATUS(1, 0, 1));
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) & rxf0_ir, ==,
+                    MCAN_IR_RF0N | MCAN_IR_RF0W);
+    qtest_writel(qts, base + MCAN_IR, rxf0_ir);
+
+    mcan_loopback_frame(qts, base, tx_offset, 0x102, false, false,
+                        0x22222222);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF0S), ==,
+                    MCAN_RXFS_STATUS(2, 0, 0) | BIT(24));
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) & rxf0_ir, ==,
+                    MCAN_IR_RF0N | MCAN_IR_RF0F);
+    qtest_writel(qts, base + MCAN_IR, rxf0_ir);
+
+    mcan_loopback_frame(qts, base, tx_offset, 0x103, false, false,
+                        0x33333333);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF0S), ==,
+                    MCAN_RXFS_STATUS(2, 0, 0) | BIT(24) | BIT(25));
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) & rxf0_ir, ==,
+                    MCAN_IR_RF0L);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + rxf0_offset + 8),
+                    ==, 0x11111111);
+    qtest_writel(qts, base + MCAN_IR, MCAN_IR_RF0L);
+    qtest_writel(qts, base + MCAN_RXF0A, 0);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF0S), ==,
+                    MCAN_RXFS_STATUS(1, 1, 0));
+
+    mcan_loopback_frame(qts, base, tx_offset, 0x201, true, false,
+                        0x44444444);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) & rxf1_ir, ==,
+                    MCAN_IR_RF1N);
+    qtest_writel(qts, base + MCAN_IR, rxf1_ir);
+    mcan_loopback_frame(qts, base, tx_offset, 0x202, true, false,
+                        0x55555555);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF1S), ==,
+                    MCAN_RXFS_STATUS(2, 0, 0) | BIT(24));
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) & rxf1_ir, ==,
+                    MCAN_IR_RF1N | MCAN_IR_RF1W | MCAN_IR_RF1F);
+    qtest_writel(qts, base + MCAN_IR, rxf1_ir);
+
+    mcan_loopback_frame(qts, base, tx_offset, 0x203, true, false,
+                        0x66666666);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF1S), ==,
+                    MCAN_RXFS_STATUS(2, 1, 1) | BIT(24));
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) & rxf1_ir, ==,
+                    MCAN_IR_RF1N);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + rxf1_offset), ==,
+                    MCAN_ELEMENT_XTD | 0x203);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + rxf1_offset +
+                                16),
+                    ==, MCAN_ELEMENT_XTD | 0x202);
+    qtest_writel(qts, base + MCAN_RXF1A, 1);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF1S), ==,
+                    MCAN_RXFS_STATUS(1, 0, 1));
+
+    qtest_quit(qts);
+}
+
+static void test_mcan_rx_mram_bounds(void)
+{
+    const uint64_t base = SAM9X7_MCAN0_BASE;
+    const uint32_t sid_offset = 0x2000;
+    const uint32_t tx_offset = 0x4000;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    mcan_enable_clocks(qts, 29);
+    qtest_writel(qts, SAM9X7_SRAM0_BASE + sid_offset,
+                 MCAN_STD_FILTER(1, MCAN_FILTER_FIFO0, 0x123, 0x123));
+    qtest_writel(qts, SAM9X7_SRAM0_BASE + 0xfffc, 0xa5a5a5a5);
+    mcan_begin_loopback_configuration(qts, base);
+    qtest_writel(qts, base + MCAN_SIDFC,
+                 sid_offset | MCAN_SIDFC_SIZE(1));
+    qtest_writel(qts, base + MCAN_RXF0C,
+                 0xfffc | MCAN_RXF0C_SIZE(1));
+    qtest_writel(qts, base + MCAN_TXESC, 0);
+    qtest_writel(qts, base + MCAN_TXBC,
+                 tx_offset | MCAN_TXBC_FIFO_SIZE(1));
+    mcan_end_loopback_configuration(qts, base);
+    mcan_loopback_frame(qts, base, tx_offset, 0x123, false, false,
+                        0x11112222);
+    g_assert_true(qtest_readl(qts, base + MCAN_IR) & MCAN_IR_MRAF);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_RXF0S), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + 0xfffc), ==,
+                    0xa5a5a5a5);
+    qtest_writel(qts, base + MCAN_IR, MCAN_IR_MRAF);
+
+    /* An extended element needs eight bytes, so 0xfffc is out of range. */
+    mcan_begin_loopback_configuration(qts, base);
+    qtest_writel(qts, base + MCAN_SIDFC, 0);
+    qtest_writel(qts, base + MCAN_XIDFC,
+                 0xfffc | MCAN_XIDFC_SIZE(1));
+    mcan_end_loopback_configuration(qts, base);
+    mcan_loopback_frame(qts, base, tx_offset, 0x123, true, false,
+                        0x33334444);
+    g_assert_true(qtest_readl(qts, base + MCAN_IR) & MCAN_IR_MRAF);
+    qtest_writel(qts, base + MCAN_IR, MCAN_IR_MRAF);
+
+    /* A failed dedicated-buffer write must not set its NDAT flag. */
+    qtest_writel(qts, SAM9X7_SRAM0_BASE + sid_offset,
+                 MCAN_STD_FILTER(0, MCAN_FILTER_RX_BUFFER, 0x456, 0));
+    mcan_begin_loopback_configuration(qts, base);
+    qtest_writel(qts, base + MCAN_SIDFC,
+                 sid_offset | MCAN_SIDFC_SIZE(1));
+    qtest_writel(qts, base + MCAN_XIDFC, 0);
+    qtest_writel(qts, base + MCAN_RXBC, 0xfffc);
+    mcan_end_loopback_configuration(qts, base);
+    mcan_loopback_frame(qts, base, tx_offset, 0x456, false, false,
+                        0x55556666);
+    g_assert_true(qtest_readl(qts, base + MCAN_IR) & MCAN_IR_MRAF);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_NDAT1), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_mcan_wrapped_rx_migration(void)
+{
+    const uint64_t base = SAM9X7_MCAN0_BASE;
+    const uint32_t rxf0_offset = 0x3000;
+    const uint32_t rxf1_offset = 0x3100;
+    const uint32_t tx_offset = 0x4000;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+
+    mcan_enable_clocks(from, 29);
+    mcan_begin_loopback_configuration(from, base);
+    qtest_writel(from, base + MCAN_GFC, 1U << 2);
+    qtest_writel(from, base + MCAN_RXESC, 0);
+    qtest_writel(from, base + MCAN_RXF0C,
+                 rxf0_offset | MCAN_RXF0C_SIZE(3));
+    qtest_writel(from, base + MCAN_RXF1C,
+                 rxf1_offset | MCAN_RXF1C_SIZE(2) |
+                 MCAN_RXFC_OVERWRITE);
+    qtest_writel(from, base + MCAN_TXESC, 0);
+    qtest_writel(from, base + MCAN_TXBC,
+                 tx_offset | MCAN_TXBC_FIFO_SIZE(1));
+    mcan_end_loopback_configuration(from, base);
+
+    mcan_loopback_frame(from, base, tx_offset, 0x101, false, false,
+                        0x11111111);
+    mcan_loopback_frame(from, base, tx_offset, 0x102, false, false,
+                        0x22222222);
+    mcan_loopback_frame(from, base, tx_offset, 0x103, false, false,
+                        0x33333333);
+    qtest_writel(from, base + MCAN_RXF0A, 0);
+    mcan_loopback_frame(from, base, tx_offset, 0x104, false, false,
+                        0x44444444);
+    mcan_loopback_frame(from, base, tx_offset, 0x201, true, false,
+                        0x55555555);
+    mcan_loopback_frame(from, base, tx_offset, 0x202, true, false,
+                        0x66666666);
+    mcan_loopback_frame(from, base, tx_offset, 0x203, true, false,
+                        0x77777777);
+
+    g_assert_cmphex(qtest_readl(from, base + MCAN_RXF0S), ==,
+                    MCAN_RXFS_STATUS(3, 1, 1) | BIT(24));
+    g_assert_cmphex(qtest_readl(from, base + MCAN_RXF1S), ==,
+                    MCAN_RXFS_STATUS(2, 1, 1) | BIT(24));
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_cmphex(qtest_readl(to, base + MCAN_RXF0S), ==,
+                    MCAN_RXFS_STATUS(3, 1, 1) | BIT(24));
+    g_assert_cmphex(qtest_readl(to, base + MCAN_RXF1S), ==,
+                    MCAN_RXFS_STATUS(2, 1, 1) | BIT(24));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SRAM0_BASE + rxf0_offset + 8),
+                    ==, 0x44444444);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SRAM0_BASE + rxf0_offset +
+                                16 + 8),
+                    ==, 0x22222222);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SRAM0_BASE + rxf0_offset +
+                                2 * 16 + 8),
+                    ==, 0x33333333);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SRAM0_BASE + rxf1_offset + 8),
+                    ==, 0x77777777);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SRAM0_BASE + rxf1_offset +
+                                16 + 8),
+                    ==, 0x66666666);
+
+    qtest_writel(to, base + MCAN_RXF0A, 2);
+    g_assert_cmphex(qtest_readl(to, base + MCAN_RXF0S), ==,
+                    MCAN_RXFS_STATUS(1, 0, 1));
+    qtest_writel(to, base + MCAN_RXF0A, 0);
+    g_assert_cmphex(qtest_readl(to, base + MCAN_RXF0S), ==,
+                    MCAN_RXFS_STATUS(0, 1, 1));
+    qtest_writel(to, base + MCAN_RXF1A, 1);
+    g_assert_cmphex(qtest_readl(to, base + MCAN_RXF1S), ==,
+                    MCAN_RXFS_STATUS(1, 0, 1));
+    qtest_writel(to, base + MCAN_RXF1A, 0);
+    g_assert_cmphex(qtest_readl(to, base + MCAN_RXF1S), ==,
+                    MCAN_RXFS_STATUS(0, 1, 1));
+
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
 static void test_mcan_mram_error_and_migration(void)
@@ -14481,10 +15316,16 @@ int main(int argc, char **argv)
                    test_uhphs_hotplug_shared_irq);
     qtest_add_func("sam9x75/uhphs/power-connection-lifecycle",
                    test_uhphs_power_connection_lifecycle);
+    qtest_add_func("sam9x75/uhphs/pmc-clock-gating",
+                   test_uhphs_pmc_clock_gating);
     qtest_add_func("sam9x75/uhphs/ehci-frame-list-size",
                    test_uhphs_ehci_frame_list_size);
     qtest_add_func("sam9x75/uhphs/ehci-dma-error",
                    test_uhphs_ehci_dma_error);
+    qtest_add_func("sam9x75/uhphs/gated-async-migration",
+                   test_uhphs_gated_async_migration);
+    qtest_add_func("sam9x75/uhphs/frame-phase-migration",
+                   test_uhphs_frame_phase_migration);
     qtest_add_func("sam9x75/uhphs/ohci-active-async-migration",
                    test_uhphs_ohci_active_async_migration);
     qtest_add_func("sam9x75/uhphs/migration", test_uhphs_migration);
@@ -14496,6 +15337,16 @@ int main(int argc, char **argv)
                    test_mcan_linux_v33_tx_event_fifo);
     qtest_add_func("sam9x75/mcan/external-can-fd",
                    test_mcan_external_can_fd);
+    qtest_add_func("sam9x75/mcan/acceptance-filters-and-gfc",
+                   test_mcan_acceptance_filters_and_gfc);
+    qtest_add_func("sam9x75/mcan/dedicated-rx-buffers",
+                   test_mcan_dedicated_rx_buffers);
+    qtest_add_func("sam9x75/mcan/rx-fifo-overflow-and-watermarks",
+                   test_mcan_rx_fifo_overflow_and_watermarks);
+    qtest_add_func("sam9x75/mcan/rx-mram-bounds",
+                   test_mcan_rx_mram_bounds);
+    qtest_add_func("sam9x75/mcan/wrapped-rx-migration",
+                   test_mcan_wrapped_rx_migration);
     qtest_add_func("sam9x75/mcan/mram-error-and-migration",
                    test_mcan_mram_error_and_migration);
     qtest_add_func("sam9x75/mpddrc/registers-errors-and-irq",

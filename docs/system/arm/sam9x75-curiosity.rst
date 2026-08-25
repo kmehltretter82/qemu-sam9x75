@@ -361,9 +361,14 @@ Support matrix
        destination reconstruction path is exercised with a real asynchronous
        ``usb-storage`` WRITE held at a retryable block error across live
        migration, then resumed through a successful mass-storage status
-       packet.  Physical-board host-controller reset, power and DMA behavior
-       has not yet been compared.  UDPHS, gadget mode and the SAM-BA device
-       path remain missing.
+       packet.  The host schedules observe the SAM9X7 clock tree: PID 22 gates
+       both controllers, UPLLCK gates the EHCI UTMI path, and the
+       ``PMC_USB`` PLLA/UPLL selection and divider plus ``PMC_SCER.UHP`` gate
+       the OHCI 48/12 MHz path.  Disabling a required clock freezes rather
+       than advances a schedule, re-enabling resumes without catch-up, and
+       clock state migrates.  Physical-board host-controller clock, reset,
+       power and DMA behavior has not yet been compared.  UDPHS, gadget mode
+       and the SAM-BA device path remain missing.
    * - I2C board devices
      - Initial
      - The exact MCP16502TAB-E/S8B PMIC is present on FLEXCOM6 with OTP
@@ -419,20 +424,25 @@ Support matrix
      - Both Bosch M_CAN instances are mapped with their peripheral and generic
        clocks, AIC sources 29/30 and 68/69, shared SRAM0 message RAM and
        independent QEMU CAN-bus links.  Classic CAN and CAN FD/BRS transmit,
-       receive FIFO 0, transmit events, internal loopback, interrupt routing,
+       standard and extended range/dual/classic acceptance filters, XIDAM,
+       global nonmatching/reject policy, high-priority status, receive FIFOs 0
+       and 1, dedicated receive buffers with NDAT locking, FIFO blocking and
+       overwrite modes, watermarks, acknowledgements, transmit events,
+       internal loopback, interrupt routing, Message-RAM fault atomicity,
        clock gating, reset and migration have qtests, including traffic
-       between the two controllers.  Acceptance filters, FIFO 1, dedicated
-       receive buffers, bus-error confinement/retry, bit-level arbitration and
-       precise timestamp-unit behavior remain incomplete.  A Linux
+       between the two controllers.  Bus-error confinement/retry, bit-level
+       arbitration, debug-message handling, timestamp synchronization pins
+       and precise timestamp-unit behavior remain incomplete.  A Linux
        7.2.0-rc7-next-20260814 guest with a DT overlay probes ``can0`` and
        ``can1`` and passes bidirectional
        CAN FD/BRS traffic (including a 64-byte frame) plus classic CAN traffic
        at 500 kbit/s nominal and 2 Mbit/s data rates.  The upstream Curiosity
        board DTS leaves both CAN nodes disabled, so normal use still needs an
-       overlay or alternate DT.  Reset constants, physical interrupt behavior
-       and external-bus operation remain for board validation; that work needs
-       the appropriate header pinmux and a CAN transceiver rather than a direct
-       connection to the SoC pins.
+       overlay or alternate DT.  Reset constants, the CCE reset/loss-status
+       interaction, physical interrupt behavior and external-bus operation
+       remain for board validation; that work needs the appropriate header
+       pinmux and a CAN transceiver rather than a direct connection to the SoC
+       pins.
    * - Crypto, TRNG, OTP and PUF
      - Initial
      - AES has 128/192/256-bit keys; ECB, CBC, OFB, CFB8/16/32/64/128, CTR,
@@ -605,10 +615,10 @@ phase green merely by avoiding it in the device tree.
 #. **Complete major external interfaces.**  Prove the initial OHCI/EHCI model
    with unmodified Linux host storage and input, then compare reset, port-power,
    hotplug, DMA-error and interrupt behavior with the board.  Implement UDPHS
-   and prove gadget/SAM-BA operation.  Extend the initial M_CAN model with
-   acceptance filters, FIFO 1, dedicated receive buffers, error confinement,
-   retry and timestamp behavior; keep the Linux CAN-FD/QEMU-backend regression
-   passing and compare it against the physical controllers.
+   and prove gadget/SAM-BA operation.  Extend M_CAN with error confinement,
+   retry, timestamp synchronization and debug-message behavior; keep the Linux
+   CAN-FD/QEMU-backend regression passing and compare it against the physical
+   controllers.
 #. **Complete high-bandwidth and security blocks.**  Add XLCDC, GFX2D, ISC,
    CSI2DC, MIPI CSI/DSI PHY and LVDS endpoints, complete the initial OTPC
    model, and add PUF.  Close documented crypto, TRNG, audio and GEM/PTP/TSN
