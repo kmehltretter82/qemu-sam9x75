@@ -576,9 +576,12 @@
 
 #define US_CR_RXEN              BIT(4)
 #define US_CR_TXEN              BIT(6)
+#define US_CR_TXDIS             BIT(7)
 #define US_CR_RSTSTA            BIT(8)
 #define US_CR_STTTO             BIT(11)
 #define US_CR_RETTO             BIT(15)
+#define US_CR_RTSEN             BIT(18)
+#define US_CR_RTSDIS            BIT(19)
 #define US_CR_TXFCLR            BIT(24)
 #define US_CR_RXFCLR            BIT(25)
 #define US_CR_TXFLCLR           BIT(26)
@@ -587,6 +590,9 @@
 #define US_MR_CHRL_8            (3U << 6)
 #define US_MR_PAR_NONE          (4U << 9)
 #define US_MR_LOCAL_LOOPBACK    (2U << 14)
+#define US_MR_USART_MODE_RS485  1
+#define US_MR_NORMAL            (US_MR_CHRL_8 | US_MR_PAR_NONE)
+#define US_MR_RS485             (US_MR_NORMAL | US_MR_USART_MODE_RS485)
 #define US_MR_NORMAL_LOCAL      (US_MR_CHRL_8 | US_MR_PAR_NONE | \
                                  US_MR_LOCAL_LOOPBACK)
 #define US_INT_RXRDY            BIT(0)
@@ -3512,6 +3518,144 @@ static void test_flexcom_usart_registers_irq_and_protection(void)
     g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(8));
 
     qtest_quit(qts);
+}
+
+static void test_flexcom_usart_rs485_rts(void)
+{
+    const uint64_t base = SAM9X7_USART3_BASE;
+    const unsigned int timeguard = 4;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint64_t character_ns;
+    uint64_t frame_ns;
+    uint32_t status;
+
+    qtest_irq_intercept_out_named(qts, "/machine/soc/usart[3]", "rts");
+    pmc_write_pcr(qts, 8, PMC_PCR_EN);
+    qtest_writel(qts, base + US_BRGR, 217);
+
+    /* Software RTS commands are effective in normal mode. */
+    qtest_writel(qts, base + US_CR, US_CR_RTSEN);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    /* In RS485 mode disabled TX means TXEMPTY=0 and therefore RTS=1. */
+    qtest_writel(qts, base + US_MR, US_MR_RS485);
+    g_assert_false(qtest_readl(qts, base + US_CSR) & US_INT_TXEMPTY);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    /* RTS commands have no effect, including on latent normal-mode state. */
+    qtest_writel(qts, base + US_CR, US_CR_RTSDIS);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_writel(qts, base + US_MR, US_MR_NORMAL);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_writel(qts, base + US_MR, US_MR_RS485);
+    qtest_writel(qts, base + US_TTGR, timeguard);
+    qtest_writel(qts, base + US_CR, US_CR_TXEN);
+    status = qtest_readl(qts, base + US_CSR);
+    g_assert_cmphex(status & (US_INT_TXRDY | US_INT_TXEMPTY), ==,
+                    US_INT_TXRDY | US_INT_TXEMPTY);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    frame_ns = usart_cycles_to_ns(qts, 8, 16 * 217 * 10);
+    character_ns = usart_cycles_to_ns(qts, 8,
+                                      16 * 217 * (10 + timeguard));
+    g_assert_cmpuint(frame_ns, >, 1);
+    g_assert_cmpuint(character_ns, >, frame_ns + 1);
+
+    /* Keep a second byte in THR while the first frame and guard run. */
+    qtest_writeb(qts, base + US_THR, 0x5a);
+    qtest_writeb(qts, base + US_THR, 0xa5);
+    status = qtest_readl(qts, base + US_CSR);
+    g_assert_false(status & (US_INT_TXRDY | US_INT_TXEMPTY));
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    qtest_writel(qts, base + US_CR, US_CR_RTSEN);
+    qtest_writel(qts, base + US_CR, US_CR_RTSDIS);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    qtest_clock_step(qts, frame_ns);
+    g_assert_false(qtest_readl(qts, base + US_CSR) & US_INT_TXEMPTY);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, character_ns - frame_ns - 1);
+    g_assert_false(qtest_readl(qts, base + US_CSR) & US_INT_TXEMPTY);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    /* Starting the queued byte must not pulse RTS low. */
+    qtest_clock_step(qts, 1);
+    status = qtest_readl(qts, base + US_CSR);
+    g_assert_true(status & US_INT_TXRDY);
+    g_assert_false(status & US_INT_TXEMPTY);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    qtest_clock_step(qts, character_ns - 1);
+    g_assert_false(qtest_readl(qts, base + US_CSR) & US_INT_TXEMPTY);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, 1);
+    status = qtest_readl(qts, base + US_CSR);
+    g_assert_true(status & US_INT_TXEMPTY);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_writel(qts, base + US_CR, US_CR_TXDIS);
+    g_assert_false(qtest_readl(qts, base + US_CSR) & US_INT_TXEMPTY);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_writel(qts, base + US_CR, US_CR_TXEN);
+    g_assert_true(qtest_readl(qts, base + US_CSR) & US_INT_TXEMPTY);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_quit(qts);
+}
+
+static void test_flexcom_usart_rs485_migration(void)
+{
+    const uint64_t base = SAM9X7_USART3_BASE;
+    const unsigned int timeguard = 4;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    uint64_t character_ns;
+    uint64_t elapsed_ns;
+    uint64_t pre_tx_ns;
+    int64_t from_clock;
+
+    qtest_irq_intercept_out_named(from, "/machine/soc/usart[3]", "rts");
+    qtest_irq_intercept_out_named(to, "/machine/soc/usart[3]", "rts");
+    pmc_write_pcr(from, 8, PMC_PCR_EN);
+    qtest_writel(from, base + US_MR, US_MR_RS485);
+    qtest_writel(from, base + US_BRGR, 217);
+    qtest_writel(from, base + US_TTGR, timeguard);
+    qtest_writel(from, base + US_CR, US_CR_TXEN);
+
+    character_ns = usart_cycles_to_ns(from, 8,
+                                      16 * 217 * (10 + timeguard));
+    elapsed_ns = usart_cycles_to_ns(from, 8, 16 * 217 * 12);
+    pre_tx_ns = usart_cycles_to_ns(from, 8, 16 * 217 * 3);
+    g_assert_cmpuint(character_ns, >, elapsed_ns + 1);
+    qtest_clock_step(from, pre_tx_ns);
+    qtest_writeb(from, base + US_THR, 0x96);
+    from_clock = qtest_clock_step(from, elapsed_ns);
+    g_assert_false(qtest_readl(from, base + US_CSR) & US_INT_TXEMPTY);
+    g_assert_true(qtest_get_irq(from, 0));
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_cmphex(qtest_readl(to, base + US_MR), ==, US_MR_RS485);
+    g_assert_cmphex(qtest_readl(to, base + US_TTGR), ==, timeguard);
+    g_assert_false(qtest_readl(to, base + US_CSR) & US_INT_TXEMPTY);
+    g_assert_true(qtest_get_irq(to, 0));
+
+    /* qtest virtual clocks are independent; align the destination clock. */
+    g_assert_cmpint(qtest_clock_set(to, from_clock), ==, from_clock);
+    qtest_clock_step(to, character_ns - elapsed_ns - 1);
+    g_assert_false(qtest_readl(to, base + US_CSR) & US_INT_TXEMPTY);
+    g_assert_true(qtest_get_irq(to, 0));
+    qtest_clock_step(to, 1);
+    g_assert_true(qtest_readl(to, base + US_CSR) & US_INT_TXEMPTY);
+    g_assert_false(qtest_get_irq(to, 0));
+
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
 static void test_flexcom_usart_fifo_loopback_and_timeout(void)
@@ -19303,6 +19447,10 @@ int main(int argc, char **argv)
                    test_board_ethernet_clock_jumper);
     qtest_add_func("sam9x75/flexcom-usart/registers-irq-and-protection",
                    test_flexcom_usart_registers_irq_and_protection);
+    qtest_add_func("sam9x75/flexcom-usart/rs485-rts",
+                   test_flexcom_usart_rs485_rts);
+    qtest_add_func("sam9x75/flexcom-usart/rs485-migration",
+                   test_flexcom_usart_rs485_migration);
     qtest_add_func("sam9x75/flexcom-usart/fifo-loopback-and-timeout",
                    test_flexcom_usart_fifo_loopback_and_timeout);
     qtest_add_func("sam9x75/flexcom-usart/chardev",

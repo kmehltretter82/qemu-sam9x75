@@ -93,6 +93,8 @@ enum {
 #define US_MR_MODE_MASK         0xf7ffffff
 #define US_MR_RESET             0xc0000000
 #define US_MR_USART_MODE_MASK   0xf
+#define US_MR_USART_MODE_NORMAL 0
+#define US_MR_USART_MODE_RS485  1
 #define US_MR_USART_MODE_HWHS   2
 #define US_MR_USART_MODE_LON    9
 #define US_MR_USART_MODE_LIN_H  10
@@ -386,8 +388,18 @@ static void at91_usart_update(AT91USARTState *s)
                   (s->fifo_enabled &&
                    (s->fifo_event_status & s->fifo_interrupt_mask))));
 
-    rts_level = (s->mode & US_MR_USART_MODE_MASK) ==
-                US_MR_USART_MODE_HWHS ? s->rts_enabled : !s->rts_enabled;
+    switch (s->mode & US_MR_USART_MODE_MASK) {
+    case US_MR_USART_MODE_RS485:
+        /* In RS485 mode RTS is active while the transmitter is not empty. */
+        rts_level = !(s->status & US_INT_TXEMPTY);
+        break;
+    case US_MR_USART_MODE_HWHS:
+        rts_level = s->rts_enabled;
+        break;
+    default:
+        rts_level = !s->rts_enabled;
+        break;
+    }
     qemu_set_irq(s->rts, s->flexcom_enabled && rts_level);
 }
 
@@ -870,11 +882,14 @@ static void at91_usart_write_control(AT91USARTState *s, uint32_t value)
         qemu_chr_fe_ioctl(&s->chr, CHR_IOCTL_SERIAL_SET_BREAK,
                           &break_enable);
     }
-    if (value & US_CR_RTSEN) {
-        s->rts_enabled = true;
-    }
-    if (value & US_CR_RTSDIS) {
-        s->rts_enabled = false;
+    if (usart_mode == US_MR_USART_MODE_NORMAL ||
+        usart_mode == US_MR_USART_MODE_HWHS) {
+        if (value & US_CR_RTSEN) {
+            s->rts_enabled = true;
+        }
+        if (value & US_CR_RTSDIS) {
+            s->rts_enabled = false;
+        }
     }
     if (value & US_CR_REQCLR) {
         s->comparison_started = false;
