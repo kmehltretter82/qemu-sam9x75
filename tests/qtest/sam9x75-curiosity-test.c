@@ -1238,6 +1238,12 @@
 #define PMECC_IER               0x1c
 #define PMECC_IMR               0x24
 #define PMECC_ECC0              0x40
+#define PMECC_BANK_COUNT        8
+#define PMECC_BANK_STRIDE       0x40
+#define PMECC_ECC_FIRST         0x40
+#define PMECC_ECC_REG_COUNT     11
+#define PMECC_REM_FIRST         0x240
+#define PMECC_REM_REG_COUNT     12
 #define PMECC_CTRL_ENABLE       BIT(4)
 #define PMECC_CTRL_DISABLE      BIT(5)
 #define PMECC_SR_ENABLE         BIT(4)
@@ -11215,6 +11221,65 @@ static void test_smc_and_pmecc_registers(void)
     qtest_quit(qts);
 }
 
+static void test_pmecc_banked_windows(void)
+{
+    static const unsigned int bad_offsets[] = {
+        0x6c, 0x22c, 0x270, 0x430, 0x5fc,
+    };
+    g_autofree char *log_path = NULL;
+    g_autofree char *log = NULL;
+    QTestState *qts;
+    GError *error = NULL;
+    unsigned int bank;
+    unsigned int offset;
+    int fd;
+
+    fd = g_file_open_tmp("sam9x75-pmecc-log-XXXXXX", &log_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+
+    qts = qtest_initf(SAM9X75_MACHINE " -d guest_errors -D %s", log_path);
+    for (bank = 0; bank < PMECC_BANK_COUNT; bank++) {
+        uint64_t ecc = SAM9X7_PMECC_BASE + PMECC_ECC_FIRST +
+                       bank * PMECC_BANK_STRIDE;
+        uint64_t rem = SAM9X7_PMECC_BASE + PMECC_REM_FIRST +
+                       bank * PMECC_BANK_STRIDE;
+
+        for (offset = 0; offset < PMECC_ECC_REG_COUNT * sizeof(uint32_t);
+             offset++) {
+            g_assert_cmphex(qtest_readb(qts, ecc + offset), ==, UINT8_MAX);
+        }
+        for (offset = 0; offset < PMECC_REM_REG_COUNT; offset++) {
+            g_assert_cmphex(qtest_readl(qts, rem + offset * sizeof(uint32_t)),
+                            ==, 0);
+        }
+    }
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(log_path, &log, NULL, &error));
+    g_assert_no_error(error);
+    g_assert_null(strstr(log, "at91-pmecc"));
+    g_clear_pointer(&log, g_free);
+
+    qts = qtest_initf(SAM9X75_MACHINE " -d guest_errors -D %s", log_path);
+    for (offset = 0; offset < G_N_ELEMENTS(bad_offsets); offset++) {
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_PMECC_BASE +
+                                    bad_offsets[offset]), ==, 0);
+    }
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(log_path, &log, NULL, &error));
+    g_assert_no_error(error);
+    for (offset = 0; offset < G_N_ELEMENTS(bad_offsets); offset++) {
+        g_autofree char *message =
+            g_strdup_printf("bad offset 0x%x", bad_offsets[offset]);
+
+        g_assert_nonnull(strstr(log, message));
+    }
+    g_assert_cmpint(g_unlink(log_path), ==, 0);
+}
+
 static void test_smc_safety_and_shared_irq(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -11707,6 +11772,8 @@ int main(int argc, char **argv)
                    test_board_memory_cs_jumpers);
     qtest_add_func("sam9x75/smc-pmecc/registers",
                    test_smc_and_pmecc_registers);
+    qtest_add_func("sam9x75/smc-pmecc/banked-windows",
+                   test_pmecc_banked_windows);
     qtest_add_func("sam9x75/smc-pmecc/safety-and-shared-irq",
                    test_smc_safety_and_shared_irq);
     qtest_add_func("sam9x75/smc-pmecc/shared-irq-migration-and-reset",

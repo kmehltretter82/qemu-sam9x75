@@ -26,11 +26,13 @@
 #define PMECC_IDR          0x20
 #define PMECC_IMR          0x24
 #define PMECC_ISR          0x28
+#define PMECC_BANK_COUNT   8
+#define PMECC_BANK_STRIDE  0x40
 #define PMECC_ECC_FIRST    0x40
-#define PMECC_ECC_LAST     0x6b
+#define PMECC_ECC_SIZE     0x2c
 #define PMECC_REM_FIRST    0x240
-#define PMECC_REM_LAST     0x26f
-#define PMECC_MMIO_SIZE    0x300
+#define PMECC_REM_SIZE     0x30
+#define PMECC_MMIO_SIZE    0x600
 
 #define PMECC_CFG_MASK     0x00111317
 #define PMECC_CTRL_RST     BIT(0)
@@ -63,6 +65,20 @@ static void at91_pmecc_update_irq(AT91PMECCState *s)
                          (s->errloc_isr & s->errloc_imr));
 }
 
+static bool at91_pmecc_in_banks(hwaddr offset, hwaddr first,
+                                hwaddr bank_size)
+{
+    hwaddr bank_offset;
+
+    if (offset < first) {
+        return false;
+    }
+
+    bank_offset = offset - first;
+    return bank_offset / PMECC_BANK_STRIDE < PMECC_BANK_COUNT &&
+           bank_offset % PMECC_BANK_STRIDE < bank_size;
+}
+
 static uint64_t at91_pmecc_read(void *opaque, hwaddr offset,
                                 unsigned int size)
 {
@@ -92,11 +108,13 @@ static uint64_t at91_pmecc_read(void *opaque, hwaddr offset,
     case PMECC_ISR:
         return s->isr;
     default:
-        if (offset >= PMECC_ECC_FIRST && offset <= PMECC_ECC_LAST) {
+        if (at91_pmecc_in_banks(offset, PMECC_ECC_FIRST,
+                                PMECC_ECC_SIZE)) {
             /* An erased data stream generates erased ECC bytes. */
             return MAKE_64BIT_MASK(0, size * 8);
         }
-        if (offset >= PMECC_REM_FIRST && offset <= PMECC_REM_LAST) {
+        if (at91_pmecc_in_banks(offset, PMECC_REM_FIRST,
+                                PMECC_REM_SIZE)) {
             return 0;
         }
         qemu_log_mask(LOG_GUEST_ERROR,
