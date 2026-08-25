@@ -60,10 +60,9 @@
 #define XDMAC_REQUEST_MASK      MAKE_64BIT_MASK(0, AT91_XDMAC_NUM_REQUESTS)
 
 /* The 4 KiB multiport FIFO provides 256 bytes to each of 16 channels. */
-#define XDMAC_FIFO_BYTES_PER_CHANNEL 256
 #define XDMAC_GTYPE_VALUE \
     (((AT91_XDMAC_NUM_REQUESTS - 1) << 16) | \
-     (XDMAC_FIFO_BYTES_PER_CHANNEL << 5) | \
+     (AT91_XDMAC_FIFO_BYTES_PER_CHANNEL << 5) | \
      (AT91_XDMAC_NUM_CHANNELS - 1))
 
 #define XDMAC_GCFG_MASK         (BIT(8) | 0xf)
@@ -171,10 +170,80 @@ static bool at91_xdmac_is_source_peripheral(const AT91XDMACChannel *ch)
     return at91_xdmac_is_peripheral(ch) && !(ch->cc & XDMAC_CC_DSYNC);
 }
 
-static bool at91_xdmac_channel_suspended(AT91XDMACState *s,
-                                         unsigned int index)
+static bool at91_xdmac_uses_p2m_fifo(const AT91XDMACChannel *ch)
 {
-    return (s->grs | s->gws) & BIT(index);
+    /*
+     * Start with the maintenance-critical, non-descriptor peripheral RX
+     * case.  Descriptor and multi-microblock transfers retain the original
+     * atomic data path until their descriptor-boundary FIFO state can be
+     * represented without changing existing behaviour.
+     */
+    return ch->enabled && at91_xdmac_is_source_peripheral(ch) &&
+           !ch->descriptor_mode && !ch->cbc &&
+           !(ch->cc & XDMAC_CC_MEMSET);
+}
+
+static unsigned int at91_xdmac_data_width(const AT91XDMACChannel *ch)
+{
+    unsigned int dwidth = (ch->cc & XDMAC_CC_DWIDTH_MASK) >>
+                          XDMAC_CC_DWIDTH_SHIFT;
+
+    return dwidth <= 2 ? 1U << dwidth : 0;
+}
+
+static unsigned int at91_xdmac_memory_burst_bytes(
+    const AT91XDMACChannel *ch)
+{
+    unsigned int mbsize = (ch->cc & XDMAC_CC_MBSIZE_MASK) >> 1;
+    unsigned int data = mbsize ? 1U << (mbsize + 1) : 1;
+
+    return data * at91_xdmac_data_width(ch);
+}
+
+static void at91_xdmac_fifo_reset(AT91XDMACChannel *ch)
+{
+    ch->fifo_head = 0;
+    ch->fifo_tail = 0;
+    ch->fifo_count = 0;
+    ch->write_burst_remaining = 0;
+    ch->flush_remaining = 0;
+    ch->read_in_progress = false;
+    ch->write_in_progress = false;
+    ch->flush_pending = false;
+    ch->disable_pending = false;
+}
+
+static void at91_xdmac_fifo_push(AT91XDMACChannel *ch,
+                                 const uint8_t *data, unsigned int size)
+{
+    unsigned int first = MIN(size, AT91_XDMAC_FIFO_BYTES_PER_CHANNEL -
+                                   ch->fifo_tail);
+
+    g_assert(size <= AT91_XDMAC_FIFO_BYTES_PER_CHANNEL - ch->fifo_count);
+    memcpy(&ch->fifo[ch->fifo_tail], data, first);
+    memcpy(ch->fifo, data + first, size - first);
+    ch->fifo_tail = (ch->fifo_tail + size) %
+                    AT91_XDMAC_FIFO_BYTES_PER_CHANNEL;
+    ch->fifo_count += size;
+}
+
+static void at91_xdmac_fifo_peek(const AT91XDMACChannel *ch,
+                                 uint8_t *data, unsigned int size)
+{
+    unsigned int first = MIN(size, AT91_XDMAC_FIFO_BYTES_PER_CHANNEL -
+                                   ch->fifo_head);
+
+    g_assert(size <= ch->fifo_count);
+    memcpy(data, &ch->fifo[ch->fifo_head], first);
+    memcpy(data + first, ch->fifo, size - first);
+}
+
+static void at91_xdmac_fifo_pop(AT91XDMACChannel *ch, unsigned int size)
+{
+    g_assert(size <= ch->fifo_count);
+    ch->fifo_head = (ch->fifo_head + size) %
+                    AT91_XDMAC_FIFO_BYTES_PER_CHANNEL;
+    ch->fifo_count -= size;
 }
 
 static bool at91_xdmac_has_request(AT91XDMACState *s,
@@ -195,13 +264,75 @@ static bool at91_xdmac_has_request(AT91XDMACState *s,
            (s->request_level & BIT_ULL(perid));
 }
 
+static bool at91_xdmac_fifo_can_read(AT91XDMACState *s,
+                                     AT91XDMACChannel *ch,
+                                     unsigned int index,
+                                     unsigned int width)
+{
+    if (ch->disable_pending || !ch->read_ubc ||
+        ch->fifo_count + width > AT91_XDMAC_FIFO_BYTES_PER_CHANNEL) {
+        return false;
+    }
+
+    /* An accepted chunk is allowed to finish after a read suspend. */
+    if (!ch->request_remaining && (s->grs & BIT(index))) {
+        return false;
+    }
+    return at91_xdmac_has_request(s, ch, index);
+}
+
+static bool at91_xdmac_fifo_can_write(AT91XDMACState *s,
+                                      AT91XDMACChannel *ch,
+                                      unsigned int index,
+                                      unsigned int width)
+{
+    if (ch->fifo_count < width) {
+        return false;
+    }
+
+    /* Already scheduled bus writes finish even if GWS is asserted later. */
+    if (ch->write_burst_remaining) {
+        return true;
+    }
+
+    /* Disable and flush override write suspend so pending RX data drains. */
+    if (ch->disable_pending || ch->flush_pending) {
+        return true;
+    }
+    if (s->gws & BIT(index)) {
+        return false;
+    }
+
+    return ch->fifo_count >= at91_xdmac_memory_burst_bytes(ch) ||
+           !ch->read_ubc;
+}
+
 static bool at91_xdmac_channel_runnable(AT91XDMACState *s,
                                         unsigned int index)
 {
     AT91XDMACChannel *ch = &s->channel[index];
+    unsigned int width;
 
-    if (!ch->enabled || ch->error_stalled ||
-        at91_xdmac_channel_suspended(s, index) || !clock_get_hz(s->pclk)) {
+    if (!ch->enabled || ch->error_stalled || !clock_get_hz(s->pclk)) {
+        return false;
+    }
+    if (at91_xdmac_uses_p2m_fifo(ch)) {
+        if (ch->disable_pending) {
+            return true;
+        }
+        if (!ch->cubc) {
+            return !((s->grs | s->gws) & BIT(index));
+        }
+        width = at91_xdmac_data_width(ch);
+        if (!width) {
+            return true;
+        }
+        return at91_xdmac_fifo_can_write(s, ch, index, width) ||
+               at91_xdmac_fifo_can_read(s, ch, index, width);
+    }
+
+    /* The legacy atomic path cannot stop between its read and write. */
+    if ((s->grs | s->gws) & BIT(index)) {
         return false;
     }
     if (ch->needs_fetch || !ch->cubc) {
@@ -233,6 +364,9 @@ static void at91_xdmac_set_error(AT91XDMACState *s,
     ch->cis |= error;
     ch->error_stalled = true;
     ch->request_remaining = 0;
+    ch->read_in_progress = false;
+    ch->write_in_progress = false;
+    ch->write_burst_remaining = 0;
     s->sw_requests &= ~BIT(index);
     at91_xdmac_update_irq(s);
 }
@@ -306,6 +440,7 @@ static bool at91_xdmac_fetch_descriptor(AT91XDMACState *s,
     ch->cndc = (ubc >> 24) & XDMAC_CNDC_MASK;
     ch->cubc = ubc & XDMAC_CUBC_MASK;
     ch->initial_ublen = ch->cubc;
+    ch->read_ubc = ch->cubc;
     ch->needs_fetch = false;
     ch->initd = true;
     return true;
@@ -328,6 +463,22 @@ static void at91_xdmac_complete_block(AT91XDMACState *s,
         }
         ch->enabled = false;
     }
+    at91_xdmac_update_irq(s);
+}
+
+static void at91_xdmac_finish_disable(AT91XDMACState *s,
+                                      AT91XDMACChannel *ch,
+                                      unsigned int index)
+{
+    ch->enabled = false;
+    ch->needs_fetch = false;
+    ch->error_stalled = false;
+    ch->request_remaining = 0;
+    ch->cis |= XDMAC_CIS_DIS;
+    s->sw_requests &= ~BIT(index);
+    s->grs &= ~BIT(index);
+    s->gws &= ~BIT(index);
+    at91_xdmac_fifo_reset(ch);
     at91_xdmac_update_irq(s);
 }
 
@@ -357,6 +508,122 @@ static uint32_t at91_xdmac_advance_address(uint32_t address,
         g_assert_not_reached();
     }
     return address + increment;
+}
+
+static bool at91_xdmac_fifo_read_one(AT91XDMACState *s,
+                                     AT91XDMACChannel *ch,
+                                     unsigned int index,
+                                     unsigned int width)
+{
+    uint8_t data[4];
+    unsigned int sam = (ch->cc & XDMAC_CC_SAM_MASK) >>
+                       XDMAC_CC_SAM_SHIFT;
+    unsigned int csize;
+    int32_t source_data_stride = sextract32(ch->cds_msp, 0, 16);
+    int32_t source_micro_stride = sextract32(ch->csus, 0, 24);
+    bool microblock_end;
+    MemTxResult result;
+
+    if (!ch->request_remaining) {
+        if (!at91_xdmac_has_request(s, ch, index)) {
+            return false;
+        }
+        csize = (ch->cc & XDMAC_CC_CSIZE_MASK) >>
+                XDMAC_CC_CSIZE_SHIFT;
+        ch->request_remaining = MIN(1U << MIN(csize, 4U), ch->read_ubc);
+    }
+
+    ch->read_in_progress = true;
+    result = dma_memory_read(&s->dma_as, ch->csa, data, width,
+                             MEMTXATTRS_UNSPECIFIED);
+    ch->read_in_progress = false;
+    if (result != MEMTX_OK) {
+        at91_xdmac_set_error(s, ch, index, XDMAC_CIS_RBEIS);
+        return false;
+    }
+
+    at91_xdmac_fifo_push(ch, data, width);
+    ch->read_ubc--;
+    microblock_end = !ch->read_ubc;
+    ch->csa = at91_xdmac_advance_address(ch->csa, sam, width,
+                                         source_data_stride,
+                                         source_micro_stride,
+                                         microblock_end);
+
+    ch->request_remaining--;
+    if (!ch->request_remaining && (ch->cc & XDMAC_CC_SWREQ)) {
+        s->sw_requests &= ~BIT(index);
+    }
+    return true;
+}
+
+static bool at91_xdmac_fifo_write_one(AT91XDMACState *s,
+                                      AT91XDMACChannel *ch,
+                                      unsigned int index,
+                                      unsigned int width)
+{
+    uint8_t data[4];
+    unsigned int dam = (ch->cc & XDMAC_CC_DAM_MASK) >>
+                       XDMAC_CC_DAM_SHIFT;
+    int32_t dest_data_stride = sextract32(ch->cds_msp, 16, 16);
+    int32_t dest_micro_stride = sextract32(ch->cdus, 0, 24);
+    bool microblock_end;
+    MemTxResult result;
+
+    if (!ch->write_burst_remaining) {
+        if (ch->disable_pending) {
+            ch->write_burst_remaining = ch->fifo_count;
+        } else if (ch->flush_pending) {
+            ch->write_burst_remaining = ch->flush_remaining;
+        } else if (!ch->read_ubc) {
+            ch->write_burst_remaining = ch->fifo_count;
+        } else {
+            ch->write_burst_remaining =
+                at91_xdmac_memory_burst_bytes(ch);
+        }
+    }
+
+    at91_xdmac_fifo_peek(ch, data, width);
+    ch->write_in_progress = true;
+    result = dma_memory_write(&s->dma_as, ch->cda, data, width,
+                              MEMTXATTRS_UNSPECIFIED);
+    ch->write_in_progress = false;
+    if (result != MEMTX_OK) {
+        at91_xdmac_set_error(s, ch, index, XDMAC_CIS_WBEIS);
+        if (ch->disable_pending) {
+            /* GD must always converge even when its final drain faults. */
+            at91_xdmac_finish_disable(s, ch, index);
+        }
+        return false;
+    }
+
+    at91_xdmac_fifo_pop(ch, width);
+    g_assert(ch->write_burst_remaining >= width);
+    ch->write_burst_remaining -= width;
+
+    g_assert(ch->cubc);
+    ch->cubc--;
+    microblock_end = !ch->cubc;
+    ch->cda = at91_xdmac_advance_address(ch->cda, dam, width,
+                                         dest_data_stride,
+                                         dest_micro_stride,
+                                         microblock_end);
+
+    if (ch->flush_pending) {
+        g_assert(ch->flush_remaining >= width);
+        ch->flush_remaining -= width;
+        if (!ch->flush_remaining) {
+            ch->flush_pending = false;
+            ch->cis |= XDMAC_CIS_FIS;
+            at91_xdmac_update_irq(s);
+        }
+    }
+
+    if (microblock_end && !ch->disable_pending) {
+        g_assert(!ch->read_ubc && !ch->fifo_count);
+        at91_xdmac_complete_block(s, ch, index);
+    }
+    return true;
 }
 
 static bool at91_xdmac_transfer_one(AT91XDMACState *s,
@@ -439,6 +706,64 @@ static unsigned int at91_xdmac_run_channel(AT91XDMACState *s,
             used++;
             budget--;
             continue;
+        }
+
+        if (at91_xdmac_uses_p2m_fifo(ch)) {
+            unsigned int width = at91_xdmac_data_width(ch);
+            bool can_read;
+
+            if (!width) {
+                at91_xdmac_set_error(s, ch, index, XDMAC_CIS_RBEIS);
+                used++;
+                break;
+            }
+            if (ch->disable_pending && !ch->fifo_count) {
+                at91_xdmac_finish_disable(s, ch, index);
+                used++;
+                budget--;
+                continue;
+            }
+            if (!ch->cubc) {
+                at91_xdmac_complete_block(s, ch, index);
+                used++;
+                budget--;
+                continue;
+            }
+            can_read = at91_xdmac_fifo_can_read(s, ch, index, width);
+            /*
+             * A flush is nonblocking: source reads can be scheduled while
+             * its finite FIFO snapshot drains.  Prefer one waiting read when
+             * space is available; a full FIFO necessarily schedules a write
+             * next, so the snapshot still makes bounded progress toward FIS.
+             */
+            if (ch->flush_pending && can_read) {
+                if (!at91_xdmac_fifo_read_one(s, ch, index, width)) {
+                    used++;
+                    break;
+                }
+                used++;
+                budget--;
+                continue;
+            }
+            if (at91_xdmac_fifo_can_write(s, ch, index, width)) {
+                if (!at91_xdmac_fifo_write_one(s, ch, index, width)) {
+                    used++;
+                    break;
+                }
+                used++;
+                budget--;
+                continue;
+            }
+            if (can_read) {
+                if (!at91_xdmac_fifo_read_one(s, ch, index, width)) {
+                    used++;
+                    break;
+                }
+                used++;
+                budget--;
+                continue;
+            }
+            break;
         }
 
         if (!ch->cubc) {
@@ -578,7 +903,14 @@ static uint64_t at91_xdmac_channel_read(AT91XDMACState *s,
     case XDMAC_CBC:
         return ch->cbc;
     case XDMAC_CC:
-        return ch->cc | (ch->initd ? XDMAC_CC_INITD : 0);
+        value = ch->cc | (ch->initd ? XDMAC_CC_INITD : 0);
+        if (ch->read_in_progress || ch->request_remaining) {
+            value |= XDMAC_CC_RDIP;
+        }
+        if (ch->write_in_progress || ch->write_burst_remaining) {
+            value |= XDMAC_CC_WRIP;
+        }
+        return value;
     case XDMAC_CDS_MSP:
         return ch->cds_msp;
     case XDMAC_CSUS:
@@ -655,6 +987,8 @@ static void at91_xdmac_start_channels(AT91XDMACState *s, uint32_t mask)
         ch->error_stalled = false;
         ch->initial_ublen = ch->cubc;
         ch->request_remaining = 0;
+        ch->read_ubc = ch->cubc;
+        at91_xdmac_fifo_reset(ch);
     }
     at91_xdmac_schedule(s);
 }
@@ -669,16 +1003,33 @@ static void at91_xdmac_disable_channels(AT91XDMACState *s, uint32_t mask)
         if (!(mask & BIT(i)) || !ch->enabled) {
             continue;
         }
-        ch->enabled = false;
-        ch->needs_fetch = false;
-        ch->error_stalled = false;
-        ch->request_remaining = 0;
-        ch->cis |= XDMAC_CIS_DIS;
-        s->sw_requests &= ~BIT(i);
-        s->grs &= ~BIT(i);
-        s->gws &= ~BIT(i);
+
+        if (at91_xdmac_uses_p2m_fifo(ch) && ch->fifo_count &&
+            !ch->error_stalled) {
+            bool flush_write_scheduled =
+                ch->flush_pending && ch->write_burst_remaining &&
+                ch->write_burst_remaining >= ch->flush_remaining;
+
+            /*
+             * P2M disable is graceful: stop accepting source requests,
+             * override GWS, and retain GS until every byte already in the
+             * FIFO reaches RAM.  An unscheduled flush is discarded, but an
+             * already-scheduled write must finish with FIS before DIS.
+             */
+            ch->disable_pending = true;
+            if (!flush_write_scheduled) {
+                ch->flush_pending = false;
+                ch->flush_remaining = 0;
+            }
+            ch->request_remaining = 0;
+            s->sw_requests &= ~BIT(i);
+            s->gws &= ~BIT(i);
+            continue;
+        }
+
+        at91_xdmac_finish_disable(s, ch, i);
     }
-    at91_xdmac_update_irq(s);
+    at91_xdmac_schedule(s);
 }
 
 static void at91_xdmac_channel_write(AT91XDMACState *s,
@@ -791,11 +1142,22 @@ static void at91_xdmac_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case XDMAC_GWS:
         s->gws = mask;
+        for (index = 0; index < ARRAY_SIZE(s->channel); index++) {
+            if (s->channel[index].disable_pending) {
+                s->gws &= ~BIT(index);
+            }
+        }
         at91_xdmac_schedule(s);
         break;
     case XDMAC_GRWS:
         s->grs |= mask;
         s->gws |= mask;
+        for (index = 0; index < ARRAY_SIZE(s->channel); index++) {
+            if (s->channel[index].disable_pending) {
+                s->gws &= ~BIT(index);
+            }
+        }
+        at91_xdmac_schedule(s);
         break;
     case XDMAC_GRWR:
         s->grs &= ~mask;
@@ -817,18 +1179,20 @@ static void at91_xdmac_write(void *opaque, hwaddr offset, uint64_t value,
         for (index = 0; index < ARRAY_SIZE(s->channel); index++) {
             AT91XDMACChannel *ch = &s->channel[index];
 
-            /*
-             * The SAM9X7 flush command only applies to an active
-             * peripheral-to-memory channel.  This model does not yet
-             * buffer reads in the channel FIFO, so a relevant request
-             * completes immediately with an empty FIFO.
-             */
             if ((mask & BIT(index)) && ch->enabled &&
-                at91_xdmac_is_source_peripheral(ch)) {
-                ch->cis |= XDMAC_CIS_FIS;
+                at91_xdmac_is_source_peripheral(ch) &&
+                !ch->disable_pending) {
+                if (at91_xdmac_uses_p2m_fifo(ch) && ch->fifo_count) {
+                    /* Snapshot bytes that preceded this flush request. */
+                    ch->flush_pending = true;
+                    ch->flush_remaining = ch->fifo_count;
+                } else {
+                    ch->cis |= XDMAC_CIS_FIS;
+                }
             }
         }
         at91_xdmac_update_irq(s);
+        at91_xdmac_schedule(s);
         break;
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -863,6 +1227,7 @@ static void at91_xdmac_reset(DeviceState *dev)
     s->gws = 0;
     s->sw_requests = 0;
     s->request_level = 0;
+    memset(s->fifo_migration, 0, sizeof(s->fifo_migration));
     memset(s->channel, 0, sizeof(s->channel));
     at91_xdmac_update_irq(s);
 }
@@ -909,11 +1274,126 @@ static void at91_xdmac_unrealize(DeviceState *dev)
     address_space_destroy(&s->dma_as);
 }
 
+static int at91_xdmac_pre_save(void *opaque)
+{
+    AT91XDMACState *s = opaque;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(s->channel); i++) {
+        AT91XDMACChannel *ch = &s->channel[i];
+        AT91XDMACFifoMigrationState *fifo = &s->fifo_migration[i];
+
+        fifo->read_ubc = ch->read_ubc;
+        fifo->fifo_head = ch->fifo_head;
+        fifo->fifo_tail = ch->fifo_tail;
+        fifo->fifo_count = ch->fifo_count;
+        fifo->write_burst_remaining = ch->write_burst_remaining;
+        fifo->flush_remaining = ch->flush_remaining;
+        memcpy(fifo->fifo, ch->fifo, sizeof(fifo->fifo));
+        fifo->flush_pending = ch->flush_pending;
+        fifo->disable_pending = ch->disable_pending;
+
+        /* Synchronous DMA transactions cannot span a save boundary. */
+        ch->read_in_progress = false;
+        ch->write_in_progress = false;
+    }
+    return 0;
+}
+
+static int at91_xdmac_restore_fifo(AT91XDMACState *s, unsigned int index)
+{
+    AT91XDMACChannel *ch = &s->channel[index];
+    AT91XDMACFifoMigrationState *fifo = &s->fifo_migration[index];
+    uint32_t chunk;
+    unsigned int width;
+
+    if (!at91_xdmac_uses_p2m_fifo(ch)) {
+        /* Added FIFO state is not consumed by the legacy atomic path. */
+        ch->read_ubc = ch->cubc;
+        at91_xdmac_fifo_reset(ch);
+        return 0;
+    }
+
+    if (fifo->fifo_head >= AT91_XDMAC_FIFO_BYTES_PER_CHANNEL ||
+        fifo->fifo_tail >= AT91_XDMAC_FIFO_BYTES_PER_CHANNEL ||
+        fifo->fifo_count > AT91_XDMAC_FIFO_BYTES_PER_CHANNEL ||
+        fifo->write_burst_remaining > fifo->fifo_count ||
+        fifo->flush_remaining > fifo->fifo_count ||
+        fifo->read_ubc > ch->cubc ||
+        (fifo->fifo_head + fifo->fifo_count) %
+            AT91_XDMAC_FIFO_BYTES_PER_CHANNEL != fifo->fifo_tail ||
+        fifo->flush_pending != (fifo->flush_remaining != 0) ||
+        (fifo->disable_pending &&
+         (ch->error_stalled || ch->request_remaining ||
+          (fifo->flush_pending &&
+           (!fifo->write_burst_remaining ||
+            fifo->write_burst_remaining < fifo->flush_remaining)) ||
+          (s->gws & BIT(index)))) ||
+        (ch->error_stalled &&
+         (fifo->write_burst_remaining || ch->request_remaining))) {
+        return -EINVAL;
+    }
+
+    width = at91_xdmac_data_width(ch);
+    if (!width) {
+        if (fifo->fifo_count || fifo->write_burst_remaining ||
+            fifo->flush_remaining || fifo->read_ubc != ch->cubc) {
+            return -EINVAL;
+        }
+    } else if ((fifo->fifo_count % width) ||
+               (fifo->write_burst_remaining % width) ||
+               (fifo->flush_remaining % width) ||
+               fifo->fifo_count !=
+                   (uint64_t)(ch->cubc - fifo->read_ubc) * width) {
+        return -EINVAL;
+    }
+
+    chunk = 1U << MIN((ch->cc & XDMAC_CC_CSIZE_MASK) >>
+                      XDMAC_CC_CSIZE_SHIFT, 4U);
+    if (ch->request_remaining > MIN(chunk, fifo->read_ubc) ||
+        (ch->request_remaining && (ch->cc & XDMAC_CC_SWREQ) &&
+         !(s->sw_requests & BIT(index)))) {
+        return -EINVAL;
+    }
+
+    ch->read_ubc = fifo->read_ubc;
+    ch->fifo_head = fifo->fifo_head;
+    ch->fifo_tail = fifo->fifo_tail;
+    ch->fifo_count = fifo->fifo_count;
+    ch->write_burst_remaining = fifo->write_burst_remaining;
+    ch->flush_remaining = fifo->flush_remaining;
+    memcpy(ch->fifo, fifo->fifo, sizeof(ch->fifo));
+    ch->flush_pending = fifo->flush_pending;
+    ch->disable_pending = fifo->disable_pending;
+    ch->read_in_progress = false;
+    ch->write_in_progress = false;
+    return 0;
+}
+
 static int at91_xdmac_post_load(void *opaque, int version_id)
 {
     AT91XDMACState *s = opaque;
+    unsigned int i;
+    int ret;
 
+    s->gim &= XDMAC_CHANNEL_MASK;
+    s->grs &= XDMAC_CHANNEL_MASK;
+    s->gws &= XDMAC_CHANNEL_MASK;
+    s->sw_requests &= XDMAC_CHANNEL_MASK;
     s->request_level &= XDMAC_REQUEST_MASK;
+
+    for (i = 0; i < ARRAY_SIZE(s->channel); i++) {
+        if (version_id < 2) {
+            s->channel[i].read_ubc = s->channel[i].cubc;
+            at91_xdmac_fifo_reset(&s->channel[i]);
+            continue;
+        }
+        ret = at91_xdmac_restore_fifo(s, i);
+        if (ret) {
+            return ret;
+        }
+    }
+
     at91_xdmac_update_irq(s);
     at91_xdmac_schedule(s);
     return 0;
@@ -947,10 +1427,30 @@ static const VMStateDescription vmstate_at91_xdmac_channel = {
     },
 };
 
-static const VMStateDescription vmstate_at91_xdmac = {
-    .name = TYPE_AT91_XDMAC,
+static const VMStateDescription vmstate_at91_xdmac_fifo = {
+    .name = TYPE_AT91_XDMAC "/fifo",
     .version_id = 1,
     .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(read_ubc, AT91XDMACFifoMigrationState),
+        VMSTATE_UINT16(fifo_head, AT91XDMACFifoMigrationState),
+        VMSTATE_UINT16(fifo_tail, AT91XDMACFifoMigrationState),
+        VMSTATE_UINT16(fifo_count, AT91XDMACFifoMigrationState),
+        VMSTATE_UINT16(write_burst_remaining,
+                       AT91XDMACFifoMigrationState),
+        VMSTATE_UINT16(flush_remaining, AT91XDMACFifoMigrationState),
+        VMSTATE_BUFFER(fifo, AT91XDMACFifoMigrationState),
+        VMSTATE_BOOL(flush_pending, AT91XDMACFifoMigrationState),
+        VMSTATE_BOOL(disable_pending, AT91XDMACFifoMigrationState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription vmstate_at91_xdmac = {
+    .name = TYPE_AT91_XDMAC,
+    .version_id = 2,
+    .minimum_version_id = 1,
+    .pre_save = at91_xdmac_pre_save,
     .post_load = at91_xdmac_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(gcfg, AT91XDMACState),
@@ -960,6 +1460,10 @@ static const VMStateDescription vmstate_at91_xdmac = {
         VMSTATE_UINT32(gws, AT91XDMACState),
         VMSTATE_UINT32(sw_requests, AT91XDMACState),
         VMSTATE_UINT64(request_level, AT91XDMACState),
+        VMSTATE_STRUCT_ARRAY(fifo_migration, AT91XDMACState,
+                             AT91_XDMAC_NUM_CHANNELS, 2,
+                             vmstate_at91_xdmac_fifo,
+                             AT91XDMACFifoMigrationState),
         VMSTATE_STRUCT_ARRAY(channel, AT91XDMACState,
                              AT91_XDMAC_NUM_CHANNELS, 1,
                              vmstate_at91_xdmac_channel,
