@@ -1843,7 +1843,9 @@ static void gem_reset(DeviceState *d)
     s->regs[R_DESCONF2] = 0x2ab10000 | s->jumbo_max_len;
     s->regs[R_DESCONF5] = 0x002f2045;
     s->regs[R_DESCONF6] = R_DESCONF6_DMA_ADDR_64B_MASK;
-    s->regs[R_INT_Q1_MASK] = 0x00000CE6;
+    for (i = 0; i < s->num_priority_queues; i++) {
+        s->regs[R_INT_Q1_MASK + i] = 0x00000CE6;
+    }
     s->regs[R_JUMBO_MAX_LEN] = s->jumbo_max_len;
 
     if (s->num_priority_queues > 1) {
