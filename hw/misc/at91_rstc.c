@@ -196,7 +196,14 @@ static void at91_rstc_set_wdt_reset(void *opaque, int n, int level)
 
 static uint32_t at91_rstc_status(AT91RSTCState *s)
 {
-    uint32_t value = s->reset_type << RSTC_SR_RSTTYP_SHIFT;
+    uint8_t reset_type = s->reset_type;
+    uint32_t value;
+
+    if (reset_type == RSTC_TYPE_GENERAL &&
+        s->general_reset_reports_backup) {
+        reset_type = RSTC_TYPE_BACKUP;
+    }
+    value = reset_type << RSTC_SR_RSTTYP_SHIFT;
 
     if (s->ursts) {
         value |= RSTC_SR_URSTS;
@@ -405,6 +412,8 @@ static const VMStateDescription at91_rstc_vmstate = {
 static const Property at91_rstc_properties[] = {
     DEFINE_PROP_LINK("sysc", AT91RSTCState, sysc, TYPE_AT91_SYSCWP,
                      AT91SYSCWPState *),
+    DEFINE_PROP_BOOL("general-reset-reports-backup", AT91RSTCState,
+                     general_reset_reports_backup, false),
 };
 
 static void at91_rstc_class_init(ObjectClass *klass, const void *data)

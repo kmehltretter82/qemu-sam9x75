@@ -803,6 +803,8 @@ static void sam9x7_init(Object *obj)
                           qdev_get_clock_out(DEVICE(&s->pmc), "gclk[47]"));
 
     object_initialize_child(obj, "rstc", &s->rstc, TYPE_AT91_RSTC);
+    qdev_prop_set_bit(DEVICE(&s->rstc),
+                      "general-reset-reports-backup", true);
     qdev_connect_clock_in(DEVICE(&s->rstc), "slck",
                           qdev_get_clock_out(DEVICE(&s->sckc), "md-slck"));
     s->rstc.sysc = &s->sysc;

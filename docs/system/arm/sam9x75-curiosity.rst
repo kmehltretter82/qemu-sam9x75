@@ -157,9 +157,12 @@ Support matrix
        interrupts, lock and key rules, synchronization guard, reset policy and
        migration state.  RSTC has keyed user/external reset control, status,
        interrupt behavior and General/Backup/Watchdog/Software/User reset
-       causes.  MCP16502 nRSTO drives the SoC NRST power-reset input: backup
-       exit and warm reset reset VDDCORE devices while the VDDBU-powered
-       SYSCWP, BSC, GPBR, RSTC, RTT, RTC, SHDWC and SCKC retain state.  SHDWC has
+       causes.  The revision A1 ``RSTTYP`` erratum is modeled: initial and
+       subsequent General resets report Backup, while the other causes keep
+       their documented encodings.  MCP16502 nRSTO drives the SoC NRST
+       power-reset input: backup exit and warm reset reset VDDCORE devices
+       while the VDDBU-powered SYSCWP, BSC, GPBR, RSTC, RTT, RTC, SHDWC and
+       SCKC retain state.  SHDWC has
        keyed two-slow-clock shutdown, SHDN,
        programmable WKUP0 polarity/debounce, raw RTC/RTT alarm wake-up,
        read-clear status, system write protection, VDDBU retention and

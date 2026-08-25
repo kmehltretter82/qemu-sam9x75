@@ -9065,6 +9065,34 @@ static void test_system_slowclock_pit_reset_and_protection(void)
     qtest_quit(qts);
 }
 
+static void test_rstc_a1_general_reset_reporting(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+
+    /* Revision A1 reports an initial General reset as Backup. */
+    value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_BACKUP));
+
+    /* The erratum must not change a distinct warm-reset cause. */
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_writel(qts, SAM9X7_RSTC_BASE + RSTC_CR,
+                 RSTC_KEY | RSTC_CR_PROCRST);
+    qtest_qmp_eventwait(qts, "RESET");
+    value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_SOFTWARE));
+
+    /* A later explicit cold General reset is also reported as Backup. */
+    qtest_system_reset(qts);
+    value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_BACKUP));
+
+    qtest_quit(qts);
+}
+
 static void test_rtt_count_alarm_modulo_and_protection(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -17166,6 +17194,8 @@ int main(int argc, char **argv)
                    test_trng_timing_irq_and_protection);
     qtest_add_func("sam9x75/system/slowclock-pit-reset-and-protection",
                    test_system_slowclock_pit_reset_and_protection);
+    qtest_add_func("sam9x75/rstc/a1-general-reset-reporting",
+                   test_rstc_a1_general_reset_reporting);
     qtest_add_func("sam9x75/rtt/count-alarm-modulo-and-protection",
                    test_rtt_count_alarm_modulo_and_protection);
     qtest_add_func("sam9x75/shdwc/registers-shutdown-and-pin-wake",

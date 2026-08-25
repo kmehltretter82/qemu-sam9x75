@@ -29,6 +29,7 @@ struct AT91RSTCState {
     QEMUTimer *external_timer;
     QEMUTimer *sample_timer;
 
+    bool general_reset_reports_backup;
     uint32_t mode;
     uint8_t reset_type;
     uint8_t pending_reset_type;
