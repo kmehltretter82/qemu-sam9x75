@@ -28,14 +28,12 @@
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
+#include "system/reset.h"
 
-static void or_irq_handler(void *opaque, int n, int level)
+static void or_irq_update_output(OrIRQState *s)
 {
-    OrIRQState *s = OR_IRQ(opaque);
     int or_level = 0;
     int i;
-
-    s->levels[n] = level;
 
     for (i = 0; i < s->num_lines; i++) {
         or_level |= s->levels[i];
@@ -44,14 +42,27 @@ static void or_irq_handler(void *opaque, int n, int level)
     qemu_set_irq(s->out_irq, or_level);
 }
 
-static void or_irq_reset(DeviceState *dev)
+static void or_irq_handler(void *opaque, int n, int level)
 {
-    OrIRQState *s = OR_IRQ(dev);
-    int i;
+    OrIRQState *s = OR_IRQ(opaque);
 
-    for (i = 0; i < MAX_OR_LINES; i++) {
-        s->levels[i] = false;
+    s->levels[n] = level;
+    or_irq_update_output(s);
+}
+
+static void or_irq_reset_hold(Object *obj, ResetType type)
+{
+    OrIRQState *s = OR_IRQ(obj);
+
+    if (type != RESET_TYPE_WAKEUP) {
+        memset(s->levels, 0, sizeof(s->levels));
+        or_irq_update_output(s);
     }
+}
+
+static void or_irq_reset_exit(Object *obj, ResetType type)
+{
+    or_irq_update_output(OR_IRQ(obj));
 }
 
 static void or_irq_realize(DeviceState *dev, Error **errp)
@@ -61,6 +72,12 @@ static void or_irq_realize(DeviceState *dev, Error **errp)
     assert(s->num_lines <= MAX_OR_LINES);
 
     qdev_init_gpio_in(dev, or_irq_handler, s->num_lines);
+    qemu_register_resettable(OBJECT(dev));
+}
+
+static void or_irq_unrealize(DeviceState *dev)
+{
+    qemu_unregister_resettable(OBJECT(dev));
 }
 
 static void or_irq_init(Object *obj)
@@ -89,6 +106,14 @@ static bool vmstate_extras_needed(void *opaque)
     return s->num_lines >= OLD_MAX_OR_LINES;
 }
 
+static int or_irq_post_load(void *opaque, int version_id)
+{
+    OrIRQState *s = OR_IRQ(opaque);
+
+    or_irq_update_output(s);
+    return 0;
+}
+
 static const VMStateDescription vmstate_or_irq_extras = {
     .name = "or-irq-extras",
     .version_id = 1,
@@ -105,6 +130,7 @@ static const VMStateDescription vmstate_or_irq = {
     .name = TYPE_OR_IRQ,
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = or_irq_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_BOOL_SUB_ARRAY(levels, OrIRQState, 0, OLD_MAX_OR_LINES),
         VMSTATE_END_OF_LIST(),
@@ -122,11 +148,14 @@ static const Property or_irq_properties[] = {
 static void or_irq_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
-    device_class_set_legacy_reset(dc, or_irq_reset);
     device_class_set_props(dc, or_irq_properties);
     dc->realize = or_irq_realize;
+    dc->unrealize = or_irq_unrealize;
     dc->vmsd = &vmstate_or_irq;
+    rc->phases.hold = or_irq_reset_hold;
+    rc->phases.exit = or_irq_reset_exit;
 
     /* Reason: Needs to be wired up to work, e.g. see stm32f205_soc.c */
     dc->user_creatable = false;

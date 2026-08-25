@@ -11415,6 +11415,30 @@ static void test_smc_shared_irq_migration_and_reset(void)
     qtest_quit(from);
 }
 
+static void test_sys_irq_migration_and_reset(void)
+{
+    const char *path = "/machine/soc/sys-irq";
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+
+    qtest_irq_intercept_out(from, path);
+    qtest_irq_intercept_out(to, path);
+    qtest_set_irq_in(from, path, NULL, 7, 1);
+    g_assert_true(qtest_get_irq(from, 0));
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_true(qtest_get_irq(to, 0));
+    qtest_system_reset(to);
+    g_assert_false(qtest_get_irq(to, 0));
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
 static void qspi_finish_transfer(QTestState *qts)
 {
     qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_CR, QSPI_CR_LASTXFER);
@@ -11778,6 +11802,8 @@ int main(int argc, char **argv)
                    test_smc_safety_and_shared_irq);
     qtest_add_func("sam9x75/smc-pmecc/shared-irq-migration-and-reset",
                    test_smc_shared_irq_migration_and_reset);
+    qtest_add_func("sam9x75/system/or-irq-migration-and-reset",
+                   test_sys_irq_migration_and_reset);
     qtest_add_func("sam9x75/qspi/flash-read-program-and-erase",
                    test_qspi_flash_read_program_and_erase);
 
