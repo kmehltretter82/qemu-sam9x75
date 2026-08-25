@@ -276,6 +276,7 @@
 #define UDPHS_EPTCFG_DIR_IN     BIT(3)
 #define UDPHS_EPTCFG_TYPE(value) ((value) << 4)
 #define UDPHS_EPTCFG_BANKS(value) ((value) << 6)
+#define UDPHS_EPTCFG_NB_TRANS(value) ((value) << 8)
 #define UDPHS_EPTCFG_MAPPED     BIT(31)
 #define UDPHS_EPTCTL_ENABLE     BIT(0)
 #define UDPHS_EPTCTL_AUTO_VALID BIT(1)
@@ -13971,6 +13972,35 @@ static void test_uhphs_registers_reset_and_companions(void)
     qtest_quit(qts);
 }
 
+static void uhphs_ohci_submit_nonzero_setup(QTestState *qts,
+                                             uint8_t address)
+{
+    static const uint8_t setup[8];
+    const uint32_t hcca = SAM9X7_SRAM0_BASE;
+    const uint32_t ed = SAM9X7_SRAM0_BASE + 0x100;
+    const uint32_t td = SAM9X7_SRAM0_BASE + 0x120;
+    const uint32_t tail = SAM9X7_SRAM0_BASE + 0x130;
+    const uint32_t buffer = SAM9X7_SRAM0_BASE + 0x140;
+
+    qtest_memset(qts, hcca, 0, 0x100);
+    qtest_memwrite(qts, buffer, setup, sizeof(setup));
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_HCCA, hcca);
+    qtest_writel(qts, ed, (64U << 16) | (1U << 7) | address);
+    qtest_writel(qts, ed + 4, tail);
+    qtest_writel(qts, ed + 8, td);
+    qtest_writel(qts, ed + 12, 0);
+    qtest_writel(qts, td, 0xf2000000);
+    qtest_writel(qts, td + 4, buffer);
+    qtest_writel(qts, td + 8, tail);
+    qtest_writel(qts, td + 12, buffer + sizeof(setup) - 1);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_CONTROL_HEAD, ed);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_CONTROL,
+                 UHPFS_CONTROL_OPERATIONAL | UHPFS_CONTROL_CLE);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_COMMAND_STATUS,
+                 UHPFS_COMMAND_CLF);
+    qtest_clock_step(qts, 1000000);
+}
+
 static void test_uhphs_hotplug_shared_irq(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -14009,6 +14039,27 @@ static void test_uhphs_hotplug_shared_irq(void)
     g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
                               UHPFS_HC_RH_PORT(1)) & UHPFS_PORT_CCS);
     g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(22));
+
+    /* A resolved ordinary USB device cannot receive SETUP on EP1. */
+    pmc_configure_usb_host(qts);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_RH_PORT(1),
+                 UHPFS_PORT_PRS);
+    qtest_clock_step(qts, 2 * 1000000LL);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                              UHPFS_HC_RH_PORT(1)) & UHPFS_PORT_PES);
+    uhphs_ohci_submit_nonzero_setup(qts, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                              UHPFS_HC_INT_STATUS) & UHPFS_INT_UE);
+
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_COMMAND_STATUS,
+                 UHPFS_COMMAND_HCR);
+    g_assert_false(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                               UHPFS_HC_INT_STATUS) & UHPFS_INT_UE);
+
+    /* A nonzero SETUP with no target retains the same fatal behavior. */
+    uhphs_ohci_submit_nonzero_setup(qts, 0x7f);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                              UHPFS_HC_INT_STATUS) & UHPFS_INT_UE);
     qtest_qmp_device_del(qts, "sam9x75-usb-kbd-replug");
     qtest_quit(qts);
 }
@@ -15070,10 +15121,10 @@ static void test_udphs_shared_port_a_mux(void)
 
 static void udphs_ohci_control_token(QTestState *qts, uint32_t ed,
                                      uint32_t td, uint32_t tail,
-                                     uint32_t buffer, uint32_t td_flags,
-                                     size_t length)
+                                     uint32_t buffer, unsigned int ep,
+                                     uint32_t td_flags, size_t length)
 {
-    qtest_writel(qts, ed, 64U << 16);
+    qtest_writel(qts, ed, (64U << 16) | (ep << 7));
     qtest_writel(qts, ed + 4, tail);
     qtest_writel(qts, ed + 8, td);
     qtest_writel(qts, ed + 12, 0);
@@ -15110,6 +15161,12 @@ static void test_udphs_raw_ep0_and_pio_data_tokens(void)
                               0x00, 0x00, 0x12, 0x00 };
     const uint8_t setup_out[] = { 0x40, 0x5a, 0x00, 0x00,
                                   0x00, 0x00, 0x04, 0x00 };
+    const uint8_t setup_ep1_in[] = { 0xc0, 0x75, 0x00, 0x00,
+                                     0x00, 0x00, 0x08, 0x00 };
+    const uint8_t setup_ep3_out[] = { 0x40, 0x93, 0x00, 0x00,
+                                      0x00, 0x00, 0x00, 0x00 };
+    const uint8_t setup_ep3_data_out[] = { 0x40, 0x94, 0x00, 0x00,
+                                           0x00, 0x00, 0x04, 0x00 };
     const uint8_t control_in_data[] = {
         0x12, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x40,
         0x25, 0x05, 0x75, 0x09, 0x00, 0x01, 0x01, 0x02,
@@ -15122,6 +15179,9 @@ static void test_udphs_raw_ep0_and_pio_data_tokens(void)
     const uint8_t in_data[] = {
         0x75, 0x64, 0x70, 0x68, 0x73, 0x2d, 0x69, 0x6e,
         0x2d, 0x74, 0x6f, 0x6b, 0x65, 0x6e,
+    };
+    const uint8_t ep1_in_data[] = {
+        0x91, 0x75, 0xc0, 0x01, 0x91, 0x75, 0xc0, 0x02,
     };
     uint8_t observed[sizeof(control_in_data)];
     uint32_t status;
@@ -15218,7 +15278,7 @@ static void test_udphs_raw_ep0_and_pio_data_tokens(void)
                  UDPHS_EPTSTA_TXRDY);
     qtest_memset(qts, bulk_buf, 0, sizeof(control_in_data));
     udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
-                             bulk_buf, 0xf3100000,
+                             bulk_buf, 0, 0xf3100000,
                              sizeof(control_in_data));
     qtest_memread(qts, bulk_buf, observed, sizeof(control_in_data));
     g_assert_cmpmem(observed, sizeof(control_in_data), control_in_data,
@@ -15226,7 +15286,7 @@ static void test_udphs_raw_ep0_and_pio_data_tokens(void)
     qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
                  UDPHS_EPTSTA_TXCOMPLT);
     udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
-                             0, 0xf3080000, 0);
+                             0, 0, 0xf3080000, 0);
     status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0));
     g_assert_cmphex(status & (UDPHS_EPTSTA_RXRDY |
                               UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
@@ -15238,7 +15298,7 @@ static void test_udphs_raw_ep0_and_pio_data_tokens(void)
     /* Exercise the opposite control-OUT/data/status-IN direction too. */
     qtest_memwrite(qts, setup_buf, setup_out, sizeof(setup_out));
     udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
-                             setup_buf, 0xf2000000, sizeof(setup_out));
+                             setup_buf, 0, 0xf2000000, sizeof(setup_out));
     status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0));
     g_assert_cmphex(status & (UDPHS_EPTSTA_RX_SETUP |
                               UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
@@ -15252,7 +15312,7 @@ static void test_udphs_raw_ep0_and_pio_data_tokens(void)
                  UDPHS_EPTSTA_RX_SETUP);
     qtest_memwrite(qts, bulk_buf, out_data, 4);
     udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
-                             bulk_buf, 0xf3080000, 4);
+                             bulk_buf, 0, 0xf3080000, 4);
     status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0));
     g_assert_cmphex(status & (UDPHS_EPTSTA_RXRDY |
                               UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
@@ -15264,10 +15324,155 @@ static void test_udphs_raw_ep0_and_pio_data_tokens(void)
     qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(0),
                  UDPHS_EPTSTA_TXRDY);
     udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
-                             0, 0xf3100000, 0);
+                             0, 0, 0xf3100000, 0);
     status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0));
     g_assert_true(status & UDPHS_EPTSTA_TXCOMPLT);
     g_assert_false(status & UDPHS_EPTSTA_NAK_IN);
+
+    /* CONTROL is also documented on EP1-6; EPT_DIR is ignored. */
+    udphs_configure_endpoint(qts, 1,
+                             UDPHS_EPTCFG_SIZE(0) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_BANKS(1),
+                             UDPHS_EPTCTL_AUTO_VALID);
+    qtest_memwrite(qts, setup_buf, setup_ep1_in, sizeof(setup_ep1_in));
+    udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
+                             setup_buf, 1, 0xf2000000,
+                             sizeof(setup_ep1_in));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(1));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_RX_SETUP |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RX_SETUP |
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(setup_ep1_in)));
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE + (1U << 16), observed,
+                  sizeof(setup_ep1_in));
+    g_assert_cmpmem(observed, sizeof(setup_ep1_in), setup_ep1_in,
+                    sizeof(setup_ep1_in));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(1),
+                 UDPHS_EPTSTA_RX_SETUP);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(1), bulk_buf);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(1),
+                 UDPHS_DMA_CHANN_ENB |
+                 UDPHS_DMA_BUFF_LENGTH(sizeof(ep1_in_data)));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMASTATUS(1)) &
+                    (UDPHS_DMA_CHANN_ENB |
+                     UDPHS_DMA_BUFF_COUNT(0xffff)), ==,
+                    UDPHS_DMA_CHANN_ENB |
+                    UDPHS_DMA_BUFF_COUNT(sizeof(ep1_in_data)));
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE + (1U << 16),
+                   ep1_in_data, sizeof(ep1_in_data));
+    g_assert_false(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                               UDPHS_EPTSTA(1)) & UDPHS_EPTSTA_TXRDY);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(1),
+                 UDPHS_EPTSTA_TXRDY);
+    qtest_memset(qts, bulk_buf, 0, sizeof(ep1_in_data));
+    udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
+                             bulk_buf, 1, 0xf3100000,
+                             sizeof(ep1_in_data));
+    qtest_memread(qts, bulk_buf, observed, sizeof(ep1_in_data));
+    g_assert_cmpmem(observed, sizeof(ep1_in_data), ep1_in_data,
+                    sizeof(ep1_in_data));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMASTATUS(1)) &
+                    (UDPHS_DMA_CHANN_ENB |
+                     UDPHS_DMA_BUFF_COUNT(0xffff)), ==,
+                    UDPHS_DMA_CHANN_ENB |
+                    UDPHS_DMA_BUFF_COUNT(sizeof(ep1_in_data)));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(1), 0);
+    udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
+                             0, 1, 0xf3080000, 0);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(1));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_RXRDY |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RXRDY);
+    g_assert_true(status & UDPHS_EPTSTA_NAK_OUT);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(1),
+                 UDPHS_EPTSTA_RXRDY);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCTLDIS(1),
+                 UDPHS_EPTCTL_AUTO_VALID);
+
+    /* MAPD is resource-only: CONTROL with more than one bank stalls. */
+    udphs_configure_endpoint(qts, 3,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_BANKS(2), 0);
+    qtest_memwrite(qts, setup_buf, setup_ep3_out, sizeof(setup_ep3_out));
+    udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
+                             setup_buf, 3, 0xf2000000,
+                             sizeof(setup_ep3_out));
+    g_assert_cmphex(qtest_readl(qts, setup_td) >> 28, ==, 4);
+
+    /* CONTROL packet sizes above 64 bytes are operationally unsupported. */
+    udphs_configure_endpoint(qts, 3,
+                             UDPHS_EPTCFG_SIZE(7) |
+                             UDPHS_EPTCFG_BANKS(1), 0);
+    udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
+                             setup_buf, 3, 0xf2000000,
+                             sizeof(setup_ep3_out));
+    g_assert_cmphex(qtest_readl(qts, setup_td) >> 28, ==, 4);
+
+    /* A one-bank EP3 completes a no-data control-OUT request. */
+    udphs_configure_endpoint(qts, 3,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_BANKS(1), 0);
+    udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
+                             setup_buf, 3, 0xf2000000,
+                             sizeof(setup_ep3_out));
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE + (3U << 16), observed,
+                  sizeof(setup_ep3_out));
+    g_assert_cmpmem(observed, sizeof(setup_ep3_out), setup_ep3_out,
+                    sizeof(setup_ep3_out));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(3),
+                 UDPHS_EPTSTA_RX_SETUP);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(3),
+                 UDPHS_EPTSTA_TXRDY);
+    udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
+                             0, 3, 0xf3100000, 0);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(3));
+    g_assert_true(status & UDPHS_EPTSTA_TXCOMPLT);
+    g_assert_false(status & UDPHS_EPTSTA_NAK_IN);
+
+    /* AUTO_VALID is ignored throughout a nonzero control-OUT data stage. */
+    udphs_configure_endpoint(qts, 3,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_BANKS(1),
+                             UDPHS_EPTCTL_AUTO_VALID);
+    qtest_memwrite(qts, setup_buf, setup_ep3_data_out,
+                   sizeof(setup_ep3_data_out));
+    udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
+                             setup_buf, 3, 0xf2000000,
+                             sizeof(setup_ep3_data_out));
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE + (3U << 16), observed,
+                  sizeof(setup_ep3_data_out));
+    g_assert_cmpmem(observed, sizeof(setup_ep3_data_out),
+                    setup_ep3_data_out, sizeof(setup_ep3_data_out));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(3),
+                 UDPHS_EPTSTA_RX_SETUP);
+    qtest_memwrite(qts, bulk_buf, out_data, 4);
+    udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
+                             bulk_buf, 3, 0xf3080000, 4);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(3));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_RXRDY |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RXRDY | UDPHS_EPTSTA_BYTE_COUNT(4));
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE + (3U << 16), observed, 4);
+    g_assert_cmpmem(observed, 4, out_data, 4);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(3));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_RXRDY |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RXRDY);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(3),
+                 UDPHS_EPTSTA_RXRDY);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(3),
+                 UDPHS_EPTSTA_TXRDY);
+    udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
+                             0, 3, 0xf3100000, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                              UDPHS_EPTSTA(3)) & UDPHS_EPTSTA_TXCOMPLT);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCTLDIS(3),
+                 UDPHS_EPTCTL_AUTO_VALID);
 
     udphs_configure_endpoint(qts, 1,
                              UDPHS_EPTCFG_SIZE(3) |
@@ -15366,6 +15571,64 @@ static void test_udphs_raw_ep0_and_pio_data_tokens(void)
                                 UDPHS_EPTSTA(2)) &
                     UDPHS_EPTSTA_TOGGLE_MASK, ==, 0);
 
+    /* Raw-token smoke coverage for valid EP3/EP4 isochronous modes. */
+    udphs_configure_endpoint(qts, 3,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_TYPE(1) |
+                             UDPHS_EPTCFG_BANKS(2) |
+                             UDPHS_EPTCFG_NB_TRANS(1), 0);
+    qtest_writeb(qts, bulk_buf, 0x93);
+    udphs_ohci_bulk_transfer(qts, bulk_ed, bulk_td, bulk_tail,
+                             bulk_buf, 3, false, 1);
+    g_assert_cmphex(qtest_readl(qts, bulk_td) >> 28, ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(3)) &
+                    (UDPHS_EPTSTA_RXRDY |
+                     UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RXRDY | UDPHS_EPTSTA_BYTE_COUNT(1));
+    qtest_readb(qts, SAM9X7_UDPHS_FIFO_BASE + (3U << 16));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(3),
+                 UDPHS_EPTSTA_RXRDY);
+
+    udphs_configure_endpoint(qts, 4,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(1) |
+                             UDPHS_EPTCFG_BANKS(2) |
+                             UDPHS_EPTCFG_NB_TRANS(1), 0);
+    qtest_writeb(qts, SAM9X7_UDPHS_FIFO_BASE + (4U << 16), 0x94);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(4),
+                 UDPHS_EPTSTA_TXRDY);
+    qtest_writeb(qts, bulk_buf, 0);
+    udphs_ohci_bulk_transfer(qts, bulk_ed, bulk_td, bulk_tail,
+                             bulk_buf, 4, true, 1);
+    g_assert_cmphex(qtest_readl(qts, bulk_td) >> 28, ==, 0);
+    g_assert_cmphex(qtest_readb(qts, bulk_buf), ==, 0x94);
+
+    /* Interrupt packets work through 512 bytes. */
+    udphs_configure_endpoint(qts, 6,
+                             UDPHS_EPTCFG_SIZE(6) |
+                             UDPHS_EPTCFG_TYPE(3) |
+                             UDPHS_EPTCFG_BANKS(1), 0);
+    qtest_writeb(qts, bulk_buf, 0x95);
+    udphs_ohci_bulk_transfer(qts, bulk_ed, bulk_td, bulk_tail,
+                             bulk_buf, 6, false, 1);
+    g_assert_cmphex(qtest_readl(qts, bulk_td) >> 28, ==, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                              UDPHS_EPTSTA(6)) & UDPHS_EPTSTA_RXRDY);
+
+    /* This controller reserves 1024-byte packets for isochronous mode. */
+    udphs_configure_endpoint(qts, 6,
+                             UDPHS_EPTCFG_SIZE(7) |
+                             UDPHS_EPTCFG_TYPE(3) |
+                             UDPHS_EPTCFG_BANKS(1), 0);
+    qtest_writeb(qts, bulk_buf, 0x96);
+    udphs_ohci_bulk_transfer(qts, bulk_ed, bulk_td, bulk_tail,
+                             bulk_buf, 6, false, 1);
+    g_assert_cmphex(qtest_readl(qts, bulk_td) >> 28, ==, 4);
+    g_assert_false(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                               UDPHS_EPTSTA(6)) & UDPHS_EPTSTA_RXRDY);
+
     /* MAPD is resource-only; an architecturally illegal mode stalls tokens. */
     udphs_configure_endpoint(qts, 4,
                              UDPHS_EPTCFG_SIZE(7) |
@@ -15378,7 +15641,8 @@ static void test_udphs_raw_ep0_and_pio_data_tokens(void)
     udphs_configure_endpoint(qts, 5,
                              UDPHS_EPTCFG_SIZE(3) |
                              UDPHS_EPTCFG_TYPE(1) |
-                             UDPHS_EPTCFG_BANKS(1), 0);
+                             UDPHS_EPTCFG_BANKS(1) |
+                             UDPHS_EPTCFG_NB_TRANS(1), 0);
     udphs_ohci_bulk_transfer(qts, bulk_ed, bulk_td, bulk_tail,
                              bulk_buf, 5, false, 1);
     g_assert_cmphex(qtest_readl(qts, bulk_td) >> 28, ==, 4);

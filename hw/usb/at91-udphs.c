@@ -145,10 +145,21 @@ static bool at91_udphs_ep_is_in(const AT91UDPHSEndpoint *ep)
     return ep->cfg & UDPHS_EPT_CFG_DIR_IN;
 }
 
-static bool at91_udphs_transfer_is_in(const AT91UDPHSEndpoint *ep,
-                                      unsigned index)
+static unsigned at91_udphs_ep_type(const AT91UDPHSEndpoint *ep)
 {
-    return index == 0 ? ep->control_dir_in : at91_udphs_ep_is_in(ep);
+    return (ep->cfg & UDPHS_EPT_CFG_TYPE_MASK) >>
+           UDPHS_EPT_CFG_TYPE_SHIFT;
+}
+
+static bool at91_udphs_ep_is_control(const AT91UDPHSEndpoint *ep)
+{
+    return at91_udphs_ep_type(ep) == USB_ENDPOINT_XFER_CONTROL;
+}
+
+static bool at91_udphs_transfer_is_in(const AT91UDPHSEndpoint *ep)
+{
+    return at91_udphs_ep_is_control(ep) ?
+           ep->control_dir_in : at91_udphs_ep_is_in(ep);
 }
 
 static bool at91_udphs_cfg_valid(unsigned index, uint32_t cfg);
@@ -207,7 +218,7 @@ static void at91_udphs_refresh_endpoint(AT91UDPHSState *s, unsigned index)
 
     ready = at91_udphs_ready_banks(ep);
     current = ep->cpu_bank % banks;
-    is_in = at91_udphs_transfer_is_in(ep, index);
+    is_in = at91_udphs_transfer_is_in(ep);
     ep->sta |= current << 16;
     ep->sta |= MIN(ready, 3U) << 18;
 
@@ -225,7 +236,8 @@ static void at91_udphs_refresh_endpoint(AT91UDPHSState *s, unsigned index)
         packet_length = ep->bank[current].length;
         length = packet_length - MIN(packet_length,
                                      ep->bank[current].written);
-    } else if (index == 0 && (ep->sta & UDPHS_EPT_STA_RX_SETUP)) {
+    } else if (at91_udphs_ep_is_control(ep) &&
+               (ep->sta & UDPHS_EPT_STA_RX_SETUP)) {
         length = 8 - MIN(ep->bank[0].written, 8);
     } else if (is_in) {
         length = ep->bank[current].written;
@@ -237,14 +249,13 @@ static void at91_udphs_refresh_endpoint(AT91UDPHSState *s, unsigned index)
         ep->sta |= UDPHS_EPT_STA_SHORT;
     }
 
-    if (index == 0 && ep->control_dir_in) {
+    if (at91_udphs_ep_is_control(ep) && ep->control_dir_in) {
         ep->sta &= ~UDPHS_EPT_STA_CURBANK_MASK;
         ep->sta |= BIT(16);
     }
 }
 
-static bool at91_udphs_endpoint_pending(const AT91UDPHSEndpoint *ep,
-                                        unsigned index)
+static bool at91_udphs_endpoint_pending(const AT91UDPHSEndpoint *ep)
 {
     uint32_t pending;
     unsigned banks;
@@ -264,7 +275,7 @@ static bool at91_udphs_endpoint_pending(const AT91UDPHSEndpoint *ep,
     if (ep->ctl & UDPHS_EPT_CTL_BUSY_IE) {
         banks = at91_udphs_ep_banks(ep);
         ready = at91_udphs_ready_banks(ep);
-        if (banks && (at91_udphs_transfer_is_in(ep, index) ?
+        if (banks && (at91_udphs_transfer_is_in(ep) ?
                       ready == 0 : ready == banks)) {
             pending |= UDPHS_EPT_CTL_BUSY_IE;
         }
@@ -288,7 +299,7 @@ static uint32_t at91_udphs_intsta(AT91UDPHSState *s)
     for (i = 0; i < AT91_UDPHS_NUM_ENDPOINTS; i++) {
         at91_udphs_refresh_endpoint(s, i);
         if ((s->ien & BIT(UDPHS_EPT_INT_SHIFT + i)) &&
-            at91_udphs_endpoint_pending(&s->endpoint[i], i)) {
+            at91_udphs_endpoint_pending(&s->endpoint[i])) {
             value |= BIT(UDPHS_EPT_INT_SHIFT + i);
         }
     }
@@ -355,8 +366,7 @@ static void at91_udphs_sync_usb_endpoint(AT91UDPHSState *s, unsigned index)
     dev = USB_DEVICE(bridge);
     size = at91_udphs_cfg_operational(index, ep->cfg) ?
            at91_udphs_ep_size(ep) : 0;
-    type = (ep->cfg & UDPHS_EPT_CFG_TYPE_MASK) >>
-           UDPHS_EPT_CFG_TYPE_SHIFT;
+    type = at91_udphs_ep_type(ep);
 
     if (index == 0) {
         usb_ep_set_type(dev, USB_TOKEN_IN, 0, USB_ENDPOINT_XFER_CONTROL);
@@ -368,7 +378,8 @@ static void at91_udphs_sync_usb_endpoint(AT91UDPHSState *s, unsigned index)
 
     for (pid = USB_TOKEN_OUT; pid != 0; pid =
              (pid == USB_TOKEN_OUT ? USB_TOKEN_IN : 0)) {
-        bool selected = (pid == USB_TOKEN_IN) == at91_udphs_ep_is_in(ep);
+        bool selected = type == USB_ENDPOINT_XFER_CONTROL ||
+                        ((pid == USB_TOKEN_IN) == at91_udphs_ep_is_in(ep));
 
         usb_ep_set_type(dev, pid, index,
                         selected && size ? type : USB_ENDPOINT_XFER_INVALID);
@@ -480,17 +491,18 @@ static bool at91_udphs_cfg_operational(unsigned index, uint32_t cfg)
         !at91_udphs_cfg_valid(index, cfg)) {
         return false;
     }
-    if (index == 0) {
-        return type == USB_ENDPOINT_XFER_CONTROL;
-    }
     if (type == USB_ENDPOINT_XFER_CONTROL) {
+        return banks == 1 && size <= 64;
+    }
+    if (index == 0) {
         return false;
     }
     if (type == USB_ENDPOINT_XFER_ISOC && banks < 2) {
         return false;
     }
-
-    /* A 1024-byte transaction is defined only for high-speed isochronous. */
+    if (type == USB_ENDPOINT_XFER_BULK && size > 512) {
+        return false;
+    }
     return size != 1024 || type == USB_ENDPOINT_XFER_ISOC;
 }
 
@@ -625,14 +637,15 @@ static uint64_t at91_udphs_fifo_read(void *opaque, hwaddr offset,
             ep->bank[bank].written = MIN(ep->bank[bank].written + 1,
                                          ep->bank[bank].length);
             update_irq = true;
-            if ((ep->ctl & UDPHS_EPT_CTL_AUTO_VALID) &&
+            if (!at91_udphs_ep_is_control(ep) &&
+                (ep->ctl & UDPHS_EPT_CTL_AUTO_VALID) &&
                 ep->bank[bank].written >= ep->bank[bank].length) {
                 at91_udphs_clear_rx_ready(s, index);
             }
-        } else if (index == 0 &&
+        } else if (at91_udphs_ep_is_control(ep) &&
                    (ep->sta & UDPHS_EPT_STA_RX_SETUP) && position < 8) {
             ep->bank[0].written = MIN(ep->bank[0].written + 1, 8);
-            at91_udphs_refresh_endpoint(s, 0);
+            at91_udphs_refresh_endpoint(s, index);
             update_irq = true;
         }
     }
@@ -683,8 +696,10 @@ static void at91_udphs_fifo_write(void *opaque, hwaddr offset,
         fifo->length = fifo->written;
         update_irq = true;
 
-        if ((ep->ctl & UDPHS_EPT_CTL_AUTO_VALID) &&
-            at91_udphs_ep_is_in(ep) && bank == ep->cpu_bank &&
+        if (!at91_udphs_ep_is_control(ep) &&
+            (ep->ctl & UDPHS_EPT_CTL_AUTO_VALID) &&
+            at91_udphs_transfer_is_in(ep) &&
+            bank == ep->cpu_bank &&
             fifo->written == packet_size) {
             at91_udphs_mark_tx_ready(s, index);
             update_irq = true;
@@ -782,7 +797,8 @@ static void at91_udphs_endpoint_write(AT91UDPHSState *s, unsigned index,
                               UDPHS_EPT_STA_STALL_SENT |
                               UDPHS_EPT_STA_NAK_IN |
                               UDPHS_EPT_STA_NAK_OUT));
-        if ((value & UDPHS_EPT_STA_RX_SETUP) && index == 0) {
+        if ((value & UDPHS_EPT_STA_RX_SETUP) &&
+            at91_udphs_ep_is_control(ep)) {
             ep->bank[0].length = 0;
             ep->bank[0].written = 0;
         }
@@ -1113,11 +1129,12 @@ static void at91_udphs_dma_service(AT91UDPHSState *s, unsigned index)
         return;
     }
     ep = &s->endpoint[index];
-    if (!(ep->cfg & UDPHS_EPT_CFG_MAPPED) ||
+    if (at91_udphs_ep_is_control(ep) ||
+        !(ep->cfg & UDPHS_EPT_CFG_MAPPED) ||
         !(ep->ctl & UDPHS_EPT_CTL_ENABLE)) {
         return;
     }
-    if (at91_udphs_ep_is_in(ep)) {
+    if (at91_udphs_transfer_is_in(ep)) {
         at91_udphs_dma_service_in(s, index);
     } else {
         at91_udphs_dma_service_out(s, index);
@@ -1360,9 +1377,10 @@ static void at91_udphs_advance_toggle(AT91UDPHSEndpoint *ep)
     ep->sta ^= BIT(6);
 }
 
-static void at91_udphs_handle_setup(AT91UDPHSState *s, USBPacket *packet)
+static void at91_udphs_handle_setup(AT91UDPHSState *s, USBPacket *packet,
+                                    unsigned index)
 {
-    AT91UDPHSEndpoint *ep = &s->endpoint[0];
+    AT91UDPHSEndpoint *ep = &s->endpoint[index];
     unsigned i;
 
     if (usb_packet_size(packet) != 8) {
@@ -1394,8 +1412,8 @@ static void at91_udphs_handle_setup(AT91UDPHSState *s, USBPacket *packet)
     ep->status_out_nak = false;
     packet->status = USB_RET_SUCCESS;
 
-    at91_udphs_refresh_endpoint(s, 0);
-    at91_udphs_sync_usb_endpoint(s, 0);
+    at91_udphs_refresh_endpoint(s, index);
+    at91_udphs_sync_usb_endpoint(s, index);
     at91_udphs_update_irq(s);
 }
 
@@ -1440,7 +1458,8 @@ static void at91_udphs_handle_in(AT91UDPHSState *s, USBPacket *packet,
         at91_udphs_dma_service(s, index);
     }
 
-    if (index == 0 && ep->control_dir_in && ep->control_length) {
+    if (at91_udphs_ep_is_control(ep) && ep->control_dir_in &&
+        ep->control_length) {
         ep->control_transferred = MIN((unsigned)ep->control_length,
                                       (unsigned)ep->control_transferred +
                                       (unsigned)length);
@@ -1465,7 +1484,8 @@ static void at91_udphs_handle_out(AT91UDPHSState *s, USBPacket *packet,
     int bank;
 
     /* Figure 72.10 mandates a NAK on the first status-OUT token. */
-    if (index == 0 && ep->status_out_nak && host_length == 0) {
+    if (at91_udphs_ep_is_control(ep) && ep->status_out_nak &&
+        host_length == 0) {
         ep->status_out_nak = false;
         ep->sta |= UDPHS_EPT_STA_NAK_OUT;
         packet->status = USB_RET_NAK;
@@ -1499,7 +1519,7 @@ static void at91_udphs_handle_out(AT91UDPHSState *s, USBPacket *packet,
         packet->status = USB_RET_SUCCESS;
     }
 
-    if (index == 0 && host_length == 0) {
+    if (at91_udphs_ep_is_control(ep) && host_length == 0) {
         ep->control_length = 0;
         ep->control_transferred = 0;
     }
@@ -1543,13 +1563,11 @@ void at91_udphs_handle_token(AT91UDPHSState *s, USBPacket *packet)
     }
 
     if (packet->pid == USB_TOKEN_SETUP) {
-        if (index != 0 ||
-            ((ep->cfg & UDPHS_EPT_CFG_TYPE_MASK) >>
-             UDPHS_EPT_CFG_TYPE_SHIFT) != USB_ENDPOINT_XFER_CONTROL) {
+        if (!at91_udphs_ep_is_control(ep)) {
             packet->status = USB_RET_STALL;
             return;
         }
-        at91_udphs_handle_setup(s, packet);
+        at91_udphs_handle_setup(s, packet, index);
         return;
     }
 
@@ -1560,7 +1578,7 @@ void at91_udphs_handle_token(AT91UDPHSState *s, USBPacket *packet)
         return;
     }
 
-    if (index != 0) {
+    if (!at91_udphs_ep_is_control(ep)) {
         bool token_in = packet->pid == USB_TOKEN_IN;
 
         if ((packet->pid != USB_TOKEN_IN &&

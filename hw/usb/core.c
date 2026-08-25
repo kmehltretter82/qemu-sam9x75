@@ -764,15 +764,27 @@ void usb_ep_dump(USBDevice *dev)
 
 struct USBEndpoint *usb_ep_get(USBDevice *dev, int pid, int ep)
 {
+    USBDeviceClass *klass;
     struct USBEndpoint *eps;
 
     assert(dev != NULL);
     if (ep == 0) {
         return &dev->ep_ctl;
     }
-    assert(pid == USB_TOKEN_IN || pid == USB_TOKEN_OUT);
     assert(ep > 0 && ep <= USB_MAX_ENDPOINTS);
-    eps = (pid == USB_TOKEN_IN) ? dev->ep_in : dev->ep_out;
+    klass = USB_DEVICE_GET_CLASS(dev);
+    if (pid == USB_TOKEN_SETUP) {
+        /*
+         * A controller-backed raw-packet device may implement documented
+         * nonzero control endpoints.  SETUP is host-to-device, so associate
+         * it with the OUT endpoint.  Ordinary devices remain endpoint-0-only.
+         */
+        assert(klass->handle_packet);
+        eps = dev->ep_out;
+    } else {
+        assert(pid == USB_TOKEN_IN || pid == USB_TOKEN_OUT);
+        eps = (pid == USB_TOKEN_IN) ? dev->ep_in : dev->ep_out;
+    }
     return eps + ep - 1;
 }
 

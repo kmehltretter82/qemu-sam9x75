@@ -327,6 +327,13 @@ static USBDevice *ohci_find_attached_device(OHCIState *ohci, uint8_t addr)
     return NULL;
 }
 
+static bool ohci_setup_endpoint_valid(USBDevice *dev, int pid,
+                                      unsigned endpoint)
+{
+    return pid != USB_TOKEN_SETUP || endpoint == 0 ||
+           (dev && USB_DEVICE_GET_CLASS(dev)->handle_packet);
+}
+
 static void ohci_clear_async_state(OHCIState *ohci)
 {
     ohci->async_td = 0;
@@ -995,6 +1002,7 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed,
     int pid;
     int ret;
     int i;
+    unsigned endpoint;
     USBDevice *dev;
     USBEndpoint *ep;
     struct ohci_td td;
@@ -1044,11 +1052,6 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed,
     case OHCI_TD_DIR_SETUP:
         str = "setup";
         pid = USB_TOKEN_SETUP;
-        if (OHCI_BM(ed->flags, ED_EN) > 0) {  /* setup only allowed to ep 0 */
-            trace_usb_ohci_td_bad_pid(str, ed->flags, td.flags);
-            ohci_die(ohci);
-            return 1;
-        }
         break;
     default:
         trace_usb_ohci_td_bad_direction(dir);
@@ -1116,17 +1119,23 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed,
         ohci->async_ed = 0;
         ohci->async_complete = false;
     } else {
+        if (resume) {
+            pid = resume->pid;
+        }
+        endpoint = resume ? resume->endpoint : OHCI_BM(ed->flags, ED_EN);
         dev = ohci_find_device(ohci, resume ? resume->device_address :
                               OHCI_BM(ed->flags, ED_FA));
+        if (!ohci_setup_endpoint_valid(dev, pid, endpoint)) {
+            /* Only resolved raw controller devices may own nonzero CONTROL. */
+            trace_usb_ohci_td_bad_pid(str, ed->flags, td.flags);
+            ohci_die(ohci);
+            return 1;
+        }
         if (dev == NULL) {
             trace_usb_ohci_td_dev_error();
             return 1;
         }
-        if (resume) {
-            pid = resume->pid;
-        }
-        ep = usb_ep_get(dev, pid, resume ? resume->endpoint :
-                        OHCI_BM(ed->flags, ED_EN));
+        ep = usb_ep_get(dev, pid, endpoint);
         if (ohci->async_td) {
             /*
              * ??? The hardware should allow one active packet per
@@ -2259,7 +2268,6 @@ static void ohci_rebuild_cancel_packet(OHCIState *ohci,
         (uint32_t)packet->actual_length > packet->length ||
         packet->length > sizeof(ohci->usb_buf) ||
         packet->endpoint > USB_MAX_ENDPOINTS ||
-        (packet->pid == USB_TOKEN_SETUP && packet->endpoint != 0) ||
         (packet->pid != USB_TOKEN_IN &&
          packet->pid != USB_TOKEN_OUT &&
          packet->pid != USB_TOKEN_SETUP)) {
@@ -2268,6 +2276,9 @@ static void ohci_rebuild_cancel_packet(OHCIState *ohci,
 
     dev = ohci_find_attached_device(ohci, packet->device_address);
     if (!dev) {
+        goto invalid;
+    }
+    if (!ohci_setup_endpoint_valid(dev, packet->pid, packet->endpoint)) {
         goto invalid;
     }
     ep = usb_ep_get(dev, packet->pid, packet->endpoint);
@@ -2602,6 +2613,8 @@ static bool ohci_async_packet_from_descriptors(
     struct ohci_td td;
     size_t len = 0;
     size_t pktlen = 0;
+    uint8_t device_address = OHCI_BM(ed->flags, ED_FA);
+    uint8_t endpoint = OHCI_BM(ed->flags, ED_EN);
     int dir;
     int pid;
 
@@ -2620,9 +2633,6 @@ static bool ohci_async_packet_from_descriptors(
         pid = USB_TOKEN_OUT;
         break;
     case OHCI_TD_DIR_SETUP:
-        if (OHCI_BM(ed->flags, ED_EN) > 0) {
-            return false;
-        }
         pid = USB_TOKEN_SETUP;
         break;
     default:
@@ -2652,8 +2662,8 @@ static bool ohci_async_packet_from_descriptors(
     packet->actual_length = 0;
     packet->pid = pid;
     packet->length = pktlen;
-    packet->device_address = OHCI_BM(ed->flags, ED_FA);
-    packet->endpoint = OHCI_BM(ed->flags, ED_EN);
+    packet->device_address = device_address;
+    packet->endpoint = endpoint;
     packet->short_not_ok = !(td.flags & OHCI_TD_R);
     packet->int_req = OHCI_BM(td.flags, TD_DI) == 0;
     return true;

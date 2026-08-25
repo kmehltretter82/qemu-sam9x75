@@ -381,17 +381,27 @@ Support matrix
        ``0x00500000``, its 1 KiB register aperture at ``0xf803c000``,
        endpoints 0--6, internal DMA-channel register files 1--6, PID 23 and
        UTMI clocks, and AIC source 23.  A raw-token USB gadget bridge lets an
-       emulated host deliver staged endpoint-zero SETUP transactions and PIO
-       IN/OUT packets instead of collapsing control transfers in the generic
-       USB-device layer.  Complete control-IN and control-OUT stages, legal
-       endpoint modes, multi-bank PIO, FIFO byte counts and endpoint
-       interrupts are covered.  Direct-buffer and three-word linked-descriptor
+       emulated host deliver staged SETUP transactions to control endpoints
+       0--6 and PIO IN/OUT packets instead of collapsing control transfers in
+       the generic USB-device layer.  Complete control-IN and control-OUT
+       stages on zero and nonzero endpoints, multi-bank PIO, FIFO byte counts
+       and endpoint interrupts are covered.  Endpoint 0 is control-only;
+       control endpoints use one bank, accept 8--64-byte packets and ignore
+       ``EPT_DIR``;
+       isochronous endpoints require at least two banks; bulk and interrupt
+       endpoints accept at most 512-byte packets; and only isochronous
+       endpoints accept 1024 bytes.  Control mode ignores ``AUTO_VALID`` and
+       cannot use the endpoint DMA channels.  ``MAPD`` remains a DPRAM resource
+       result,
+       so a resource-valid but operationally unsupported configuration still
+       maps and stalls tokens.  Direct-buffer and three-word linked-descriptor
        DMA implement IN prefetch/refill, OUT drain, 64 KiB counts, ZLP and
        short-packet completion, read-to-clear status, chaining, memory errors
        and active migration.  DMA execution is synchronous, ``BURST_LCK`` has
        no timing effect and ``INTDIS_DMA`` request suppression is not yet
-       modeled.  Isochronous microframe/DATAX/MDATA termination,
-       SOF/suspend/resume timing, a host-facing USB cable backend and SAM-BA
+       modeled.  ``NB_TRANS`` high-bandwidth microframe behavior and
+       isochronous DATAX/MDATA termination, SOF/suspend/resume timing, a
+       host-facing USB cable backend and SAM-BA
        remain.  ``UDPHS_CTRL.EN_UDPHS`` disconnects and blocks UHPHS
        high-speed Port A while UDPHS owns the shared UTMI transceiver,
        matching the hardware mux.  Gadget-bridge cable presence drives the
