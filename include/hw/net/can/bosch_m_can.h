@@ -46,6 +46,9 @@ struct BoschMCanState {
     uint8_t rxf0_get;
     uint8_t rxf0_put;
     uint8_t rxf0_fill;
+    uint8_t rxf1_get;
+    uint8_t rxf1_put;
+    uint8_t rxf1_fill;
     uint8_t tx_fifo_get;
     uint8_t tx_fifo_put;
     uint8_t txe_get;

@@ -98,6 +98,11 @@ enum {
 #define MCAN_IR_RF0W        BIT(1)
 #define MCAN_IR_RF0F        BIT(2)
 #define MCAN_IR_RF0L        BIT(3)
+#define MCAN_IR_RF1N        BIT(4)
+#define MCAN_IR_RF1W        BIT(5)
+#define MCAN_IR_RF1F        BIT(6)
+#define MCAN_IR_RF1L        BIT(7)
+#define MCAN_IR_HPM         BIT(8)
 #define MCAN_IR_TC          BIT(9)
 #define MCAN_IR_TCF         BIT(10)
 #define MCAN_IR_TFE         BIT(11)
@@ -107,6 +112,7 @@ enum {
 #define MCAN_IR_TEFL        BIT(15)
 #define MCAN_IR_TSW         BIT(16)
 #define MCAN_IR_MRAF        BIT(17)
+#define MCAN_IR_DRX         BIT(19)
 #define MCAN_IR_MASK        0x3fcfffff
 
 #define MCAN_ILE_EINT0      BIT(0)
@@ -116,6 +122,36 @@ enum {
 #define MCAN_RXF0C_F0S_SHIFT 16
 #define MCAN_RXF0C_F0WM_SHIFT 24
 #define MCAN_RXF0C_F0OM      BIT(31)
+
+#define MCAN_RXF1C_F1SA_MASK  0x0000fffc
+#define MCAN_RXF1C_F1S_SHIFT  16
+#define MCAN_RXF1C_F1WM_SHIFT 24
+#define MCAN_RXF1C_F1OM       BIT(31)
+
+#define MCAN_SIDFC_FLSSA_MASK 0x0000fffc
+#define MCAN_SIDFC_LSS_SHIFT  16
+#define MCAN_XIDFC_FLESA_MASK 0x0000fffc
+#define MCAN_XIDFC_LSE_SHIFT  16
+#define MCAN_RXBC_RBSA_MASK   0x0000fffc
+
+#define MCAN_FILTER_ACTION_DISABLE       0
+#define MCAN_FILTER_ACTION_FIFO0         1
+#define MCAN_FILTER_ACTION_FIFO1         2
+#define MCAN_FILTER_ACTION_REJECT        3
+#define MCAN_FILTER_ACTION_PRIORITY      4
+#define MCAN_FILTER_ACTION_PRIORITY_FIFO0 5
+#define MCAN_FILTER_ACTION_PRIORITY_FIFO1 6
+#define MCAN_FILTER_ACTION_RX_BUFFER     7
+
+#define MCAN_FILTER_ID_MASK       0x1fffffff
+#define MCAN_STD_FILTER_ID_MASK   0x7ff
+#define MCAN_STD_FILTER_ID1_SHIFT 16
+#define MCAN_STD_FILTER_ACTION_SHIFT 27
+#define MCAN_STD_FILTER_TYPE_SHIFT 30
+#define MCAN_EXT_FILTER_ACTION_SHIFT 29
+#define MCAN_EXT_FILTER_TYPE_SHIFT 30
+
+#define MCAN_RX_FILTER_INDEX_SHIFT 24
 
 #define MCAN_TXBC_TBSA_MASK  0x0000fffc
 #define MCAN_TXBC_NDTB_SHIFT 16
@@ -144,11 +180,32 @@ static const uint8_t mcan_data_size[8] = {
     8, 12, 16, 20, 24, 32, 48, 64,
 };
 
+typedef enum MCanRxStoreResult {
+    MCAN_RX_STORE_OK,
+    MCAN_RX_STORE_LOST,
+    MCAN_RX_STORE_ERROR,
+} MCanRxStoreResult;
+
+typedef struct MCanFilterResult {
+    unsigned action;
+    unsigned filter_index;
+    unsigned buffer_index;
+    bool extended;
+    bool matched;
+    bool error;
+} MCanFilterResult;
+
 static void bosch_m_can_process_tx(BoschMCanState *s);
 
 static unsigned mcan_rxf0_size(BoschMCanState *s)
 {
     return MIN(extract32(MCAN_REG(s, MCAN_RXF0C), MCAN_RXF0C_F0S_SHIFT, 7),
+               64U);
+}
+
+static unsigned mcan_rxf1_size(BoschMCanState *s)
+{
+    return MIN(extract32(MCAN_REG(s, MCAN_RXF1C), MCAN_RXF1C_F1S_SHIFT, 7),
                64U);
 }
 
@@ -271,17 +328,20 @@ static uint16_t bosch_m_can_capture_timestamp(BoschMCanState *s)
     return timestamp;
 }
 
-static uint32_t bosch_m_can_rxf0_status(BoschMCanState *s)
+static uint32_t bosch_m_can_rxf_status(BoschMCanState *s, unsigned fifo)
 {
-    unsigned size = mcan_rxf0_size(s);
-    uint32_t value = s->rxf0_fill |
-                     ((uint32_t)s->rxf0_get << 8) |
-                     ((uint32_t)s->rxf0_put << 16);
+    unsigned size = fifo ? mcan_rxf1_size(s) : mcan_rxf0_size(s);
+    unsigned fill = fifo ? s->rxf1_fill : s->rxf0_fill;
+    unsigned get = fifo ? s->rxf1_get : s->rxf0_get;
+    unsigned put = fifo ? s->rxf1_put : s->rxf0_put;
+    uint32_t lost_ir = fifo ? MCAN_IR_RF1L : MCAN_IR_RF0L;
+    uint32_t value = fill | ((uint32_t)get << 8) |
+                     ((uint32_t)put << 16);
 
-    if (size && s->rxf0_fill == size) {
+    if (size && fill == size) {
         value |= BIT(24);
     }
-    if (MCAN_REG(s, MCAN_IR) & MCAN_IR_RF0L) {
+    if (MCAN_REG(s, MCAN_IR) & lost_ir) {
         value |= BIT(25);
     }
     return value;
@@ -345,16 +405,18 @@ static unsigned bosch_m_can_ack_count(unsigned get, unsigned ack,
     return count <= fill ? count : 0;
 }
 
-static void bosch_m_can_ack_rxf0(BoschMCanState *s, uint32_t value)
+static void bosch_m_can_ack_rxf(BoschMCanState *s, unsigned fifo,
+                                uint32_t value)
 {
-    unsigned size = mcan_rxf0_size(s);
+    unsigned size = fifo ? mcan_rxf1_size(s) : mcan_rxf0_size(s);
+    uint8_t *get = fifo ? &s->rxf1_get : &s->rxf0_get;
+    uint8_t *fill = fifo ? &s->rxf1_fill : &s->rxf0_fill;
     unsigned ack = value & 0x3f;
-    unsigned count = bosch_m_can_ack_count(s->rxf0_get, ack, size,
-                                           s->rxf0_fill);
+    unsigned count = bosch_m_can_ack_count(*get, ack, size, *fill);
 
     if (count) {
-        s->rxf0_fill -= count;
-        s->rxf0_get = (ack + 1) % size;
+        *fill -= count;
+        *get = (ack + 1) % size;
     }
 }
 
@@ -371,34 +433,20 @@ static void bosch_m_can_ack_txe(BoschMCanState *s, uint32_t value)
     }
 }
 
-static bool bosch_m_can_store_rxf0(BoschMCanState *s,
-                                   const qemu_can_frame *frame,
-                                   uint16_t timestamp)
+static bool bosch_m_can_store_rx_element(BoschMCanState *s, hwaddr address,
+                                         unsigned data_size,
+                                         const qemu_can_frame *frame,
+                                         uint16_t timestamp,
+                                         unsigned filter_index,
+                                         bool nonmatching)
 {
-    unsigned size = mcan_rxf0_size(s);
-    unsigned data_size = mcan_data_size[MCAN_REG(s, MCAN_RXESC) & 7];
     unsigned length = frame->can_dlc;
-    unsigned padded_length;
-    hwaddr address;
+    unsigned padded_length = 0;
+    unsigned write_length;
     uint32_t word0 = 0;
     uint32_t word1;
-    uint8_t data[64] = { 0 };
+    uint8_t element[8 + 64] = { 0 };
 
-    if (!size) {
-        bosch_m_can_raise_ir(s, MCAN_IR_RF0L);
-        return false;
-    }
-    if (s->rxf0_fill == size) {
-        if (!(MCAN_REG(s, MCAN_RXF0C) & MCAN_RXF0C_F0OM)) {
-            bosch_m_can_raise_ir(s, MCAN_IR_RF0L);
-            return false;
-        }
-        s->rxf0_get = (s->rxf0_get + 1) % size;
-        s->rxf0_fill--;
-    }
-
-    address = (MCAN_REG(s, MCAN_RXF0C) & MCAN_RXF0C_F0SA_MASK) +
-              s->rxf0_put * (8 + data_size);
     if (!bosch_m_can_mram_range(s, address, 8 + data_size)) {
         bosch_m_can_raise_ir(s, MCAN_IR_MRAF);
         return false;
@@ -416,48 +464,304 @@ static bool bosch_m_can_store_rxf0(BoschMCanState *s,
         word0 |= MCAN_ELEMENT_ESI;
     }
 
-    word1 = MCAN_RX_ELEMENT_ANMF |
-            ((uint32_t)can_len2dlc(length) << MCAN_ELEMENT_DLC_SHIFT) |
+    word1 = ((uint32_t)can_len2dlc(length) << MCAN_ELEMENT_DLC_SHIFT) |
             timestamp;
+    if (nonmatching) {
+        word1 |= MCAN_RX_ELEMENT_ANMF;
+    } else {
+        word1 |= (filter_index & 0x7f) << MCAN_RX_FILTER_INDEX_SHIFT;
+    }
     if (frame->flags & QEMU_CAN_FRMF_TYPE_FD) {
         word1 |= MCAN_ELEMENT_FDF;
     }
     if (frame->flags & QEMU_CAN_FRMF_BRS) {
         word1 |= MCAN_ELEMENT_BRS;
     }
-    if (!bosch_m_can_mram_write32(s, address, word0) ||
-        !bosch_m_can_mram_write32(s, address + 4, word1)) {
-        return false;
-    }
-
+    stl_le_p(element, word0);
+    stl_le_p(element + 4, word1);
     if (!(frame->can_id & QEMU_CAN_RTR_FLAG)) {
         padded_length = ROUND_UP(MIN(length, data_size), 4);
-        memcpy(data, frame->data, MIN(length, data_size));
-        if (padded_length &&
-            !bosch_m_can_mram_write(s, address + 8, data, padded_length)) {
-            return false;
-        }
+        memcpy(element + 8, frame->data, MIN(length, data_size));
+    }
+    write_length = 8 + padded_length;
+    return bosch_m_can_mram_write(s, address, element, write_length);
+}
+
+static MCanRxStoreResult bosch_m_can_store_rxf(BoschMCanState *s,
+                                                unsigned fifo,
+                                                const qemu_can_frame *frame,
+                                                uint16_t timestamp,
+                                                unsigned filter_index,
+                                                bool nonmatching,
+                                                unsigned *stored_index)
+{
+    hwaddr config_offset = fifo ? MCAN_RXF1C : MCAN_RXF0C;
+    uint32_t config = MCAN_REG(s, config_offset);
+    uint32_t start_mask = fifo ? MCAN_RXF1C_F1SA_MASK :
+                                 MCAN_RXF0C_F0SA_MASK;
+    uint32_t overwrite = fifo ? MCAN_RXF1C_F1OM : MCAN_RXF0C_F0OM;
+    unsigned wm_shift = fifo ? MCAN_RXF1C_F1WM_SHIFT :
+                               MCAN_RXF0C_F0WM_SHIFT;
+    unsigned size = fifo ? mcan_rxf1_size(s) : mcan_rxf0_size(s);
+    unsigned data_size = mcan_data_size[extract32(MCAN_REG(s, MCAN_RXESC),
+                                                  fifo ? 4 : 0, 3)];
+    uint8_t *get = fifo ? &s->rxf1_get : &s->rxf0_get;
+    uint8_t *put = fifo ? &s->rxf1_put : &s->rxf0_put;
+    uint8_t *fill = fifo ? &s->rxf1_fill : &s->rxf0_fill;
+    uint32_t new_ir = fifo ? MCAN_IR_RF1N : MCAN_IR_RF0N;
+    uint32_t watermark_ir = fifo ? MCAN_IR_RF1W : MCAN_IR_RF0W;
+    uint32_t full_ir = fifo ? MCAN_IR_RF1F : MCAN_IR_RF0F;
+    uint32_t lost_ir = fifo ? MCAN_IR_RF1L : MCAN_IR_RF0L;
+    unsigned watermark = extract32(config, wm_shift, 7);
+    unsigned old_fill = *fill;
+    bool full = size && old_fill == size;
+    hwaddr address;
+
+    if (!size || (full && !(config & overwrite))) {
+        bosch_m_can_raise_ir(s, lost_ir);
+        return MCAN_RX_STORE_LOST;
     }
 
-    s->rxf0_put = (s->rxf0_put + 1) % size;
-    s->rxf0_fill++;
-    bosch_m_can_raise_ir(s, MCAN_IR_RF0N);
-    if (extract32(MCAN_REG(s, MCAN_RXF0C), MCAN_RXF0C_F0WM_SHIFT, 7) &&
-        s->rxf0_fill >= extract32(MCAN_REG(s, MCAN_RXF0C),
-                                  MCAN_RXF0C_F0WM_SHIFT, 7)) {
-        bosch_m_can_raise_ir(s, MCAN_IR_RF0W);
+    address = (config & start_mask) + *put * (8 + data_size);
+    if (!bosch_m_can_store_rx_element(s, address, data_size, frame,
+                                      timestamp, filter_index,
+                                      nonmatching)) {
+        return MCAN_RX_STORE_ERROR;
     }
-    if (s->rxf0_fill == size) {
-        bosch_m_can_raise_ir(s, MCAN_IR_RF0F);
+
+    *stored_index = *put;
+    *put = (*put + 1) % size;
+    if (full) {
+        *get = (*get + 1) % size;
+    } else {
+        (*fill)++;
     }
-    return true;
+
+    bosch_m_can_raise_ir(s, new_ir);
+    if (watermark && watermark <= 64 && old_fill < watermark &&
+        *fill >= watermark) {
+        bosch_m_can_raise_ir(s, watermark_ir);
+    }
+    if (!full && *fill == size) {
+        bosch_m_can_raise_ir(s, full_ir);
+    }
+    return MCAN_RX_STORE_OK;
+}
+
+static bool bosch_m_can_rx_buffer_new_data(BoschMCanState *s,
+                                            unsigned index)
+{
+    hwaddr offset = index < 32 ? MCAN_NDAT1 : MCAN_NDAT2;
+
+    return MCAN_REG(s, offset) & BIT(index & 31);
+}
+
+static MCanRxStoreResult bosch_m_can_store_rx_buffer(
+    BoschMCanState *s, unsigned index, const qemu_can_frame *frame,
+    uint16_t timestamp, unsigned filter_index)
+{
+    unsigned data_size = mcan_data_size[extract32(MCAN_REG(s, MCAN_RXESC),
+                                                  8, 3)];
+    hwaddr address = (MCAN_REG(s, MCAN_RXBC) & MCAN_RXBC_RBSA_MASK) +
+                     index * (8 + data_size);
+    hwaddr ndat_offset = index < 32 ? MCAN_NDAT1 : MCAN_NDAT2;
+
+    if (bosch_m_can_rx_buffer_new_data(s, index)) {
+        return MCAN_RX_STORE_LOST;
+    }
+    if (!bosch_m_can_store_rx_element(s, address, data_size, frame,
+                                      timestamp, filter_index, false)) {
+        return MCAN_RX_STORE_ERROR;
+    }
+
+    MCAN_REG(s, ndat_offset) |= BIT(index & 31);
+    bosch_m_can_raise_ir(s, MCAN_IR_DRX);
+    return MCAN_RX_STORE_OK;
+}
+
+static bool bosch_m_can_standard_filter_matches(uint32_t filter,
+                                                unsigned id,
+                                                unsigned action)
+{
+    unsigned id1 = extract32(filter, MCAN_STD_FILTER_ID1_SHIFT, 11);
+    unsigned id2 = filter & MCAN_STD_FILTER_ID_MASK;
+
+    if (action == MCAN_FILTER_ACTION_RX_BUFFER) {
+        return id == id1;
+    }
+
+    switch (extract32(filter, MCAN_STD_FILTER_TYPE_SHIFT, 2)) {
+    case 0: /* Range. */
+        return id >= id1 && id <= id2;
+    case 1: /* Dual ID. */
+        return id == id1 || id == id2;
+    case 2: /* Classic mask. */
+        return (id & id2) == (id1 & id2);
+    default: /* SFT == 3 disables the element. */
+        return false;
+    }
+}
+
+static bool bosch_m_can_extended_filter_matches(BoschMCanState *s,
+                                                uint32_t word0,
+                                                uint32_t word1,
+                                                unsigned id,
+                                                unsigned action)
+{
+    unsigned id1 = word0 & MCAN_FILTER_ID_MASK;
+    unsigned id2 = word1 & MCAN_FILTER_ID_MASK;
+    unsigned type = extract32(word1, MCAN_EXT_FILTER_TYPE_SHIFT, 2);
+    unsigned filtered_id = type == 3 ? id : id & MCAN_REG(s, MCAN_XIDAM);
+
+    if (action == MCAN_FILTER_ACTION_RX_BUFFER) {
+        return (id & MCAN_REG(s, MCAN_XIDAM)) == id1;
+    }
+
+    switch (type) {
+    case 0: /* Range, with XIDAM applied to the received identifier. */
+    case 3: /* Range, without XIDAM. */
+        return filtered_id >= id1 && filtered_id <= id2;
+    case 1: /* Dual ID. */
+        return filtered_id == id1 || filtered_id == id2;
+    case 2: /* Classic mask. */
+        return (filtered_id & id2) == (id1 & id2);
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static MCanFilterResult bosch_m_can_filter_standard(BoschMCanState *s,
+                                                     unsigned id)
+{
+    MCanFilterResult result = { 0 };
+    uint32_t config = MCAN_REG(s, MCAN_SIDFC);
+    unsigned count = MIN(extract32(config, MCAN_SIDFC_LSS_SHIFT, 8),
+                         128U);
+    hwaddr address = config & MCAN_SIDFC_FLSSA_MASK;
+    unsigned i;
+
+    for (i = 0; i < count; i++, address += sizeof(uint32_t)) {
+        uint32_t filter;
+        unsigned action;
+
+        if (!bosch_m_can_mram_read32(s, address, &filter)) {
+            result.error = true;
+            return result;
+        }
+        action = extract32(filter, MCAN_STD_FILTER_ACTION_SHIFT, 3);
+        if (action == MCAN_FILTER_ACTION_DISABLE ||
+            !bosch_m_can_standard_filter_matches(filter, id, action)) {
+            continue;
+        }
+
+        if (action == MCAN_FILTER_ACTION_RX_BUFFER) {
+            unsigned selector = extract32(filter, 9, 2);
+            unsigned buffer_index = filter & 0x3f;
+
+            /* Debug-message sequencing and its DMA handshake are separate. */
+            if (selector) {
+                result.action = MCAN_FILTER_ACTION_REJECT;
+            } else if (bosch_m_can_rx_buffer_new_data(s, buffer_index)) {
+                continue;
+            } else {
+                result.action = action;
+                result.buffer_index = buffer_index;
+            }
+        } else {
+            result.action = action;
+        }
+        result.filter_index = i;
+        result.matched = true;
+        return result;
+    }
+    return result;
+}
+
+static MCanFilterResult bosch_m_can_filter_extended(BoschMCanState *s,
+                                                     unsigned id)
+{
+    MCanFilterResult result = { .extended = true };
+    uint32_t config = MCAN_REG(s, MCAN_XIDFC);
+    unsigned count = MIN(extract32(config, MCAN_XIDFC_LSE_SHIFT, 7),
+                         64U);
+    hwaddr address = config & MCAN_XIDFC_FLESA_MASK;
+    unsigned i;
+
+    for (i = 0; i < count; i++, address += 2 * sizeof(uint32_t)) {
+        uint8_t bytes[2 * sizeof(uint32_t)];
+        uint32_t word0;
+        uint32_t word1;
+        unsigned action;
+
+        if (!bosch_m_can_mram_read(s, address, bytes, sizeof(bytes))) {
+            result.error = true;
+            return result;
+        }
+        word0 = ldl_le_p(bytes);
+        word1 = ldl_le_p(bytes + sizeof(uint32_t));
+        action = extract32(word0, MCAN_EXT_FILTER_ACTION_SHIFT, 3);
+        if (action == MCAN_FILTER_ACTION_DISABLE ||
+            !bosch_m_can_extended_filter_matches(s, word0, word1, id,
+                                                 action)) {
+            continue;
+        }
+
+        if (action == MCAN_FILTER_ACTION_RX_BUFFER) {
+            unsigned selector = extract32(word1, 9, 2);
+            unsigned buffer_index = word1 & 0x3f;
+
+            /* Debug-message sequencing and its DMA handshake are separate. */
+            if (selector) {
+                result.action = MCAN_FILTER_ACTION_REJECT;
+            } else if (bosch_m_can_rx_buffer_new_data(s, buffer_index)) {
+                continue;
+            } else {
+                result.action = action;
+                result.buffer_index = buffer_index;
+            }
+        } else {
+            result.action = action;
+        }
+        result.filter_index = i;
+        result.matched = true;
+        return result;
+    }
+    return result;
+}
+
+static void bosch_m_can_update_priority_status(BoschMCanState *s,
+                                               MCanFilterResult filter,
+                                               MCanRxStoreResult stored,
+                                               unsigned buffer_index)
+{
+    unsigned msi = 0;
+
+    if (filter.action == MCAN_FILTER_ACTION_PRIORITY_FIFO0 ||
+        filter.action == MCAN_FILTER_ACTION_PRIORITY_FIFO1) {
+        if (stored == MCAN_RX_STORE_OK) {
+            msi = filter.action == MCAN_FILTER_ACTION_PRIORITY_FIFO0 ? 2 : 3;
+        } else {
+            msi = 1;
+            buffer_index = 0;
+        }
+    } else {
+        buffer_index = 0;
+    }
+
+    MCAN_REG(s, MCAN_HPMS) = (filter.extended ? BIT(15) : 0) |
+                             ((filter.filter_index & 0x7f) << 8) |
+                             (msi << 6) | (buffer_index & 0x3f);
+    bosch_m_can_raise_ir(s, MCAN_IR_HPM);
 }
 
 static bool bosch_m_can_receive_frame(BoschMCanState *s,
                                       const qemu_can_frame *frame,
                                       uint16_t timestamp)
 {
+    MCanFilterResult filter;
+    MCanRxStoreResult stored = MCAN_RX_STORE_OK;
     uint32_t gfc = MCAN_REG(s, MCAN_GFC);
+    unsigned buffer_index = 0;
     unsigned action;
 
     if (!bosch_m_can_active(s) || (frame->can_id & QEMU_CAN_ERR_FLAG)) {
@@ -480,13 +784,59 @@ static bool bosch_m_can_receive_frame(BoschMCanState *s,
         }
     }
 
-    /* Only the no-filter/global FIFO0 path used by the SAM9X7 DTS is here. */
-    action = frame->can_id & QEMU_CAN_EFF_FLAG ?
-             extract32(gfc, 2, 2) : extract32(gfc, 4, 2);
-    if (action != 0) {
+    if (frame->can_id & QEMU_CAN_EFF_FLAG) {
+        filter = bosch_m_can_filter_extended(s,
+                                              frame->can_id &
+                                              QEMU_CAN_EFF_MASK);
+    } else {
+        filter = bosch_m_can_filter_standard(s,
+                                              frame->can_id &
+                                              QEMU_CAN_SFF_MASK);
+    }
+    if (filter.error) {
         return true;
     }
-    bosch_m_can_store_rxf0(s, frame, timestamp);
+
+    if (!filter.matched) {
+        action = frame->can_id & QEMU_CAN_EFF_FLAG ?
+                 extract32(gfc, 2, 2) : extract32(gfc, 4, 2);
+        if (action < 2) {
+            bosch_m_can_store_rxf(s, action, frame, timestamp, 0, true,
+                                  &buffer_index);
+        }
+        return true;
+    }
+
+    action = filter.action;
+    switch (action) {
+    case MCAN_FILTER_ACTION_FIFO0:
+    case MCAN_FILTER_ACTION_PRIORITY_FIFO0:
+        stored = bosch_m_can_store_rxf(s, 0, frame, timestamp,
+                                       filter.filter_index, false,
+                                       &buffer_index);
+        break;
+    case MCAN_FILTER_ACTION_FIFO1:
+    case MCAN_FILTER_ACTION_PRIORITY_FIFO1:
+        stored = bosch_m_can_store_rxf(s, 1, frame, timestamp,
+                                       filter.filter_index, false,
+                                       &buffer_index);
+        break;
+    case MCAN_FILTER_ACTION_RX_BUFFER:
+        bosch_m_can_store_rx_buffer(s, filter.buffer_index, frame,
+                                    timestamp, filter.filter_index);
+        break;
+    case MCAN_FILTER_ACTION_REJECT:
+    case MCAN_FILTER_ACTION_PRIORITY:
+        break;
+    default:
+        g_assert_not_reached();
+    }
+
+    if (action >= MCAN_FILTER_ACTION_PRIORITY &&
+        action <= MCAN_FILTER_ACTION_PRIORITY_FIFO1) {
+        bosch_m_can_update_priority_status(s, filter, stored,
+                                           buffer_index);
+    }
     return true;
 }
 
@@ -787,6 +1137,21 @@ static void bosch_m_can_write_cccr(BoschMCanState *s, uint32_t value)
     if (!(next & MCAN_CCCR_TEST)) {
         MCAN_REG(s, MCAN_TEST) = 0;
     }
+    if (next & MCAN_CCCR_CCE) {
+        /*
+         * M_CAN initialization resets handler state, but not the latched
+         * interrupt register or Message RAM contents.
+         */
+        MCAN_REG(s, MCAN_HPMS) = 0;
+        s->rxf0_get = s->rxf0_put = s->rxf0_fill = 0;
+        s->rxf1_get = s->rxf1_put = s->rxf1_fill = 0;
+        MCAN_REG(s, MCAN_TXBRP) = 0;
+        MCAN_REG(s, MCAN_TXBTO) = 0;
+        MCAN_REG(s, MCAN_TXBCF) = 0;
+        s->tx_fifo_get = s->tx_fifo_put = mcan_tx_ndtb(s);
+        s->txe_get = s->txe_put = s->txe_fill = 0;
+        MCAN_REG(s, MCAN_TOCV) = MCAN_REG(s, MCAN_TOCC) >> 16;
+    }
     MCAN_REG(s, MCAN_CCCR) = next;
     bosch_m_can_process_tx(s);
 }
@@ -807,7 +1172,9 @@ static uint64_t bosch_m_can_read(void *opaque, hwaddr offset,
     case MCAN_TSCV:
         return s->timestamp_counter;
     case MCAN_RXF0S:
-        return bosch_m_can_rxf0_status(s);
+        return bosch_m_can_rxf_status(s, 0);
+    case MCAN_RXF1S:
+        return bosch_m_can_rxf_status(s, 1);
     case MCAN_TXFQS:
         return bosch_m_can_txfqs(s);
     case MCAN_TXEFS:
@@ -828,6 +1195,9 @@ static void bosch_m_can_write_protected(BoschMCanState *s, hwaddr offset,
     switch (offset) {
     case MCAN_RXF0C:
         s->rxf0_get = s->rxf0_put = s->rxf0_fill = 0;
+        break;
+    case MCAN_RXF1C:
+        s->rxf1_get = s->rxf1_put = s->rxf1_fill = 0;
         break;
     case MCAN_TXBC:
         MCAN_REG(s, MCAN_TXBRP) = 0;
@@ -891,15 +1261,20 @@ static void bosch_m_can_write(void *opaque, hwaddr offset, uint64_t value,
         MCAN_REG(s, offset) &= ~v;
         break;
     case MCAN_RXF0A:
-        bosch_m_can_ack_rxf0(s, v);
+        bosch_m_can_ack_rxf(s, 0, v);
         break;
     case MCAN_RXF1A:
-        break; /* FIFO1 is not in this first slice. */
+        bosch_m_can_ack_rxf(s, 1, v);
+        break;
     case MCAN_TXBAR:
-        bosch_m_can_tx_add(s, v);
+        if (!(MCAN_REG(s, MCAN_CCCR) & MCAN_CCCR_CCE)) {
+            bosch_m_can_tx_add(s, v);
+        }
         break;
     case MCAN_TXBCR:
-        bosch_m_can_tx_cancel(s, v);
+        if (!(MCAN_REG(s, MCAN_CCCR) & MCAN_CCCR_CCE)) {
+            bosch_m_can_tx_cancel(s, v);
+        }
         break;
     case MCAN_TXBTIE: case MCAN_TXBCIE:
         MCAN_REG(s, offset) = v;
@@ -964,6 +1339,7 @@ static void bosch_m_can_reset(DeviceState *dev)
     MCAN_REG(s, MCAN_TSU_TSS2) = s->sam_tss2_reset;
 
     s->rxf0_get = s->rxf0_put = s->rxf0_fill = 0;
+    s->rxf1_get = s->rxf1_put = s->rxf1_fill = 0;
     s->tx_fifo_get = s->tx_fifo_put = 0;
     s->txe_get = s->txe_put = s->txe_fill = 0;
     s->timestamp_counter = 0;
@@ -1065,6 +1441,14 @@ static int bosch_m_can_post_load(void *opaque, int version_id)
     } else {
         s->rxf0_get = s->rxf0_put = s->rxf0_fill = 0;
     }
+    size = mcan_rxf1_size(s);
+    if (size) {
+        s->rxf1_get %= size;
+        s->rxf1_put %= size;
+        s->rxf1_fill = MIN(s->rxf1_fill, size);
+    } else {
+        s->rxf1_get = s->rxf1_put = s->rxf1_fill = 0;
+    }
     size = mcan_txe_size(s);
     if (size) {
         s->txe_get %= size;
@@ -1092,7 +1476,7 @@ static int bosch_m_can_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_bosch_m_can = {
     .name = TYPE_BOSCH_M_CAN,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = bosch_m_can_post_load,
     .fields = (const VMStateField[]) {
@@ -1100,6 +1484,9 @@ static const VMStateDescription vmstate_bosch_m_can = {
         VMSTATE_UINT8(rxf0_get, BoschMCanState),
         VMSTATE_UINT8(rxf0_put, BoschMCanState),
         VMSTATE_UINT8(rxf0_fill, BoschMCanState),
+        VMSTATE_UINT8_V(rxf1_get, BoschMCanState, 2),
+        VMSTATE_UINT8_V(rxf1_put, BoschMCanState, 2),
+        VMSTATE_UINT8_V(rxf1_fill, BoschMCanState, 2),
         VMSTATE_UINT8(tx_fifo_get, BoschMCanState),
         VMSTATE_UINT8(tx_fifo_put, BoschMCanState),
         VMSTATE_UINT8(txe_get, BoschMCanState),
