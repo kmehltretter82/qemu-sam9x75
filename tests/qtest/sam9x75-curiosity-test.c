@@ -21,6 +21,7 @@
 #define SAM9X7_ROM_SIZE         0x0002c000
 #define SAM9X7_SRAM0_BASE       0x00300000
 #define SAM9X7_SRAM1_BASE       0x00400000
+#define SAM9X7_UDPHS_FIFO_BASE  0x00500000
 #define SAM9X7_UHPHS_OHCI_BASE  0x00600000
 #define SAM9X7_UHPHS_EHCI_BASE  0x00700000
 #define SAM9X7_DDR_BASE         0x20000000
@@ -62,6 +63,7 @@
 #define SAM9X7_MCAN1_BASE       0xf8004000
 #define SAM9X7_TCB_BASE         0xf8008000
 #define SAM9X7_GMAC_BASE        0xf802c000
+#define SAM9X7_UDPHS_BASE       0xf803c000
 #define SAM9X7_SFR_BASE         0xf8050000
 #define SAM9X7_MATRIX_BASE      0xffffde00
 #define SAM9X7_PMECC_BASE       0xffffe000
@@ -234,11 +236,81 @@
 #define UHPHS_USBSTS_FLR        BIT(3)
 #define UHPHS_USBSTS_HSE        BIT(4)
 #define UHPHS_USBSTS_HCHLT      BIT(12)
+#define UHPHS_PORTSC_CONNECT    BIT(0)
 #define UHPHS_PORTSC_PED        BIT(2)
 #define UHPHS_PORTSC_PRESET     BIT(8)
 #define UHPHS_PORTSC_PPOWER     BIT(12)
 #define UHPHS_PORTSC_POWNER     BIT(13)
 #define UHPHS_INSNREG06_AHB_ERR BIT(31)
+
+#define UDPHS_CTRL              0x000
+#define UDPHS_FNUM              0x004
+#define UDPHS_IEN               0x010
+#define UDPHS_INTSTA            0x014
+#define UDPHS_CLRINT            0x018
+#define UDPHS_EPTRST            0x01c
+#define UDPHS_TST               0x0e0
+#define UDPHS_EPTCFG(n)         (0x100 + (n) * 0x20)
+#define UDPHS_EPTCTLENB(n)      (0x104 + (n) * 0x20)
+#define UDPHS_EPTCTLDIS(n)      (0x108 + (n) * 0x20)
+#define UDPHS_EPTCTL(n)         (0x10c + (n) * 0x20)
+#define UDPHS_EPTSETSTA(n)      (0x114 + (n) * 0x20)
+#define UDPHS_EPTCLRSTA(n)      (0x118 + (n) * 0x20)
+#define UDPHS_EPTSTA(n)         (0x11c + (n) * 0x20)
+#define UDPHS_DMANXTDSC(n)      (0x300 + (n) * 0x10)
+#define UDPHS_DMAADDRESS(n)     (0x304 + (n) * 0x10)
+#define UDPHS_DMACONTROL(n)     (0x308 + (n) * 0x10)
+#define UDPHS_DMASTATUS(n)      (0x30c + (n) * 0x10)
+
+#define UDPHS_CTRL_DEV_ADDR(value) ((value) & 0x7f)
+#define UDPHS_CTRL_FADDR_EN     BIT(7)
+#define UDPHS_CTRL_EN_UDPHS     BIT(8)
+#define UDPHS_CTRL_DETACH       BIT(9)
+#define UDPHS_CTRL_REWAKEUP     BIT(10)
+#define UDPHS_CTRL_PULLD_DIS    BIT(11)
+#define UDPHS_INT_SPEED         BIT(0)
+#define UDPHS_INT_ENDRESET      BIT(4)
+#define UDPHS_INT_EPT(n)        BIT(8 + (n))
+#define UDPHS_INT_DMA(n)        BIT(24 + (n))
+#define UDPHS_EPTCFG_SIZE(value) ((value) & 7)
+#define UDPHS_EPTCFG_DIR_IN     BIT(3)
+#define UDPHS_EPTCFG_TYPE(value) ((value) << 4)
+#define UDPHS_EPTCFG_BANKS(value) ((value) << 6)
+#define UDPHS_EPTCFG_MAPPED     BIT(31)
+#define UDPHS_EPTCTL_ENABLE     BIT(0)
+#define UDPHS_EPTCTL_AUTO_VALID BIT(1)
+#define UDPHS_EPTCTL_DATAX_RX   BIT(6)
+#define UDPHS_EPTCTL_MDATA_RX   BIT(7)
+#define UDPHS_EPTCTL_RXRDY_IE   BIT(9)
+#define UDPHS_EPTCTL_TXCOMPLT_IE BIT(10)
+#define UDPHS_EPTCTL_TXRDY_IE   BIT(11)
+#define UDPHS_EPTCTL_RX_SETUP_IE BIT(12)
+#define UDPHS_EPTCTL_BUSY_IE    BIT(18)
+#define UDPHS_EPTCTL_SHORT_IE   BIT(31)
+#define UDPHS_EPTSTA_RXRDY      BIT(9)
+#define UDPHS_EPTSTA_TXCOMPLT   BIT(10)
+#define UDPHS_EPTSTA_TXRDY      BIT(11)
+#define UDPHS_EPTSTA_RX_SETUP   BIT(12)
+#define UDPHS_EPTSTA_NAK_IN     BIT(14)
+#define UDPHS_EPTSTA_NAK_OUT    BIT(15)
+#define UDPHS_EPTSTA_TOGGLE_MASK (3U << 6)
+#define UDPHS_EPTSTA_BUSY(value) ((value) << 18)
+#define UDPHS_EPTSTA_BYTE_COUNT(value) ((value) << 20)
+#define UDPHS_EPTSTA_SHORT      BIT(31)
+#define UDPHS_EPTSTA_RESET      BIT(6)
+#define UDPHS_DMA_CHANN_ENB     BIT(0)
+#define UDPHS_DMA_LDNXT_DSC     BIT(1)
+#define UDPHS_DMA_END_TR_EN     BIT(2)
+#define UDPHS_DMA_END_BF_EN     BIT(3)
+#define UDPHS_DMA_END_TR_IE     BIT(4)
+#define UDPHS_DMA_END_BF_IE     BIT(5)
+#define UDPHS_DMA_DESC_LD_IE    BIT(6)
+#define UDPHS_DMA_BUFF_LENGTH(value) ((value) << 16)
+#define UDPHS_DMA_CHANN_ACT     BIT(1)
+#define UDPHS_DMA_END_TR_ST     BIT(4)
+#define UDPHS_DMA_END_BF_ST     BIT(5)
+#define UDPHS_DMA_DESC_LD_ST    BIT(6)
+#define UDPHS_DMA_BUFF_COUNT(value) ((value) << 16)
 
 #define MCAN_CREL               0x000
 #define MCAN_ENDN               0x004
@@ -922,6 +994,9 @@
 #define PMC_PLL_CTRL0_MASK      0xf00ff0ff
 #define PMC_PLL_ACR_MASK        0x3f073fff
 #define PMC_PLL_ACR_RESET       0x00020033
+#define PMC_PLL_ACR_UTMIVR      BIT(12)
+#define PMC_PLL_ACR_UTMIBG      BIT(13)
+#define PMC_UPLL_ACR_CONFIG     0x12023010
 #define PMC_PLL_UPDT_UPDATE     BIT(8)
 #define PMC_PLL_UPDT_MASK       0x003f0007
 #define PMC_SC_UHP              BIT(6)
@@ -1154,6 +1229,7 @@
 #define XDMAC_CC_DSYNC_MEM2PER  BIT(4)
 #define XDMAC_CC_SWREQ          BIT(6)
 #define XDMAC_CC_MEMSET         BIT(7)
+#define XDMAC_CC_MBSIZE_SIXTEEN (3U << 1)
 #define XDMAC_CC_DWIDTH_HALFWORD (1U << 11)
 #define XDMAC_CC_DWIDTH_WORD    (2U << 11)
 #define XDMAC_CC_CSIZE_4        (2U << 8)
@@ -1162,6 +1238,8 @@
 #define XDMAC_CC_DAM_INC        (1U << 18)
 #define XDMAC_CC_DAM_UBS        (2U << 18)
 #define XDMAC_CC_INITD          BIT(21)
+#define XDMAC_CC_RDIP           BIT(22)
+#define XDMAC_CC_WRIP           BIT(23)
 #define XDMAC_CC_PERID(id)      ((id) << 24)
 
 #define AES_CR                  0x00
@@ -4851,15 +4929,24 @@ static void pmc_write_pcr(QTestState *qts, unsigned int id, uint32_t config)
                  PMC_PCR_CMD | id | config);
 }
 
-static void pmc_configure_usb_host(QTestState *qts)
+static void pmc_set_upll_acr(QTestState *qts, uint32_t acr)
 {
     const uint32_t selector = 1 | (0x3fU << 16);
 
-    pmc_write_pcr(qts, 22, PMC_PCR_EN);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT, selector);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_ACR, acr);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT,
+                 selector | PMC_PLL_UPDT_UPDATE);
+}
+
+static void pmc_enable_upll(QTestState *qts)
+{
+    const uint32_t selector = 1 | (0x3fU << 16);
 
     /* 24 MHz * (39 + 1), followed by UPLL's fixed /2 = 480 MHz. */
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT, selector);
-    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_ACR, 0x12023010);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_ACR,
+                 PMC_UPLL_ACR_CONFIG);
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_CTRL1, 39U << 24);
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT,
                  selector | PMC_PLL_UPDT_UPDATE);
@@ -4868,6 +4955,12 @@ static void pmc_configure_usb_host(QTestState *qts)
                  PMC_PLL_CTRL0_ENPLLCK);
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT,
                  selector | PMC_PLL_UPDT_UPDATE);
+}
+
+static void pmc_configure_usb_host(QTestState *qts)
+{
+    pmc_write_pcr(qts, 22, PMC_PCR_EN);
+    pmc_enable_upll(qts);
 
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_USB,
                  PMC_USB_USBS_UPLL | PMC_USB_USBDIV(9));
@@ -6871,6 +6964,7 @@ static void test_xdmac_fair_scheduling_and_flush_scope(void)
     const uint64_t ch0 = XDMAC_CHANNEL(0);
     const uint64_t ch1 = XDMAC_CHANNEL(1);
     const uint64_t ch2 = XDMAC_CHANNEL(2);
+    const uint64_t ch3 = XDMAC_CHANNEL(3);
     uint32_t descriptor[5] = { 0 };
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
 
@@ -6962,7 +7056,413 @@ static void test_xdmac_fair_scheduling_and_flush_scope(void)
     g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CIS) &
                   XDMAC_INT_DIS);
 
+    /* Suspend must precede descriptor fetch and zero-CUBC completion. */
+    memset(descriptor, 0, sizeof(descriptor));
+    descriptor[1] = cpu_to_le32(XDMAC_MBR_UBC_NSEN |
+                                XDMAC_MBR_UBC_NDEN |
+                                XDMAC_MBR_UBC_NDV2 | 1);
+    descriptor[2] = cpu_to_le32(finite_src);
+    descriptor[3] = cpu_to_le32(finite_dst);
+    descriptor[4] = cpu_to_le32(XDMAC_CC_PERID(0x7f) |
+                                XDMAC_CC_SAM_INC | XDMAC_CC_DAM_INC |
+                                XDMAC_CC_DWIDTH_WORD);
+    qtest_memwrite(qts, ring_desc, descriptor, sizeof(descriptor));
+    qtest_writel(qts, finite_dst, 0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CNDA, ring_desc);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CNDC,
+                 XDMAC_CNDC_NDE | XDMAC_CNDC_NDSUP |
+                 XDMAC_CNDC_NDDUP | XDMAC_CNDC_NDVIEW2);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GRWS, BIT(2));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(2));
+    qtest_clock_step(qts, 1);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(2));
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + ch2 + XDMAC_CNDA),
+                    ==, ring_desc);
+    g_assert_false(qtest_readl(qts,
+                               SAM9X7_XDMAC_BASE + ch2 + XDMAC_CC) &
+                   XDMAC_CC_INITD);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GRWR, BIT(2));
+    xdmac_waitl(qts, XDMAC_GS, BIT(2), 0);
+    g_assert_cmphex(qtest_readl(qts, finite_dst), ==, 0xa1b2c3d4);
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch3 + XDMAC_CNDC, 0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch3 + XDMAC_CUBC, 0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch3 + XDMAC_CC,
+                 XDMAC_CC_PERID(0x7f));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GRWS, BIT(3));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(3));
+    qtest_clock_step(qts, 1);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(3));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GRWR, BIT(3));
+    xdmac_waitl(qts, XDMAC_GS, BIT(3), 0);
+    g_assert_true(qtest_readl(qts,
+                              SAM9X7_XDMAC_BASE + ch3 + XDMAC_CIS) &
+                  XDMAC_INT_BIS);
+
     qtest_quit(qts);
+}
+
+static void test_xdmac_p2m_fifo_suspend_flush_and_disable(void)
+{
+    static const uint8_t payload[] = {
+        0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+    };
+    const uint32_t source = SAM9X7_DDR_BASE + 0x11e00;
+    const uint32_t flush_target = SAM9X7_DDR_BASE + 0x11f00;
+    const uint32_t disable_target = SAM9X7_DDR_BASE + 0x12000;
+    const uint32_t word_target = SAM9X7_DDR_BASE + 0x12300;
+    const unsigned int index = 3;
+    const uint32_t channel_mask = BIT(index);
+    const uint64_t channel = XDMAC_CHANNEL(index);
+    const uint32_t config = XDMAC_CC_TYPE_PER |
+                            XDMAC_CC_MBSIZE_SIXTEEN |
+                            XDMAC_CC_SWREQ | XDMAC_CC_SAM_INC |
+                            XDMAC_CC_DAM_INC;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint8_t result[sizeof(payload)];
+    uint32_t value;
+    unsigned int i;
+
+    ebi_enable_ddr(qts);
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    qtest_memwrite(qts, source, payload, sizeof(payload));
+    qtest_memset(qts, flush_target, 0, sizeof(payload));
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CSA, source);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CDA,
+                 flush_target);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC,
+                 sizeof(payload));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC, config);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GWS, channel_mask);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, channel_mask);
+
+    /* GWS stops RAM writes but leaves source requests serviceable. */
+    for (i = 0; i < 3; i++) {
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+        xdmac_waitl(qts, XDMAC_GSWS, channel_mask, 0);
+    }
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                  channel_mask);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source + 3);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, sizeof(payload));
+    memset(result, 0xa5, sizeof(result));
+    qtest_memread(qts, flush_target, result, sizeof(result));
+    for (i = 0; i < sizeof(result); i++) {
+        g_assert_cmphex(result[i], ==, 0);
+    }
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GRS, channel_mask);
+    value = qtest_readl(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC);
+    g_assert_cmphex(value & (XDMAC_CC_RDIP | XDMAC_CC_WRIP), ==, 0);
+
+    /* A flush drains its FIFO snapshot even while GWS remains asserted. */
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWF, channel_mask);
+    value = xdmac_waitl(qts, channel + XDMAC_CIS,
+                        XDMAC_INT_FIS, XDMAC_INT_FIS);
+    g_assert_true(value & XDMAC_INT_FIS);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GRS) &
+                  channel_mask);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GWS) &
+                  channel_mask);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, sizeof(payload) - 3);
+    qtest_memread(qts, flush_target, result, sizeof(result));
+    g_assert_cmpmem(result, 3, payload, 3);
+    for (i = 3; i < sizeof(result); i++) {
+        g_assert_cmphex(result[i], ==, 0);
+    }
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GRWR, channel_mask);
+    for (i = 3; i < sizeof(payload); i++) {
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+        xdmac_waitl(qts, XDMAC_GSWS, channel_mask, 0);
+    }
+    xdmac_waitl(qts, XDMAC_GS, channel_mask, 0);
+    qtest_memread(qts, flush_target, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), payload, sizeof(payload));
+    value = qtest_readl(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_true(value & XDMAC_INT_BIS);
+    g_assert_false(value & XDMAC_INT_FIS);
+    value = qtest_readl(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC);
+    g_assert_cmphex(value & (XDMAC_CC_RDIP | XDMAC_CC_WRIP), ==, 0);
+
+    /* GD also overrides GWS, but completes with DIS instead of BIS. */
+    qtest_memset(qts, disable_target, 0, sizeof(payload));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CSA, source);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CDA,
+                 disable_target);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC,
+                 sizeof(payload));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC, config);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GWS, channel_mask);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, channel_mask);
+    for (i = 0; i < 3; i++) {
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+        xdmac_waitl(qts, XDMAC_GSWS, channel_mask, 0);
+    }
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, channel_mask);
+    xdmac_waitl(qts, XDMAC_GS, channel_mask, 0);
+    g_assert_false(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GWS) &
+                   channel_mask);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, sizeof(payload) - 3);
+    qtest_memread(qts, disable_target, result, sizeof(result));
+    g_assert_cmpmem(result, 3, payload, 3);
+    for (i = 3; i < sizeof(result); i++) {
+        g_assert_cmphex(result[i], ==, 0);
+    }
+    value = qtest_readl(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_true(value & XDMAC_INT_DIS);
+    g_assert_false(value & (XDMAC_INT_BIS | XDMAC_INT_FIS));
+    value = qtest_readl(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC);
+    g_assert_cmphex(value & (XDMAC_CC_RDIP | XDMAC_CC_WRIP), ==, 0);
+
+    /* A failed GD drain reports WBEIS and DIS instead of wedging GS. */
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CSA, source);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CDA,
+                 0xdeadbee0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC,
+                 sizeof(payload));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC, config);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GWS, channel_mask);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, channel_mask);
+    for (i = 0; i < 3; i++) {
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+        xdmac_waitl(qts, XDMAC_GSWS, channel_mask, 0);
+    }
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, channel_mask);
+    xdmac_waitl(qts, XDMAC_GS, channel_mask, 0);
+    value = qtest_readl(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_cmphex(value & (XDMAC_INT_WBEIS | XDMAC_INT_DIS), ==,
+                    XDMAC_INT_WBEIS | XDMAC_INT_DIS);
+    g_assert_false(value & (XDMAC_INT_BIS | XDMAC_INT_FIS));
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, sizeof(payload));
+
+    /* FIFO occupancy is byte-based while CUBC remains transfer-based. */
+    qtest_memset(qts, word_target, 0, sizeof(payload));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CSA, source);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CDA,
+                 word_target);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC,
+                 sizeof(payload) / sizeof(uint32_t));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC,
+                 config | XDMAC_CC_DWIDTH_WORD);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GWS, channel_mask);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, channel_mask);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+    xdmac_waitl(qts, XDMAC_GSWS, channel_mask, 0);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source + sizeof(uint32_t));
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, sizeof(payload) / sizeof(uint32_t));
+    qtest_memread(qts, word_target, result, sizeof(result));
+    for (i = 0; i < sizeof(result); i++) {
+        g_assert_cmphex(result[i], ==, 0);
+    }
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWF, channel_mask);
+    xdmac_waitl(qts, channel + XDMAC_CIS,
+                XDMAC_INT_FIS, XDMAC_INT_FIS);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 1);
+    qtest_memread(qts, word_target, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(uint32_t), payload, sizeof(uint32_t));
+    for (i = sizeof(uint32_t); i < sizeof(result); i++) {
+        g_assert_cmphex(result[i], ==, 0);
+    }
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, channel_mask);
+    xdmac_waitl(qts, XDMAC_GS, channel_mask, 0);
+    g_assert_true(qtest_readl(qts,
+                              SAM9X7_XDMAC_BASE + channel + XDMAC_CIS) &
+                  XDMAC_INT_DIS);
+
+    qtest_quit(qts);
+}
+
+static void test_xdmac_p2m_flush_nonblocking_disable_order(void)
+{
+    const uint32_t source = SAM9X7_DDR_BASE + 0x12400;
+    const unsigned int index = 5;
+    const uint32_t channel_mask = BIT(index);
+    const uint64_t channel = XDMAC_CHANNEL(index);
+    uint32_t commands[] = {
+        cpu_to_le32(PMC_PCR_CMD | 20),
+        cpu_to_le32(PMC_PCR_CMD | 20),
+        cpu_to_le32(PMC_PCR_CMD | PMC_PCR_EN | 20),
+    };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+    unsigned int i;
+
+    ebi_enable_ddr(qts);
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    qtest_memwrite(qts, source, commands, sizeof(commands));
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CSA, source);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CDA,
+                 SAM9X7_PMC_BASE + PMC_PCR);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC,
+                 ARRAY_SIZE(commands));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_SWREQ |
+                 XDMAC_CC_DWIDTH_WORD | XDMAC_CC_SAM_INC);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GWS, channel_mask);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, channel_mask);
+
+    /* Stage two words in the FIFO snapshot while RAM writes are suspended. */
+    for (i = 0; i < 2; i++) {
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+        xdmac_waitl(qts, XDMAC_GSWS, channel_mask, 0);
+    }
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source + 2 * sizeof(uint32_t));
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, ARRAY_SIZE(commands));
+
+    /* Queue a third read and a flush while the channel clock is stopped. */
+    pmc_write_pcr(qts, 20, 0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWF, channel_mask);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWS) &
+                  channel_mask);
+
+    /*
+     * Both operations become runnable together.  Nonblocking flush
+     * arbitration accepts the source read before the first snapshot write,
+     * whose PCR command gates the channel clock again.
+     */
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source + sizeof(commands));
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 2);
+    g_assert_false(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWS) &
+                   channel_mask);
+    value = qtest_readl(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC);
+    g_assert_true(value & XDMAC_CC_WRIP);
+
+    /*
+     * GD follows an already-scheduled flush burst while pclk is stopped.
+     * Resuming lets its last snapshot word raise FIS, then drains the newly
+     * read word and completes disable with DIS.
+     */
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, channel_mask);
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                  channel_mask);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 1);
+    value = qtest_readl(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_cmphex(value & (XDMAC_INT_BIS | XDMAC_INT_DIS |
+                             XDMAC_INT_FIS | XDMAC_INT_RBEIS |
+                             XDMAC_INT_WBEIS | XDMAC_INT_ROIS),
+                    ==, XDMAC_INT_FIS);
+
+    /* The final, post-snapshot word drains only after FIS and then sets DIS. */
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    xdmac_waitl(qts, XDMAC_GS, channel_mask, 0);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 0);
+    value = qtest_readl(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_cmphex(value & (XDMAC_INT_BIS | XDMAC_INT_DIS |
+                             XDMAC_INT_FIS | XDMAC_INT_RBEIS |
+                             XDMAC_INT_WBEIS | XDMAC_INT_ROIS),
+                    ==, XDMAC_INT_DIS);
+
+    qtest_quit(qts);
+}
+
+static void test_xdmac_p2m_fifo_migration(void)
+{
+    static const uint8_t payload[] = {
+        0x81, 0x72, 0x63, 0x54, 0x45, 0x36, 0x27, 0x18,
+    };
+    const uint32_t source = SAM9X7_DDR_BASE + 0x12100;
+    const uint32_t target = SAM9X7_DDR_BASE + 0x12200;
+    const unsigned int index = 4;
+    const uint32_t channel_mask = BIT(index);
+    const uint64_t channel = XDMAC_CHANNEL(index);
+    const uint32_t config = XDMAC_CC_TYPE_PER |
+                            XDMAC_CC_MBSIZE_SIXTEEN |
+                            XDMAC_CC_SWREQ | XDMAC_CC_SAM_INC |
+                            XDMAC_CC_DAM_INC;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    uint8_t result[sizeof(payload)];
+    unsigned int i;
+
+    ebi_enable_ddr(from);
+    pmc_write_pcr(from, 20, PMC_PCR_EN);
+    qtest_memwrite(from, source, payload, sizeof(payload));
+    qtest_memset(from, target, 0, sizeof(payload));
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CSA, source);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CDA, target);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC,
+                 sizeof(payload));
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CC, config);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + XDMAC_GWS, channel_mask);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + XDMAC_GE, channel_mask);
+    for (i = 0; i < 3; i++) {
+        qtest_writel(from, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+        xdmac_waitl(from, XDMAC_GSWS, channel_mask, 0);
+    }
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_true(qtest_readl(to, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                  channel_mask);
+    g_assert_true(qtest_readl(to, SAM9X7_XDMAC_BASE + XDMAC_GWS) &
+                  channel_mask);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, sizeof(payload));
+    qtest_memread(to, target, result, sizeof(result));
+    for (i = 0; i < sizeof(result); i++) {
+        g_assert_cmphex(result[i], ==, 0);
+    }
+
+    qtest_writel(to, SAM9X7_XDMAC_BASE + XDMAC_GSWF, channel_mask);
+    xdmac_waitl(to, channel + XDMAC_CIS,
+                XDMAC_INT_FIS, XDMAC_INT_FIS);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, sizeof(payload) - 3);
+    qtest_memread(to, target, result, sizeof(result));
+    g_assert_cmpmem(result, 3, payload, 3);
+
+    qtest_writel(to, SAM9X7_XDMAC_BASE + XDMAC_GRWR, channel_mask);
+    for (i = 3; i < sizeof(payload); i++) {
+        qtest_writel(to, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+        xdmac_waitl(to, XDMAC_GSWS, channel_mask, 0);
+    }
+    xdmac_waitl(to, XDMAC_GS, channel_mask, 0);
+    qtest_memread(to, target, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), payload, sizeof(payload));
+
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
 static void aes_write_bytes(QTestState *qts, uint64_t offset,
@@ -14231,6 +14731,1140 @@ static void test_uhphs_migration(void)
     qtest_quit(from);
 }
 
+static void udphs_configure_endpoint(QTestState *qts, unsigned int ep,
+                                     uint32_t config, uint32_t interrupts)
+{
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCFG(ep), config);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTCFG(ep)), ==,
+                    config | UDPHS_EPTCFG_MAPPED);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCTLENB(ep),
+                 UDPHS_EPTCTL_ENABLE | interrupts);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTCTL(ep)), ==,
+                    UDPHS_EPTCTL_ENABLE | interrupts);
+}
+
+static void test_udphs_registers_endpoints_clocks_and_irq(void)
+{
+    static const uint8_t endpoint_banks[] = { 1, 2, 2, 3, 3, 3, 3 };
+    static const uint8_t full_packet[64] = { 0xa5 };
+    static const uint8_t partial_packet[] = { 0x91, 0x75, 0xc1 };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t control;
+    uint32_t status;
+    unsigned int ep;
+
+    qtest_irq_intercept_out_named(qts, "/machine/soc/udphs",
+                                  "device-mode");
+    aic_configure(qts, 23, AIC_SMR_LEVEL_HIGH | 5, 0x5d5d0017);
+    pmc_write_pcr(qts, 4, PMC_PCR_EN);
+
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/udphs/pclk"),
+                     ==, 0);
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/udphs/utmi"),
+                     ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_FNUM), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_IEN), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_INTSTA), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_TST), ==, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+    g_assert_false(qtest_readl(qts, SAM9X7_PIOC_BASE + PIO_PDSR) & BIT(8));
+
+    pmc_write_pcr(qts, 23, PMC_PCR_EN);
+    pmc_enable_upll(qts);
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/udphs/pclk"),
+                     !=, 0);
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/udphs/utmi"),
+                     ==, CLOCK_PERIOD_FROM_HZ(480000000));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL), ==,
+                    UDPHS_CTRL_DETACH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_IEN), ==,
+                    UDPHS_INT_ENDRESET);
+    for (ep = 0; ep < ARRAY_SIZE(endpoint_banks); ep++) {
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_EPTSTA(ep)), ==,
+                        UDPHS_EPTSTA_RESET);
+    }
+
+    /* The UTMI regulator and bandgap are independent hard clock gates. */
+    pmc_set_upll_acr(qts, PMC_UPLL_ACR_CONFIG & ~PMC_PLL_ACR_UTMIBG);
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/udphs/utmi"),
+                     ==, 0);
+    pmc_set_upll_acr(qts, PMC_UPLL_ACR_CONFIG & ~PMC_PLL_ACR_UTMIVR);
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/udphs/utmi"),
+                     ==, 0);
+    pmc_set_upll_acr(qts, PMC_UPLL_ACR_CONFIG);
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/udphs/utmi"),
+                     ==, CLOCK_PERIOD_FROM_HZ(480000000));
+
+    control = UDPHS_CTRL_DEV_ADDR(0x35) | UDPHS_CTRL_FADDR_EN |
+              UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_DETACH |
+              UDPHS_CTRL_PULLD_DIS;
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL, control);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL), ==,
+                    control);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 control & ~UDPHS_CTRL_EN_UDPHS);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    /* Keep the controller enabled but detached while programming it. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_DETACH);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    for (ep = 0; ep < ARRAY_SIZE(endpoint_banks); ep++) {
+        uint32_t config = UDPHS_EPTCFG_SIZE(3) |
+                          UDPHS_EPTCFG_TYPE(ep ? 2 : 0) |
+                          UDPHS_EPTCFG_BANKS(endpoint_banks[ep]);
+
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_EPTCFG(ep)), ==, 0);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_EPTCTL(ep)), ==,
+                        ep == 0 ? UDPHS_EPTCTL_ENABLE : 0);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_EPTSTA(ep)), ==,
+                        UDPHS_EPTSTA_RESET);
+        udphs_configure_endpoint(qts, ep, config, 0);
+    }
+
+    /* EP0 has one bank; an overcommitted configuration is not mapped. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCFG(0),
+                 UDPHS_EPTCFG_SIZE(3) | UDPHS_EPTCFG_BANKS(2));
+    g_assert_false(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                               UDPHS_EPTCFG(0)) & UDPHS_EPTCFG_MAPPED);
+    udphs_configure_endpoint(qts, 0,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_BANKS(1),
+                             UDPHS_EPTCTL_TXRDY_IE);
+
+    g_assert_false(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                   UDPHS_INT_EPT(0));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_IEN,
+                 UDPHS_INT_EPT(0));
+    /* TXRDY is active-low in the endpoint interrupt logic. */
+    g_assert_true(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                  UDPHS_INT_EPT(0));
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(23));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(0),
+                 UDPHS_EPTSTA_TXRDY);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(23));
+
+    /* Status follows the current CPU bank, not an older queued IN bank. */
+    udphs_configure_endpoint(qts, 1,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2),
+                             UDPHS_EPTCTL_AUTO_VALID |
+                             UDPHS_EPTCTL_BUSY_IE);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_IEN,
+                 UDPHS_INT_EPT(1));
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(23));
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE + (1U << 16),
+                   partial_packet, sizeof(partial_packet));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(1));
+    g_assert_cmphex(status & UDPHS_EPTSTA_BYTE_COUNT(0x7ff), ==,
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(partial_packet)));
+    g_assert_false(status & UDPHS_EPTSTA_TXRDY);
+    g_assert_false(status & UDPHS_EPTSTA_SHORT);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(1),
+                 UDPHS_EPTSTA_TXRDY);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(1));
+    g_assert_cmphex(status & UDPHS_EPTSTA_BUSY(3), ==,
+                    UDPHS_EPTSTA_BUSY(1));
+    g_assert_cmphex(status & UDPHS_EPTSTA_BYTE_COUNT(0x7ff), ==, 0);
+    g_assert_false(status & UDPHS_EPTSTA_TXRDY);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(23));
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE + (1U << 16),
+                   full_packet, sizeof(full_packet));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(1));
+    g_assert_cmphex(status & UDPHS_EPTSTA_BUSY(3), ==,
+                    UDPHS_EPTSTA_BUSY(2));
+    g_assert_cmphex(status & UDPHS_EPTSTA_BYTE_COUNT(0x7ff), ==,
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(full_packet)));
+    g_assert_true(status & UDPHS_EPTSTA_TXRDY);
+    g_assert_false(status & UDPHS_EPTSTA_SHORT);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTRST, BIT(1));
+
+    /* BYTE_COUNT advances per FIFO access, independent of its address. */
+    udphs_configure_endpoint(qts, 5,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(3), 0);
+    qtest_writeb(qts, SAM9X7_UDPHS_FIFO_BASE + (5U << 16) + 10, 0x51);
+    qtest_writeb(qts, SAM9X7_UDPHS_FIFO_BASE + (5U << 16) + 10, 0x52);
+    qtest_writeb(qts, SAM9X7_UDPHS_FIFO_BASE + (5U << 16) + 2, 0x53);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(5)) &
+                    UDPHS_EPTSTA_BYTE_COUNT(0x7ff), ==,
+                    UDPHS_EPTSTA_BYTE_COUNT(3));
+
+    /* Isochronous PID-selection control bits are implemented too. */
+    udphs_configure_endpoint(qts, 6,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(1) |
+                             UDPHS_EPTCFG_BANKS(3),
+                             UDPHS_EPTCTL_DATAX_RX |
+                             UDPHS_EPTCTL_MDATA_RX);
+
+    /* DMA channels 1--6 have distinct register files. */
+    for (ep = 1; ep <= 6; ep++) {
+        uint32_t descriptor = SAM9X7_SRAM0_BASE + ep * 0x20;
+        uint32_t address = SAM9X7_SRAM0_BASE + 0x400 + ep * 0x20;
+        uint32_t dma_control = UDPHS_DMA_END_TR_EN |
+                               UDPHS_DMA_END_BF_EN |
+                               UDPHS_DMA_END_TR_IE |
+                               UDPHS_DMA_END_BF_IE |
+                               UDPHS_DMA_DESC_LD_IE |
+                               UDPHS_DMA_BUFF_LENGTH(0x20 + ep);
+
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_DMANXTDSC(ep)), ==, 0);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_DMAADDRESS(ep)), ==, 0);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_DMACONTROL(ep)), ==, 0);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_DMASTATUS(ep)), ==, 0);
+        qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMANXTDSC(ep),
+                     descriptor);
+        qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(ep),
+                     address);
+        qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(ep),
+                     dma_control);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_DMANXTDSC(ep)), ==, descriptor);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_DMAADDRESS(ep)), ==, address);
+        /* Stop Now cannot update bits 31:2 of DMACONTROL. */
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_DMACONTROL(ep)), ==, 0);
+    }
+
+    /* LDNXT_DSC loads one aligned, three-word transfer descriptor. */
+    {
+        const uint32_t descriptor = SAM9X7_SRAM0_BASE + 0xc00;
+        const uint32_t next = SAM9X7_SRAM0_BASE + 0xc40;
+        const uint32_t address = SAM9X7_SRAM0_BASE + 0xd00;
+        const uint32_t desc_control = UDPHS_DMA_END_BF_EN |
+                                      UDPHS_DMA_END_BF_IE |
+                                      UDPHS_DMA_DESC_LD_IE |
+                                      UDPHS_DMA_BUFF_LENGTH(0x26);
+        uint32_t dma_status;
+
+        qtest_writel(qts, descriptor, next);
+        qtest_writel(qts, descriptor + 4, address);
+        qtest_writel(qts, descriptor + 8, desc_control);
+        qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMANXTDSC(6),
+                     descriptor);
+        qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(6),
+                     UDPHS_DMA_LDNXT_DSC | UDPHS_DMA_DESC_LD_IE);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_DMANXTDSC(6)), ==, next);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_DMAADDRESS(6)), ==, address);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_DMACONTROL(6)), ==,
+                        desc_control & 0xff);
+        dma_status = qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                 UDPHS_DMASTATUS(6));
+        g_assert_cmphex(dma_status, ==,
+                        UDPHS_DMA_BUFF_COUNT(0x26) |
+                        UDPHS_DMA_DESC_LD_ST);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_DMASTATUS(6)), ==,
+                        UDPHS_DMA_BUFF_COUNT(0x26));
+    }
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL), ==,
+                    0);
+    g_assert_false(qtest_get_irq(qts, 0));
+    pmc_write_pcr(qts, 23, PMC_PCR_EN);
+    pmc_enable_upll(qts);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL), ==,
+                    UDPHS_CTRL_DETACH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_IEN), ==,
+                    UDPHS_INT_ENDRESET);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTCFG(6)), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(6)), ==,
+                    UDPHS_EPTSTA_RESET);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTCTL(0)), ==,
+                    UDPHS_EPTCTL_ENABLE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMANXTDSC(6)), ==, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_quit(qts);
+}
+
+static void test_udphs_shared_port_a_mux(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    pmc_configure_usb_host(qts);
+    pmc_write_pcr(qts, 23, PMC_PCR_EN);
+    qtest_qmp_device_add(qts, "usb-kbd", "sam9x75-port-a-kbd",
+                         "{'bus': 'usb-bus.0', 'port': '1'}");
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                              UHPFS_HC_RH_PORT(0)) & UHPFS_PORT_CCS);
+
+    /* EN_UDPHS takes the shared UTMI away from host Port A immediately. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_DETACH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL), ==,
+                    UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_DETACH);
+    g_assert_false(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                               UHPFS_HC_RH_PORT(0)) & UHPFS_PORT_CCS);
+    g_assert_false(qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE +
+                               UHPHS_PORTSC(0)) & UHPHS_PORTSC_CONNECT);
+
+    /* A host-controller reset must not reconnect the muxed-away port. */
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_USBCMD,
+                 UHPHS_USBCMD_HCRESET);
+    g_assert_false(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                               UHPFS_HC_RH_PORT(0)) & UHPFS_PORT_CCS);
+
+    /* Returning to host mode makes an attached device visible again. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_DETACH);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                              UHPFS_HC_RH_PORT(0)) & UHPFS_PORT_CCS);
+
+    /* System reset returns Port A to host mode without losing the device. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_DETACH);
+    qtest_system_reset(qts);
+    pmc_configure_usb_host(qts);
+    pmc_write_pcr(qts, 23, PMC_PCR_EN);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                              UHPFS_HC_RH_PORT(0)) & UHPFS_PORT_CCS);
+
+    /* Deleting a physical device while Port A is muxed must remain safe. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_DETACH);
+    qtest_qmp_device_del(qts, "sam9x75-port-a-kbd");
+    qtest_qmp_device_add(qts, "usb-kbd", "sam9x75-muxed-port-a-kbd",
+                         "{'bus': 'usb-bus.0', 'port': '1'}");
+    g_assert_false(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                               UHPFS_HC_RH_PORT(0)) & UHPFS_PORT_CCS);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_DETACH);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                              UHPFS_HC_RH_PORT(0)) & UHPFS_PORT_CCS);
+    qtest_qmp_device_del(qts, "sam9x75-muxed-port-a-kbd");
+    qtest_quit(qts);
+}
+
+static void udphs_ohci_control_token(QTestState *qts, uint32_t ed,
+                                     uint32_t td, uint32_t tail,
+                                     uint32_t buffer, uint32_t td_flags,
+                                     size_t length)
+{
+    qtest_writel(qts, ed, 64U << 16);
+    qtest_writel(qts, ed + 4, tail);
+    qtest_writel(qts, ed + 8, td);
+    qtest_writel(qts, ed + 12, 0);
+    qtest_writel(qts, td, td_flags);
+    qtest_writel(qts, td + 4, length ? buffer : 0);
+    qtest_writel(qts, td + 8, tail);
+    qtest_writel(qts, td + 12, length ? buffer + length - 1 : 0);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_CONTROL_HEAD,
+                 ed);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_CONTROL,
+                 UHPFS_CONTROL_OPERATIONAL | UHPFS_CONTROL_CLE);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_COMMAND_STATUS,
+                 UHPFS_COMMAND_CLF);
+    ohci_wait_for_ed(qts, ed, tail);
+}
+
+static void udphs_ohci_bulk_transfer(QTestState *qts, uint32_t ed,
+                                     uint32_t td, uint32_t tail,
+                                     uint32_t buffer, unsigned int ep,
+                                     bool in, size_t length);
+
+static void test_udphs_raw_ep0_and_pio_data_tokens(void)
+{
+    const uint32_t hcca = SAM9X7_SRAM0_BASE;
+    const uint32_t setup_ed = SAM9X7_SRAM0_BASE + 0x100;
+    const uint32_t setup_td = SAM9X7_SRAM0_BASE + 0x120;
+    const uint32_t setup_tail = SAM9X7_SRAM0_BASE + 0x130;
+    const uint32_t setup_buf = SAM9X7_SRAM0_BASE + 0x140;
+    const uint32_t bulk_ed = SAM9X7_SRAM0_BASE + 0x180;
+    const uint32_t bulk_td = SAM9X7_SRAM0_BASE + 0x1a0;
+    const uint32_t bulk_tail = SAM9X7_SRAM0_BASE + 0x1b0;
+    const uint32_t bulk_buf = SAM9X7_SRAM0_BASE + 0x200;
+    const uint8_t setup[] = { 0x80, 0x06, 0x00, 0x01,
+                              0x00, 0x00, 0x12, 0x00 };
+    const uint8_t setup_out[] = { 0x40, 0x5a, 0x00, 0x00,
+                                  0x00, 0x00, 0x04, 0x00 };
+    const uint8_t control_in_data[] = {
+        0x12, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x40,
+        0x25, 0x05, 0x75, 0x09, 0x00, 0x01, 0x01, 0x02,
+        0x03, 0x01,
+    };
+    const uint8_t out_data[] = {
+        0x75, 0x64, 0x70, 0x68, 0x73, 0x2d, 0x6f, 0x75,
+        0x74, 0x2d, 0x74, 0x6f, 0x6b, 0x65, 0x6e,
+    };
+    const uint8_t in_data[] = {
+        0x75, 0x64, 0x70, 0x68, 0x73, 0x2d, 0x69, 0x6e,
+        0x2d, 0x74, 0x6f, 0x6b, 0x65, 0x6e,
+    };
+    uint8_t observed[sizeof(control_in_data)];
+    uint32_t status;
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-gadget,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+
+    pmc_write_pcr(qts, 4, PMC_PCR_EN);
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOC_BASE + PIO_PDSR) & BIT(8));
+
+    /* Keep OHCI running from PLLA while the device UTMI clock is stopped. */
+    pmc_configure_pll(qts, 0);
+    pmc_write_pcr(qts, 22, PMC_PCR_EN);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_USB, PMC_USB_USBDIV(9));
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_SCER, PMC_SC_UHP);
+    pmc_write_pcr(qts, 23, PMC_PCR_EN);
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/udphs/pclk"),
+                     !=, 0);
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/udphs/utmi"),
+                     ==, 0);
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/uhphs-ohci/uhpck"),
+                     !=, 0);
+
+    aic_configure(qts, 23, AIC_SMR_LEVEL_HIGH | 5, 0x5d5d0017);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_TST, 3);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_DETACH |
+                 UDPHS_CTRL_PULLD_DIS);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_PULLD_DIS);
+
+    qtest_memset(qts, hcca, 0, 0x100);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_HCCA, hcca);
+
+    qtest_memwrite(qts, setup_buf, setup, sizeof(setup));
+    qtest_writel(qts, setup_ed, 64U << 16);
+    qtest_writel(qts, setup_ed + 4, setup_tail);
+    qtest_writel(qts, setup_ed + 8, setup_td);
+    qtest_writel(qts, setup_ed + 12, 0);
+    qtest_writel(qts, setup_td, 0xf2000000);
+    qtest_writel(qts, setup_td + 4, setup_buf);
+    qtest_writel(qts, setup_td + 8, setup_tail);
+    qtest_writel(qts, setup_td + 12, setup_buf + sizeof(setup) - 1);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_CONTROL_HEAD,
+                 setup_ed);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_CONTROL,
+                 UHPFS_CONTROL_OPERATIONAL | UHPFS_CONTROL_CLE);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_COMMAND_STATUS,
+                 UHPFS_COMMAND_CLF);
+    qtest_clock_step(qts, 5 * 1000000LL);
+
+    /* Raw SETUP delivery waits for both device clocks. */
+    g_assert_cmphex(qtest_readl(qts, setup_ed + 8) & ~3U, ==, setup_td);
+    g_assert_false(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0)) &
+                   UDPHS_EPTSTA_RX_SETUP);
+    g_assert_false(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                               UHPFS_HC_RH_PORT(1)) & UHPFS_PORT_CCS);
+    pmc_enable_upll(qts);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                              UHPFS_HC_RH_PORT(1)) & UHPFS_PORT_CCS);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_RH_PORT(1),
+                 UHPFS_PORT_PRS);
+    qtest_clock_step(qts, 2 * 1000000LL);
+    /* Bus reset clears endpoint configuration; firmware then enables EP0. */
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0)),
+                    ==, UDPHS_EPTSTA_RESET);
+    udphs_configure_endpoint(qts, 0,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_BANKS(1),
+                             UDPHS_EPTCTL_RX_SETUP_IE);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_IEN,
+                 UDPHS_INT_EPT(0));
+    ohci_wait_for_ed(qts, setup_ed, setup_tail);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(0)) &
+                    (UDPHS_EPTSTA_RX_SETUP |
+                     UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RX_SETUP |
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(setup)));
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE, observed, sizeof(setup));
+    g_assert_cmpmem(observed, sizeof(setup), setup, sizeof(setup));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(0)) &
+                    UDPHS_EPTSTA_BYTE_COUNT(0x7ff), ==, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(23));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
+                 UDPHS_EPTSTA_RX_SETUP);
+
+    /* Complete the control-IN data and status-OUT stages token by token. */
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE, control_in_data,
+                   sizeof(control_in_data));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(0),
+                 UDPHS_EPTSTA_TXRDY);
+    qtest_memset(qts, bulk_buf, 0, sizeof(control_in_data));
+    udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
+                             bulk_buf, 0xf3100000,
+                             sizeof(control_in_data));
+    qtest_memread(qts, bulk_buf, observed, sizeof(control_in_data));
+    g_assert_cmpmem(observed, sizeof(control_in_data), control_in_data,
+                    sizeof(control_in_data));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
+                 UDPHS_EPTSTA_TXCOMPLT);
+    udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
+                             0, 0xf3080000, 0);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_RXRDY |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RXRDY);
+    g_assert_true(status & UDPHS_EPTSTA_NAK_OUT);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
+                 UDPHS_EPTSTA_RXRDY);
+
+    /* Exercise the opposite control-OUT/data/status-IN direction too. */
+    qtest_memwrite(qts, setup_buf, setup_out, sizeof(setup_out));
+    udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
+                             setup_buf, 0xf2000000, sizeof(setup_out));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_RX_SETUP |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RX_SETUP |
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(setup_out)));
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE, observed,
+                  sizeof(setup_out));
+    g_assert_cmpmem(observed, sizeof(setup_out), setup_out,
+                    sizeof(setup_out));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
+                 UDPHS_EPTSTA_RX_SETUP);
+    qtest_memwrite(qts, bulk_buf, out_data, 4);
+    udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
+                             bulk_buf, 0xf3080000, 4);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_RXRDY |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RXRDY | UDPHS_EPTSTA_BYTE_COUNT(4));
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE, observed, 4);
+    g_assert_cmpmem(observed, 4, out_data, 4);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
+                 UDPHS_EPTSTA_RXRDY);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(0),
+                 UDPHS_EPTSTA_TXRDY);
+    udphs_ohci_control_token(qts, setup_ed, setup_td, setup_tail,
+                             0, 0xf3100000, 0);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0));
+    g_assert_true(status & UDPHS_EPTSTA_TXCOMPLT);
+    g_assert_false(status & UDPHS_EPTSTA_NAK_IN);
+
+    udphs_configure_endpoint(qts, 1,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2),
+                             UDPHS_EPTCTL_RXRDY_IE);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_IEN,
+                 UDPHS_INT_EPT(1));
+    qtest_memwrite(qts, bulk_buf, out_data, sizeof(out_data));
+    qtest_writel(qts, bulk_ed,
+                 (64U << 16) | (1U << 11) | (1U << 7));
+    qtest_writel(qts, bulk_ed + 4, bulk_tail);
+    qtest_writel(qts, bulk_ed + 8, bulk_td);
+    qtest_writel(qts, bulk_ed + 12, 0);
+    qtest_writel(qts, bulk_td, 0xf2000000);
+    qtest_writel(qts, bulk_td + 4, bulk_buf);
+    qtest_writel(qts, bulk_td + 8, bulk_tail);
+    qtest_writel(qts, bulk_td + 12, bulk_buf + sizeof(out_data) - 1);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_BULK_HEAD,
+                 bulk_ed);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_CONTROL,
+                 UHPFS_CONTROL_OPERATIONAL | UHPFS_CONTROL_BLE);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_COMMAND_STATUS,
+                 UHPFS_COMMAND_BLF);
+    ohci_wait_for_ed(qts, bulk_ed, bulk_tail);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(1)) &
+                    (UDPHS_EPTSTA_RXRDY |
+                     UDPHS_EPTSTA_BUSY(3) |
+                     UDPHS_EPTSTA_BYTE_COUNT(0x7ff) |
+                     UDPHS_EPTSTA_SHORT), ==,
+                    UDPHS_EPTSTA_RXRDY |
+                    UDPHS_EPTSTA_BUSY(1) |
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(out_data)) |
+                    UDPHS_EPTSTA_SHORT);
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE + (1U << 16),
+                  observed, sizeof(out_data));
+    g_assert_cmpmem(observed, sizeof(out_data), out_data, sizeof(out_data));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(1)) &
+                    (UDPHS_EPTSTA_RXRDY |
+                     UDPHS_EPTSTA_BYTE_COUNT(0x7ff) |
+                     UDPHS_EPTSTA_SHORT), ==,
+                    UDPHS_EPTSTA_RXRDY | UDPHS_EPTSTA_SHORT);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(1),
+                 UDPHS_EPTSTA_RXRDY);
+
+    udphs_configure_endpoint(qts, 2,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2),
+                             UDPHS_EPTCTL_TXCOMPLT_IE);
+    /* EPTRST clears endpoint state but preserves a nonzero TOGGLESQ_STA. */
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(2)) &
+                    UDPHS_EPTSTA_TOGGLE_MASK, ==,
+                    UDPHS_EPTSTA_RESET);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTRST, BIT(2));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(2)) &
+                    UDPHS_EPTSTA_TOGGLE_MASK, ==,
+                    UDPHS_EPTSTA_RESET);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_IEN,
+                 UDPHS_INT_EPT(2));
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE + (2U << 16),
+                   in_data, sizeof(in_data));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(2),
+                 UDPHS_EPTSTA_TXRDY);
+    qtest_memset(qts, bulk_buf, 0, sizeof(in_data));
+    qtest_writel(qts, bulk_ed,
+                 (64U << 16) | (2U << 11) | (2U << 7));
+    qtest_writel(qts, bulk_ed + 4, bulk_tail);
+    qtest_writel(qts, bulk_ed + 8, bulk_td);
+    qtest_writel(qts, bulk_td, 0xf2000000);
+    qtest_writel(qts, bulk_td + 4, bulk_buf);
+    qtest_writel(qts, bulk_td + 8, bulk_tail);
+    qtest_writel(qts, bulk_td + 12, bulk_buf + sizeof(in_data) - 1);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_BULK_HEAD,
+                 bulk_ed);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_COMMAND_STATUS,
+                 UHPFS_COMMAND_BLF);
+    ohci_wait_for_ed(qts, bulk_ed, bulk_tail);
+    qtest_memread(qts, bulk_buf, observed, sizeof(in_data));
+    g_assert_cmpmem(observed, sizeof(in_data), in_data, sizeof(in_data));
+    g_assert_true(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(2)) &
+                  UDPHS_EPTSTA_TXCOMPLT);
+    g_assert_false(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(2)) &
+                   UDPHS_EPTSTA_TXRDY);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(23));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(2)) &
+                    UDPHS_EPTSTA_TOGGLE_MASK, ==, 0);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTRST, BIT(2));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(2)) &
+                    UDPHS_EPTSTA_TOGGLE_MASK, ==, 0);
+
+    /* MAPD is resource-only; an architecturally illegal mode stalls tokens. */
+    udphs_configure_endpoint(qts, 4,
+                             UDPHS_EPTCFG_SIZE(7) |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2), 0);
+    qtest_writeb(qts, bulk_buf, 0xa5);
+    udphs_ohci_bulk_transfer(qts, bulk_ed, bulk_td, bulk_tail,
+                             bulk_buf, 4, false, 1);
+    g_assert_cmphex(qtest_readl(qts, bulk_td) >> 28, ==, 4);
+    udphs_configure_endpoint(qts, 5,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_TYPE(1) |
+                             UDPHS_EPTCFG_BANKS(1), 0);
+    udphs_ohci_bulk_transfer(qts, bulk_ed, bulk_td, bulk_tail,
+                             bulk_buf, 5, false, 1);
+    g_assert_cmphex(qtest_readl(qts, bulk_td) >> 28, ==, 4);
+
+    qtest_qmp_device_del(qts, "sam9x75-udphs-gadget");
+    g_assert_false(qtest_readl(qts, SAM9X7_PIOC_BASE + PIO_PDSR) & BIT(8));
+    qtest_quit(qts);
+}
+
+static void udphs_ohci_bulk_transfer(QTestState *qts, uint32_t ed,
+                                     uint32_t td, uint32_t tail,
+                                     uint32_t buffer, unsigned int ep,
+                                     bool in, size_t length)
+{
+    uint32_t direction = in ? 2 : 1;
+
+    qtest_writel(qts, ed,
+                 (64U << 16) | (direction << 11) | (ep << 7));
+    qtest_writel(qts, ed + 4, tail);
+    qtest_writel(qts, ed + 8, td);
+    qtest_writel(qts, ed + 12, 0);
+    qtest_writel(qts, td, 0xf2000000);
+    qtest_writel(qts, td + 4, length ? buffer : 0);
+    qtest_writel(qts, td + 8, tail);
+    qtest_writel(qts, td + 12, length ? buffer + length - 1 : 0);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_BULK_HEAD, ed);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_CONTROL,
+                 UHPFS_CONTROL_OPERATIONAL | UHPFS_CONTROL_BLE);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_COMMAND_STATUS,
+                 UHPFS_COMMAND_BLF);
+    ohci_wait_for_ed(qts, ed, tail);
+}
+
+static void test_udphs_dma_data_tokens(void)
+{
+    const uint32_t hcca = SAM9X7_SRAM0_BASE;
+    const uint32_t ed = SAM9X7_SRAM0_BASE + 0x100;
+    const uint32_t td = SAM9X7_SRAM0_BASE + 0x120;
+    const uint32_t tail = SAM9X7_SRAM0_BASE + 0x130;
+    const uint32_t host_buffer = SAM9X7_SRAM0_BASE + 0x200;
+    const uint32_t dma_in_buffer = SAM9X7_SRAM0_BASE + 0x800;
+    const uint32_t dma_out_buffer = SAM9X7_SRAM0_BASE + 0x900;
+    const uint32_t chain_desc = SAM9X7_SRAM0_BASE + 0xc00;
+    const uint32_t chain_tail = SAM9X7_SRAM0_BASE + 0xc10;
+    const uint32_t chain_buffer = SAM9X7_SRAM0_BASE + 0xd00;
+    const uint8_t oldest[] = { 0x6f, 0x6c, 0x64, 0x65, 0x73, 0x74 };
+    const uint8_t newest[] = { 0x6e, 0x65, 0x77, 0x65, 0x73, 0x74 };
+    uint8_t in_data[96];
+    uint8_t out_data[23];
+    uint8_t observed[sizeof(in_data)];
+    uint32_t status;
+    unsigned int i;
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-dma-gadget,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+
+    for (i = 0; i < sizeof(in_data); i++) {
+        in_data[i] = 0x40 ^ i;
+    }
+    for (i = 0; i < sizeof(out_data); i++) {
+        out_data[i] = 0xa0 + i;
+    }
+
+    pmc_configure_usb_host(qts);
+    pmc_write_pcr(qts, 23, PMC_PCR_EN);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_TST, 3);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_PULLD_DIS);
+    qtest_clock_step(qts, 1000000);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                              UHPFS_HC_RH_PORT(1)) & UHPFS_PORT_CCS);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_RH_PORT(1),
+                 UHPFS_PORT_PRS);
+    qtest_clock_step(qts, 2 * 1000000LL);
+    qtest_memset(qts, hcca, 0, 0x100);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_HCCA, hcca);
+
+    /* Linux's direct-buffer IN path: memory -> two endpoint banks -> host. */
+    udphs_configure_endpoint(qts, 2,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2),
+                             UDPHS_EPTCTL_AUTO_VALID);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_IEN,
+                 UDPHS_INT_DMA(2));
+    qtest_memwrite(qts, dma_in_buffer, in_data, sizeof(in_data));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(2),
+                 dma_in_buffer);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(2),
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_BF_EN |
+                 UDPHS_DMA_END_BF_IE |
+                 UDPHS_DMA_BUFF_LENGTH(sizeof(in_data)));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(2)), ==,
+                    dma_in_buffer + sizeof(in_data));
+    g_assert_true(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                  UDPHS_INT_DMA(2));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_DMASTATUS(2));
+    g_assert_cmphex(status, ==, UDPHS_DMA_END_BF_ST);
+    g_assert_false(status & (UDPHS_DMA_CHANN_ENB | UDPHS_DMA_CHANN_ACT));
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE + (2U << 16),
+                  observed, sizeof(in_data) - 64);
+    g_assert_cmpmem(observed, sizeof(in_data) - 64,
+                    in_data + 64, sizeof(in_data) - 64);
+    qtest_memset(qts, host_buffer, 0, sizeof(in_data));
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 2, true,
+                             64);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(2));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_TXRDY |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff) |
+                              UDPHS_EPTSTA_BUSY(3)), ==,
+                    UDPHS_EPTSTA_BUSY(1));
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer + 64, 2, true,
+                             sizeof(in_data) - 64);
+    qtest_memread(qts, host_buffer, observed, sizeof(in_data));
+    g_assert_cmpmem(observed, sizeof(in_data), in_data, sizeof(in_data));
+
+    /* SHRT_PCKT appends a ZLP when an IN buffer ends on a packet boundary. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCTLENB(2),
+                 UDPHS_EPTCTL_SHORT_IE);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(2),
+                 dma_in_buffer);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(2),
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_BF_EN |
+                 UDPHS_DMA_END_BF_IE | UDPHS_DMA_BUFF_LENGTH(64));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(2));
+    g_assert_cmphex(status & UDPHS_EPTSTA_BUSY(3), ==,
+                    UDPHS_EPTSTA_BUSY(2));
+    qtest_memset(qts, host_buffer, 0, 64);
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 2, true, 64);
+    qtest_memread(qts, host_buffer, observed, 64);
+    g_assert_cmpmem(observed, 64, in_data, 64);
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 2, true, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(2)) &
+                    UDPHS_EPTSTA_BUSY(3), ==, 0);
+
+    /* Linux's unknown-size OUT path ends on a USB short packet. */
+    udphs_configure_endpoint(qts, 1,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2),
+                             UDPHS_EPTCTL_AUTO_VALID);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_IEN,
+                 UDPHS_INT_DMA(1));
+    qtest_memset(qts, dma_out_buffer, 0, 64);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(1),
+                 dma_out_buffer);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(1),
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_TR_EN |
+                 UDPHS_DMA_END_BF_EN | UDPHS_DMA_END_TR_IE |
+                 UDPHS_DMA_END_BF_IE | UDPHS_DMA_BUFF_LENGTH(64));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_DMASTATUS(1));
+    g_assert_cmphex(status, ==,
+                    UDPHS_DMA_CHANN_ENB | UDPHS_DMA_BUFF_COUNT(64));
+    qtest_memwrite(qts, host_buffer, out_data, sizeof(out_data));
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 1, false,
+                             sizeof(out_data));
+    qtest_memread(qts, dma_out_buffer, observed, sizeof(out_data));
+    g_assert_cmpmem(observed, sizeof(out_data), out_data, sizeof(out_data));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(1)), ==,
+                    dma_out_buffer + sizeof(out_data));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_DMASTATUS(1));
+    g_assert_cmphex(status, ==,
+                    UDPHS_DMA_BUFF_COUNT(64 - sizeof(out_data)) |
+                    UDPHS_DMA_END_TR_ST);
+    g_assert_false(status & (UDPHS_DMA_CHANN_ENB | UDPHS_DMA_CHANN_ACT));
+
+    /* A zero-length OUT packet also terminates without decrementing count. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(1),
+                 dma_out_buffer);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(1),
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_TR_EN |
+                 UDPHS_DMA_END_BF_EN | UDPHS_DMA_END_TR_IE |
+                 UDPHS_DMA_BUFF_LENGTH(64));
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 1, false, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(1)), ==, dma_out_buffer);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_DMASTATUS(1));
+    g_assert_cmphex(status, ==,
+                    UDPHS_DMA_BUFF_COUNT(64) | UDPHS_DMA_END_TR_ST);
+
+    /* A full two-bank IN queue exposes the newly freed CPU bank. */
+    udphs_configure_endpoint(qts, 3,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2), 0);
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE + (3U << 16),
+                   oldest, sizeof(oldest));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(3),
+                 UDPHS_EPTSTA_TXRDY);
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE + (3U << 16),
+                   newest, sizeof(newest));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(3),
+                 UDPHS_EPTSTA_TXRDY);
+    qtest_memset(qts, host_buffer, 0, sizeof(oldest));
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 3, true,
+                             sizeof(oldest));
+    qtest_memread(qts, host_buffer, observed, sizeof(oldest));
+    g_assert_cmpmem(observed, sizeof(oldest), oldest, sizeof(oldest));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(3));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_TXRDY |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff) |
+                              UDPHS_EPTSTA_BUSY(3)), ==,
+                    UDPHS_EPTSTA_BUSY(1));
+
+    /* RXRDY_TXKL kills the newest packet and leaves the oldest queued. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTRST, BIT(3));
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE + (3U << 16),
+                   oldest, sizeof(oldest));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(3),
+                 UDPHS_EPTSTA_TXRDY);
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE + (3U << 16),
+                   newest, sizeof(newest));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(3),
+                 UDPHS_EPTSTA_TXRDY);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(3),
+                 UDPHS_EPTSTA_RXRDY);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(3));
+    g_assert_cmphex(status & UDPHS_EPTSTA_BUSY(3), ==,
+                    UDPHS_EPTSTA_BUSY(1));
+    qtest_memset(qts, host_buffer, 0, sizeof(oldest));
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 3, true,
+                             sizeof(oldest));
+    qtest_memread(qts, host_buffer, observed, sizeof(oldest));
+    g_assert_cmpmem(observed, sizeof(oldest), oldest, sizeof(oldest));
+
+    /* Completion IRQ enables belong to the descriptor that completed. */
+    udphs_configure_endpoint(qts, 6,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2),
+                             UDPHS_EPTCTL_AUTO_VALID);
+    qtest_writel(qts, chain_desc, chain_tail);
+    qtest_writel(qts, chain_desc + 4, chain_buffer);
+    qtest_writel(qts, chain_desc + 8,
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_LDNXT_DSC |
+                 UDPHS_DMA_END_BF_EN | UDPHS_DMA_END_BF_IE |
+                 UDPHS_DMA_BUFF_LENGTH(4));
+    qtest_writel(qts, chain_tail, 0);
+    qtest_writel(qts, chain_tail + 4, chain_buffer + 4);
+    qtest_writel(qts, chain_tail + 8, 0);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMANXTDSC(6),
+                 chain_desc);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(6),
+                 UDPHS_DMA_LDNXT_DSC);
+    /* The local event exists, but its global summary is still masked. */
+    g_assert_false(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                   UDPHS_INT_DMA(6));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_IEN,
+                 UDPHS_INT_DMA(6));
+    g_assert_true(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                  UDPHS_INT_DMA(6));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_DMASTATUS(6));
+    g_assert_true(status & UDPHS_DMA_END_BF_ST);
+    g_assert_false(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                   UDPHS_INT_DMA(6));
+
+    /* A following descriptor must not retroactively enable that event. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTRST, BIT(6));
+    qtest_writel(qts, chain_desc + 8,
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_LDNXT_DSC |
+                 UDPHS_DMA_END_BF_EN | UDPHS_DMA_BUFF_LENGTH(4));
+    qtest_writel(qts, chain_tail + 8, UDPHS_DMA_END_BF_IE);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMANXTDSC(6),
+                 chain_desc);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(6),
+                 UDPHS_DMA_LDNXT_DSC);
+    g_assert_false(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                   UDPHS_INT_DMA(6));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_DMASTATUS(6));
+    g_assert_true(status & UDPHS_DMA_END_BF_ST);
+
+    /* A system-memory decode error stops the channel without overrunning. */
+    udphs_configure_endpoint(qts, 4,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2),
+                             UDPHS_EPTCTL_AUTO_VALID);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(4),
+                 0x10000000);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(4),
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_TR_IE |
+                 UDPHS_DMA_BUFF_LENGTH(4));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_DMASTATUS(4));
+    g_assert_cmphex(status, ==,
+                    UDPHS_DMA_BUFF_COUNT(4) | UDPHS_DMA_END_TR_ST);
+    g_assert_false(status & (UDPHS_DMA_CHANN_ENB | UDPHS_DMA_CHANN_ACT));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(4)), ==, 0x10000000);
+
+    qtest_quit(qts);
+}
+
+static void test_udphs_migration(void)
+{
+    const uint32_t hcca = SAM9X7_SRAM0_BASE;
+    const uint32_t in_ed = SAM9X7_SRAM0_BASE + 0xb00;
+    const uint32_t in_td = SAM9X7_SRAM0_BASE + 0xb20;
+    const uint32_t in_tail = SAM9X7_SRAM0_BASE + 0xb30;
+    const uint32_t host_buffer = SAM9X7_SRAM0_BASE + 0xc00;
+    const uint8_t fifo_data[] = {
+        0x6d, 0x69, 0x67, 0x72, 0x61, 0x74, 0x65,
+    };
+    uint8_t observed[sizeof(fifo_data)];
+    const uint32_t endpoint_config = UDPHS_EPTCFG_SIZE(3) |
+                                     UDPHS_EPTCFG_DIR_IN |
+                                     UDPHS_EPTCFG_TYPE(2) |
+                                     UDPHS_EPTCFG_BANKS(2);
+    const uint32_t dma_descriptor = SAM9X7_SRAM0_BASE + 0x800;
+    const uint32_t dma_address = SAM9X7_SRAM0_BASE + 0x900;
+    const uint32_t active_dma_address = SAM9X7_SRAM0_BASE + 0xa00;
+    const uint32_t pending_dma_address = SAM9X7_SRAM0_BASE + 0xd00;
+    const uint8_t pending_dma_data[] = { 0xd6, 0xa1, 0x91, 0x75 };
+    const uint32_t dma_control = UDPHS_DMA_END_TR_EN |
+                                 UDPHS_DMA_END_BF_EN |
+                                 UDPHS_DMA_END_TR_IE |
+                                 UDPHS_DMA_BUFF_LENGTH(0x40);
+    uint32_t endpoint_byte_count;
+    QTestState *from = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-migrate-gadget,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+    QTestState *to = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-migrate-gadget,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2 -incoming defer");
+
+    pmc_configure_usb_host(from);
+    pmc_write_pcr(from, 4, PMC_PCR_EN);
+    pmc_write_pcr(from, 23, PMC_PCR_EN);
+    aic_configure(from, 23, AIC_SMR_LEVEL_HIGH | 5, 0x5d5d0017);
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_DEV_ADDR(7) | UDPHS_CTRL_FADDR_EN |
+                 UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_PULLD_DIS);
+    qtest_writel(from, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_RH_PORT(1),
+                 UHPFS_PORT_PRS);
+    qtest_clock_step(from, 2 * 1000000LL);
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_DEV_ADDR(7) | UDPHS_CTRL_FADDR_EN |
+                 UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_PULLD_DIS);
+    udphs_configure_endpoint(from, 2, endpoint_config,
+                             UDPHS_EPTCTL_TXRDY_IE);
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_IEN,
+                 UDPHS_INT_DMA(6));
+    qtest_memwrite(from, SAM9X7_UDPHS_FIFO_BASE + (2U << 16),
+                   fifo_data, sizeof(fifo_data));
+    endpoint_byte_count = qtest_readl(from, SAM9X7_UDPHS_BASE +
+                                      UDPHS_EPTSTA(2)) &
+                          UDPHS_EPTSTA_BYTE_COUNT(0x7ff);
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_DMANXTDSC(2),
+                 dma_descriptor);
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(2),
+                 dma_address);
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(2),
+                 dma_control);
+    udphs_configure_endpoint(from, 1,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2),
+                             UDPHS_EPTCTL_AUTO_VALID);
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(1),
+                 active_dma_address);
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(1),
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_TR_EN |
+                 UDPHS_DMA_END_TR_IE | UDPHS_DMA_BUFF_LENGTH(64));
+
+    /* Migrate a locally and globally enabled, unread DMA completion. */
+    udphs_configure_endpoint(from, 6,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2),
+                             UDPHS_EPTCTL_AUTO_VALID);
+    qtest_memwrite(from, pending_dma_address, pending_dma_data,
+                   sizeof(pending_dma_data));
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(6),
+                 pending_dma_address);
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(6),
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_BF_EN |
+                 UDPHS_DMA_END_BF_IE |
+                 UDPHS_DMA_BUFF_LENGTH(sizeof(pending_dma_data)));
+    g_assert_true(qtest_readl(from, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                  UDPHS_INT_DMA(6));
+    g_assert_true(qtest_readl(from, SAM9X7_PIOC_BASE + PIO_PDSR) & BIT(8));
+    g_assert_true(qtest_readl(from, SAM9X7_UHPHS_OHCI_BASE +
+                              UHPFS_HC_RH_PORT(1)) & UHPFS_PORT_CCS);
+    g_assert_true(qtest_readl(from, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(23));
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_cmpuint(get_clock_period(to, "/machine/soc/udphs/pclk"),
+                     !=, 0);
+    g_assert_cmpuint(get_clock_period(to, "/machine/soc/udphs/utmi"),
+                     ==, CLOCK_PERIOD_FROM_HZ(480000000));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE + UDPHS_CTRL), ==,
+                    UDPHS_CTRL_DEV_ADDR(7) | UDPHS_CTRL_FADDR_EN |
+                    UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_PULLD_DIS);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTCFG(2)), ==,
+                    endpoint_config | UDPHS_EPTCFG_MAPPED);
+    /* The partially filled bank remains unvalidated and keeps TXRDY low. */
+    g_assert_false(qtest_readl(to, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(2)) &
+                   UDPHS_EPTSTA_TXRDY);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(2)) &
+                    UDPHS_EPTSTA_BYTE_COUNT(0x7ff), ==,
+                    endpoint_byte_count);
+    qtest_memread(to, SAM9X7_UDPHS_FIFO_BASE + (2U << 16),
+                  observed, sizeof(observed));
+    g_assert_cmpmem(observed, sizeof(observed), fifo_data,
+                    sizeof(fifo_data));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMANXTDSC(2)), ==, dma_descriptor);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(2)), ==, dma_address);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMACONTROL(2)), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(1)), ==,
+                    active_dma_address);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMACONTROL(1)), ==,
+                    UDPHS_DMA_END_TR_EN | UDPHS_DMA_END_TR_IE);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMASTATUS(1)), ==,
+                    UDPHS_DMA_CHANN_ENB | UDPHS_DMA_BUFF_COUNT(64));
+    g_assert_true(qtest_readl(to, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                  UDPHS_INT_DMA(6));
+    g_assert_true(qtest_readl(to, SAM9X7_PIOC_BASE + PIO_PDSR) & BIT(8));
+    g_assert_true(qtest_readl(to, SAM9X7_UHPHS_OHCI_BASE +
+                              UHPFS_HC_RH_PORT(1)) & UHPFS_PORT_CCS);
+    g_assert_true(qtest_readl(to, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(23));
+
+    /* DMASTATUS and its global summary remain read-to-clear after loading. */
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMASTATUS(6)), ==,
+                    UDPHS_DMA_END_BF_ST);
+    g_assert_false(qtest_readl(to, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                   UDPHS_INT_DMA(6));
+    g_assert_false(qtest_readl(to, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(23));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMASTATUS(6)), ==, 0);
+
+    /* The restored bridge/address/endpoint must carry a real host token. */
+    qtest_memset(to, hcca, 0, 0x100);
+    qtest_writel(to, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_HCCA, hcca);
+    qtest_writel(to, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(2),
+                 UDPHS_EPTSTA_TXRDY);
+    qtest_memset(to, host_buffer, 0, sizeof(fifo_data));
+    qtest_writel(to, in_ed,
+                 (64U << 16) | (2U << 11) | (2U << 7) | 7);
+    qtest_writel(to, in_ed + 4, in_tail);
+    qtest_writel(to, in_ed + 8, in_td);
+    qtest_writel(to, in_ed + 12, 0);
+    qtest_writel(to, in_td, 0xf2000000);
+    qtest_writel(to, in_td + 4, host_buffer);
+    qtest_writel(to, in_td + 8, in_tail);
+    qtest_writel(to, in_td + 12,
+                 host_buffer + sizeof(fifo_data) - 1);
+    qtest_writel(to, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_BULK_HEAD,
+                 in_ed);
+    qtest_writel(to, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_CONTROL,
+                 UHPFS_CONTROL_OPERATIONAL | UHPFS_CONTROL_BLE);
+    qtest_writel(to, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_COMMAND_STATUS,
+                 UHPFS_COMMAND_BLF);
+    ohci_wait_for_ed(to, in_ed, in_tail);
+    qtest_memread(to, host_buffer, observed, sizeof(observed));
+    g_assert_cmpmem(observed, sizeof(observed), fifo_data,
+                    sizeof(fifo_data));
+    qtest_qmp_device_del(to, "sam9x75-udphs-migrate-gadget");
+    g_assert_false(qtest_readl(to, SAM9X7_PIOC_BASE + PIO_PDSR) & BIT(8));
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
 static void mcan_enable_clocks(QTestState *qts, unsigned int pid)
 {
     pmc_write_pcr(qts, pid, PMC_PCR_EN | PMC_PCR_GCKEN);
@@ -15238,6 +16872,12 @@ int main(int argc, char **argv)
                    test_xdmac_pacing_striding_and_errors);
     qtest_add_func("sam9x75/xdmac/fair-scheduling-and-flush-scope",
                    test_xdmac_fair_scheduling_and_flush_scope);
+    qtest_add_func("sam9x75/xdmac/p2m-fifo-suspend-flush-and-disable",
+                   test_xdmac_p2m_fifo_suspend_flush_and_disable);
+    qtest_add_func("sam9x75/xdmac/p2m-flush-nonblocking-disable-order",
+                   test_xdmac_p2m_flush_nonblocking_disable_order);
+    qtest_add_func("sam9x75/xdmac/p2m-fifo-migration",
+                   test_xdmac_p2m_fifo_migration);
     qtest_add_func("sam9x75/xdmac/flexcom-live-migration",
                    test_xdmac_flexcom_live_migration);
     qtest_add_func("sam9x75/aes/registers-ecb-irq-and-protection",
@@ -15310,6 +16950,15 @@ int main(int argc, char **argv)
                    test_rtc_utc_tamper_and_lock);
     qtest_add_func("sam9x75/sfr/registers-resume-and-protection",
                    test_sfr_registers_resume_and_protection);
+    qtest_add_func("sam9x75/udphs/registers-endpoints-clocks-and-irq",
+                   test_udphs_registers_endpoints_clocks_and_irq);
+    qtest_add_func("sam9x75/udphs/shared-port-a-mux",
+                   test_udphs_shared_port_a_mux);
+    qtest_add_func("sam9x75/udphs/raw-ep0-and-pio-data-tokens",
+                   test_udphs_raw_ep0_and_pio_data_tokens);
+    qtest_add_func("sam9x75/udphs/dma-data-tokens",
+                   test_udphs_dma_data_tokens);
+    qtest_add_func("sam9x75/udphs/migration", test_udphs_migration);
     qtest_add_func("sam9x75/uhphs/registers-reset-and-companions",
                    test_uhphs_registers_reset_and_companions);
     qtest_add_func("sam9x75/uhphs/hotplug-shared-irq",
