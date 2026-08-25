@@ -84,16 +84,20 @@ Support matrix
        QEMU follow-up and does not affect this ARM926 configuration.
    * - ROM and boot window
      - Initial
-     - The 176 KiB ROM is mapped at its physical address and through the reset
-       alias.  CPU-host MATRIX remap switches address zero to the 64 KiB
-       SRAM0 view and is covered across reset and migration.  A complete
-       user-supplied 176 KiB mask-ROM dump can be loaded with ``-bios`` and
-       executes from the reset alias; QEMU does not distribute the proprietary
-       ROM image.  The keyed ``BOOT[2:0]`` register in the VDDBU-powered Boot
-       Sequence Controller is mapped at its documented address, retains its
-       value across core resets, restores its configurable factory value when
-       VDDBU is removed, persists for the next RomBOOT execution, and
-       migrates.  The boot chapter calls bit 0
+     - The proprietary 80 KiB RomBOOT is visible at address zero after reset;
+       CPU-host MATRIX remap switches address zero to the 64 KiB SRAM0 view
+       and is covered across reset and migration.  The separate 96 KiB ECC ROM
+       at ``0x00100000`` contains the GF(2^13) and GF(2^14) lookup tables used
+       by PMECC correction software.  QEMU synthesizes those deterministic
+       tables, so firmware entered with ``-kernel`` can use them without a
+       proprietary ROM image.  An exact 80 KiB user-supplied RomBOOT dump can
+       be loaded with ``-bios`` and executes from the reset view; it does not
+       replace the independent ECC tables.  QEMU does not distribute the
+       proprietary boot ROM.  The keyed ``BOOT[2:0]`` register in the
+       VDDBU-powered Boot Sequence Controller is mapped at its documented
+       address and retains its value across core resets.  It restores its
+       configurable factory value when VDDBU is removed, persists for the next
+       RomBOOT execution, and migrates.  The boot chapter calls bit 0
        ``EMUL_EN`` while the controller chapter and 2026 Microchip device pack
        call the complete field ``BOOT[2:0]``; values 2--7 need hardware
        characterization.  Genuine-image validation, RomBOOT use of the
@@ -332,26 +336,34 @@ Support matrix
        shared backend data have migration coverage.  The SMC chip-select banks,
        write protection, write-once scrambling keys, safety reporting and
        level interrupt shared with MPDDRC are present, including the modeled
-       A1 ``OCMS`` write-protection erratum.  PMECC exposes all eight ECC and
-       remainder banks through its complete ``0x600`` aperture, with initial
-       PMECC/PMERRLOC control/status behavior.  The current upstream Linux
-       ``sam9x7.dtsi`` describes only ``0x300`` bytes for that first resource
-       and needs a separate correction before software can map the upper
-       banks.  At QEMU commit ``94321686d9df``, the unmodified AT91Bootstrap
-       4.0.13 ``sam9x75_curiositynf_uboot_defconfig`` path was repeated through
-       the exact EBI decode.  It detected the ONFI device, selected timing mode
-       3, initialized 8-bit/512-byte PMECC, copied the configured 1 MiB image
-       from NAND offset ``0x40000`` into DDR and reached the unmodified U-Boot
-       prompt.  The ``-d unimp,guest_errors`` log was empty.  The seeded image
-       contained error-free data and erased OOB, so this validates the setup
-       and transfer path rather than BCH correction.
+       A1 ``OCMS`` write-protection erratum.  PMECC is connected to the NAND
+       data path and implements automatic main-area BCH encoding and syndrome
+       generation for 512- and 1024-byte sectors, strengths 2, 4, 8, 12 and
+       24, and one, two, four or eight sectors.  It exposes all eight ECC and
+       remainder banks through its complete ``0x600`` aperture, reports
+       per-sector errors, and implements the GF(2^13)/GF(2^14) PMERRLOC Chien
+       search and shared interrupt.  Active encode and decode streams migrate.
+       The current upstream Linux ``sam9x7.dtsi`` describes only ``0x300``
+       bytes for that first resource and needs a separate correction before
+       software can map the upper banks.  In the 2026-08-25 integration gate,
+       unmodified AT91Bootstrap 4.0.13
+       ``sam9x75_curiositynf_uboot_defconfig`` detected the ONFI device,
+       selected timing mode 3, initialized eight-sector 512-byte/BCH8 PMECC,
+       copied the configured 1 MiB image from NAND offset ``0x40000`` into DDR
+       and reached the unmodified U-Boot prompt.  An authentic raw image and
+       variants with two and eight corrupt data bits in the first loaded
+       sector produced byte-identical serial transcripts and empty
+       ``-d unimp,guest_errors`` logs.  The error cases execute
+       AT91Bootstrap's syndrome expansion, Berlekamp-Massey processing,
+       PMERRLOC programming and Chien search, and data-bit correction.
        Ready/busy timing and pin signaling, the additional redundant parameter
-       pages, real PMECC generation/correction, complete bad-block/OOB behavior,
-       unique-ID, Read Status Enhanced, cache, copyback, interleaved, two-plane,
-       protection, recovery-read and randomizer command effects, I/O-strength
-       and randomizer default-fuse programming, invalid-feature-address
-       readback, page-program order/NOP/endurance constraints, storage-error
-       handling and DMA remain missing.
+       pages, PMECC spare-area (``SPAREEN``) and manual ``USER`` phases,
+       PMECC/PMERRLOC timing and clock-gating fidelity, complete bad-block/OOB
+       behavior, unique-ID, Read Status Enhanced, cache, copyback, interleaved,
+       two-plane, protection, recovery-read and randomizer command effects,
+       I/O-strength and randomizer default-fuse programming,
+       invalid-feature-address readback, page-program order/NOP/endurance
+       constraints, storage-error handling and DMA remain missing.
    * - GEM and LAN8840
      - Initial
      - GEM0 has six priority queues, DMA transmit/receive, AIC sources 24 and
@@ -687,7 +699,8 @@ phase green merely by avoiding it in the device tree.
    abstractions.
 #. **Close storage and memory-controller fidelity.**  Complete SDHCI command,
    error, media-change and migration behavior; complete NAND OOB, bad-block,
-   ready/busy timing, PMECC generation/correction and DMA; finish SMC
+   ready/busy timing and DMA; finish the PMECC ``SPAREEN`` and ``USER`` paths,
+   timing and clock-gating behavior; finish SMC
    transaction timing, matrix and MPDDRC-visible behavior, including per-host
    remap and arbitration effects; and cover persistent QSPI protocol widths
    and errata.
@@ -830,22 +843,30 @@ without losing the firmware and disk-root results.  ``-kernel`` remains a
 development entry path and is not a substitute for ROM media selection.
 
 The populated raw NAND path can be exercised independently with the pinned
-NAND AT91Bootstrap.  Create an exactly 512 MiB data-only image, place U-Boot
-at the board boot offset, and start it with::
+NAND AT91Bootstrap.  Authentic pre-populated PMECC and correction validation
+requires a raw-page backend; the model also accepts a 512 MiB data-only image
+and supplies sparse OOB storage for ordinary NAND use.  In the raw layout,
+each page contains 4096 data bytes followed by 256 OOB bytes.  For the board's
+eight-sector 512-byte/BCH8 profile, place the thirteen
+ECC bytes for each sector consecutively in OOB bytes 152--255.  This profile
+uses GF(2^13), primitive polynomial ``0x201b`` and Atmel's swapped-bit byte
+ordering.  Keep OOB bytes 0--151 at ``0xff``.  A completely erased data page
+must retain an all-``0xff`` OOB area.  Thus a 512 MiB logical NAND image has
+131072 raw pages and an exact backend size of 570425344 bytes.  After
+preparing that image, start it with::
 
-  qemu-img create -f raw sam9x75-nand.bin 512M
-  qemu-io -f raw -c 'write -P 0xff 0 512M' sam9x75-nand.bin
-  dd if=u-boot.bin of=sam9x75-nand.bin bs=4096 seek=64 conv=notrunc
   qemu-system-arm -M sam9x75-curiosity \
     -kernel sam9x7-nandflashboot-uboot-4.0.13.elf \
-    -drive file=sam9x75-nand.bin,if=mtd,index=0,format=raw \
+    -drive file=sam9x75-nand-raw.bin,if=mtd,index=0,format=raw \
     -nic none -nographic
 
-The repeat must prove that the unmodified bootstrap assigns CS2 and the
+The 2026-08-25 repeat proved that the unmodified bootstrap assigns CS2 and the
 dedicated eight-bit NAND path, performs the documented ONFI status-poll and
 read-resume sequence, changes timing mode through Set/Get Features, initializes
-PMECC and copies 1 MiB from NAND before entering U-Boot.  Like the SD command
-above, this deliberately bypasses the proprietary mask ROM.
+PMECC and copies 1 MiB from NAND before entering U-Boot.  Clean, two-bit-error
+and eight-bit-error media all produced the same U-Boot transcript, closing the
+BCH8 correction gate.  Like the SD command above, this deliberately bypasses
+the proprietary mask ROM.
 
 Do not mechanically replay the exhaustive feature-register qtest on a physical
 board.  Keep ``80h``, ``90h`` and ``B0h`` checks read-only: those registers
@@ -853,20 +874,20 @@ include OTP-protection or one-time default-programming controls.  Initial
 differential tests should use read-only defaults plus reversible timing and
 recovery-read changes unless the NAND device is explicitly sacrificial.
 
-A complete dump of the SAM9X7 mask ROM can instead enter through the real
-reset vector::
+A dump of the proprietary 80 KiB SAM9X7 RomBOOT can instead enter through the
+real reset vector::
 
   qemu-system-arm -M sam9x75-curiosity \
     -bios sam9x7-rom.bin \
     -drive file=sam9x75-sdcard.img,if=sd,format=raw \
     -nic user,mac=02:00:00:09:75:01 -nographic
 
-The raw image must be exactly 176 KiB (180224 bytes), covering the entire ROM
-address range rather than only its bootloader portion.  QEMU does not include
-this proprietary image.  ``-bios`` and ``-kernel`` are mutually exclusive.
-The ROM loader makes genuine RomBOOT execution possible, but the real image
-and its SD, QSPI and NAND selection/fallback flows have not yet been
-validated.
+The raw image must be exactly 80 KiB (81920 bytes).  The separate 96 KiB ECC
+GF-table ROM at ``0x00100000`` is synthesized by QEMU and is neither supplied
+nor replaced by ``-bios``.  QEMU does not include the proprietary boot image.
+``-bios`` and ``-kernel`` are mutually exclusive.  The ROM loader makes
+genuine RomBOOT execution possible, but the real image and its SD, QSPI and
+NAND selection/fallback flows have not yet been validated.
 
 The initial VDDBU/factory value of ``BSC_CR.BOOT`` defaults to zero.  This
 QEMU-only option can set it to the OTP-emulation request value for RomBOOT
@@ -1111,10 +1132,12 @@ Completion gates
 Polling DBGU from SRAM, interrupt-driven bare metal and the populated
 LED/button paths are achieved.  The exact-EBI SD AT91Bootstrap path, Linux
 embedded-initramfs shell and a derivative-image ext4 disk-root shell are now
-repeated.  NAND AT91Bootstrap and GEM/LAN8840 packet exchange remain pending
-against the exact-EBI model; GEM discovery alone was repeated.  The other
-remaining integration gates include full guest ``mmc_spi`` operation
-through J24, the remaining board jumper and mux behavior, genuine QSPI and NAND
-RomBOOT, USB, CAN, expansion buses, multimedia/security, whole-machine
+repeated.  Exact-EBI NAND AT91Bootstrap is also repeated with clean, two-bit
+and BCH8-limit eight-bit-error media; all three reached a byte-identical U-Boot
+prompt with an empty diagnostic log.  GEM/LAN8840 packet exchange remains
+pending against the exact-EBI model; GEM discovery alone was repeated.  The
+other remaining integration gates include full guest ``mmc_spi`` operation
+through J24, the remaining board jumper and mux behavior, genuine QSPI and
+NAND RomBOOT, USB, CAN, expansion buses, multimedia/security, whole-machine
 migration and finally hardware differential validation.  Normal supported
 boots must be clean with ``-d unimp,guest_errors``.
