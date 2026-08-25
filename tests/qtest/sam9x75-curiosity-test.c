@@ -62,6 +62,7 @@
 #define SAM9X7_MCAN0_BASE       0xf8000000
 #define SAM9X7_MCAN1_BASE       0xf8004000
 #define SAM9X7_TCB_BASE         0xf8008000
+#define SAM9X7_TCB1_BASE        0xf800c000
 #define SAM9X7_GMAC_BASE        0xf802c000
 #define SAM9X7_UDPHS_BASE       0xf803c000
 #define SAM9X7_SFR_BASE         0xf8050000
@@ -1170,10 +1171,14 @@
 #define TCB_CMR_WAVESEL_UP_RC   (2U << 13)
 #define TCB_CMR_WAVE            BIT(15)
 #define TCB_INT_CPCS            BIT(4)
+#define TCB_INT_SECE            BIT(10)
+#define TCB_INT_MASK            (0xffU | TCB_INT_SECE)
 #define TCB_SR_CLKSTA           BIT(16)
+#define TCB_BMR_MASK            0x03f3ff3f
 #define TCB_WPMR_WPEN           BIT(0)
 #define TCB_WPMR_WPITEN         BIT(1)
 #define TCB_WPMR_WPCREN         BIT(2)
+#define TCB_WPMR_FIRSTE         BIT(4)
 #define TCB_WPMR_KEY            0x54494d00
 
 #define XDMAC_GTYPE             0x00
@@ -5514,6 +5519,200 @@ static void test_tcb_clocksource_clockevent_and_protection(void)
     g_assert_cmphex(qtest_readl(qts, ch2 + TCB_IMR), ==, 0);
 
     qtest_quit(qts);
+}
+
+static void test_tcb1_reset_masks_and_independence(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint64_t tc0_ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
+    uint64_t tc0_ch1 = SAM9X7_TCB_BASE + TCB_CHANNEL(1);
+    uint64_t tc1_ch0 = SAM9X7_TCB1_BASE + TCB_CHANNEL(0);
+    uint64_t tc1_ch1 = SAM9X7_TCB1_BASE + TCB_CHANNEL(1);
+    uint64_t tc1_ch2 = SAM9X7_TCB1_BASE + TCB_CHANNEL(2);
+
+    g_assert_cmphex(qtest_readl(qts, tc1_ch0 + TCB_CMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, tc1_ch1 + TCB_CMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, tc1_ch2 + TCB_CMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, tc1_ch0 + TCB_CV), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, tc1_ch0 + TCB_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TCB1_BASE + TCB_BMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TCB1_BASE + TCB_QIMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TCB1_BASE + TCB_WPMR), ==, 0);
+
+    qtest_writel(qts, tc0_ch0 + TCB_CMR, TCB_CMR_CLOCK2);
+    qtest_writel(qts, SAM9X7_TCB_BASE + TCB_BMR, 0x15);
+    qtest_writel(qts, tc1_ch0 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE);
+    qtest_writel(qts, SAM9X7_TCB1_BASE + TCB_BMR, UINT32_MAX);
+    qtest_writel(qts, tc1_ch1 + TCB_IER, UINT32_MAX);
+
+    g_assert_cmphex(qtest_readl(qts, tc0_ch0 + TCB_CMR), ==,
+                    TCB_CMR_CLOCK2);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TCB_BASE + TCB_BMR), ==,
+                    0x15);
+    g_assert_cmphex(qtest_readl(qts, tc0_ch1 + TCB_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, tc1_ch0 + TCB_CMR), ==,
+                    TCB_CMR_CLOCK2 | TCB_CMR_WAVE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TCB1_BASE + TCB_BMR), ==,
+                    TCB_BMR_MASK);
+    g_assert_cmphex(qtest_readl(qts, tc1_ch1 + TCB_IMR), ==,
+                    TCB_INT_MASK);
+
+    qtest_writel(qts, SAM9X7_TCB1_BASE + TCB_WPMR, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TCB1_BASE + TCB_WPMR), ==, 0);
+    qtest_writel(qts, SAM9X7_TCB1_BASE + TCB_WPMR,
+                 TCB_WPMR_KEY | UINT8_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TCB1_BASE + TCB_WPMR), ==,
+                    TCB_WPMR_WPEN | TCB_WPMR_WPITEN |
+                    TCB_WPMR_WPCREN | TCB_WPMR_FIRSTE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TCB_BASE + TCB_WPMR), ==, 0);
+
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, tc1_ch0 + TCB_CMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, tc1_ch1 + TCB_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TCB1_BASE + TCB_BMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TCB1_BASE + TCB_QIMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TCB1_BASE + TCB_WPMR), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_tcb1_clock_gating_and_irq(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint64_t tc0_ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
+    uint64_t tc1_ch0 = SAM9X7_TCB1_BASE + TCB_CHANNEL(0);
+    uint64_t tc1_ch1 = SAM9X7_TCB1_BASE + TCB_CHANNEL(1);
+    uint64_t tc1_ch2 = SAM9X7_TCB1_BASE + TCB_CHANNEL(2);
+    uint32_t tc0_value;
+    uint32_t tc1_value;
+    uint32_t gclk_value;
+    uint32_t status;
+
+    aic_configure(qts, 45, AIC_SMR_LEVEL_HIGH | 3, 0x45454545);
+    qtest_writel(qts, tc0_ch0 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE);
+    qtest_writel(qts, tc1_ch0 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE);
+    qtest_writel(qts, tc1_ch1 + TCB_CMR, TCB_CMR_WAVE);
+    qtest_writel(qts, tc0_ch0 + TCB_CCR,
+                 TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_writel(qts, tc1_ch0 + TCB_CCR,
+                 TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_writel(qts, tc1_ch1 + TCB_CCR,
+                 TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+
+    qtest_clock_step(qts, 100000);
+    g_assert_cmphex(qtest_readl(qts, tc0_ch0 + TCB_CV), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, tc1_ch0 + TCB_CV), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, tc1_ch1 + TCB_CV), ==, 0);
+
+    pmc_write_pcr(qts, 17, PMC_PCR_EN);
+    pmc_write_pcr(qts, 45, PMC_PCR_EN);
+    g_assert_cmpuint(get_clock_period(qts,
+                                     "/machine/soc/pmc/pclk[45]"), !=, 0);
+    qtest_clock_step(qts, 100000);
+    tc0_value = qtest_readl(qts, tc0_ch0 + TCB_CV);
+    tc1_value = qtest_readl(qts, tc1_ch0 + TCB_CV);
+    g_assert_cmpuint(tc0_value, >, 0);
+    g_assert_cmpuint(tc1_value, >, 0);
+    g_assert_cmphex(qtest_readl(qts, tc1_ch1 + TCB_CV), ==, 0);
+
+    pmc_write_pcr(qts, 45, 0);
+    g_assert_cmpuint(get_clock_period(qts,
+                                     "/machine/soc/pmc/pclk[45]"), ==, 0);
+    qtest_clock_step(qts, 100000);
+    g_assert_cmphex(qtest_readl(qts, tc1_ch0 + TCB_CV), ==, tc1_value);
+    g_assert_cmpuint(qtest_readl(qts, tc0_ch0 + TCB_CV), >, tc0_value);
+
+    pmc_write_pcr(qts, 45, PMC_PCR_EN);
+    qtest_clock_step(qts, 100000);
+    g_assert_cmpuint(qtest_readl(qts, tc1_ch0 + TCB_CV), >, tc1_value);
+
+    pmc_write_pcr(qts, 45, PMC_PCR_EN | (2U << 8) | (2U << 20) |
+                           PMC_PCR_GCKEN);
+    g_assert_cmpuint(get_clock_period(qts,
+                                     "/machine/soc/pmc/gclk[45]"), !=, 0);
+    qtest_clock_step(qts, 100000);
+    gclk_value = qtest_readl(qts, tc1_ch1 + TCB_CV);
+    g_assert_cmpuint(gclk_value, >, 0);
+
+    pmc_write_pcr(qts, 45, PMC_PCR_EN | (2U << 8) | (2U << 20));
+    g_assert_cmpuint(get_clock_period(qts,
+                                     "/machine/soc/pmc/gclk[45]"), ==, 0);
+    qtest_clock_step(qts, 100000);
+    g_assert_cmphex(qtest_readl(qts, tc1_ch1 + TCB_CV), ==, gclk_value);
+
+    qtest_writel(qts, tc1_ch2 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE |
+                 TCB_CMR_WAVESEL_UP_RC);
+    qtest_writel(qts, tc1_ch2 + TCB_RC, 4);
+    qtest_writel(qts, tc1_ch2 + TCB_IER, TCB_INT_CPCS);
+    qtest_writel(qts, tc1_ch2 + TCB_CCR,
+                 TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_clock_step(qts, 10000);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(13));
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(17));
+    status = qtest_readl(qts, tc1_ch2 + TCB_SR);
+    g_assert_true(status & TCB_INT_CPCS);
+    g_assert_true(status & TCB_SR_CLKSTA);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(13));
+
+    qtest_quit(qts);
+}
+
+static void test_tcb1_active_timer_migration(void)
+{
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    uint64_t tc0_ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
+    uint64_t tc1_ch0 = SAM9X7_TCB1_BASE + TCB_CHANNEL(0);
+    uint32_t before;
+    uint32_t migrated;
+    int64_t from_clock;
+
+    pmc_write_pcr(from, 45, PMC_PCR_EN);
+    qtest_writel(from, SAM9X7_TCB_BASE + TCB_BMR, 0x15);
+    qtest_writel(from, SAM9X7_TCB1_BASE + TCB_BMR, 0x2a);
+    qtest_writel(from, tc1_ch0 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE);
+    qtest_writel(from, tc1_ch0 + TCB_RC, 0x11223344);
+    qtest_writel(from, tc1_ch0 + TCB_IER, TCB_INT_CPCS);
+    qtest_writel(from, tc1_ch0 + TCB_CCR,
+                 TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_writel(from, SAM9X7_TCB1_BASE + TCB_WPMR,
+                 TCB_WPMR_KEY | TCB_WPMR_WPEN);
+    from_clock = qtest_clock_step(from, 100000);
+    before = qtest_readl(from, tc1_ch0 + TCB_CV);
+    g_assert_cmpuint(before, >, 0);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_cmphex(qtest_readl(to, tc0_ch0 + TCB_CMR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_TCB_BASE + TCB_BMR), ==, 0x15);
+    g_assert_cmphex(qtest_readl(to, tc1_ch0 + TCB_CMR), ==,
+                    TCB_CMR_CLOCK2 | TCB_CMR_WAVE);
+    g_assert_cmphex(qtest_readl(to, tc1_ch0 + TCB_RC), ==, 0x11223344);
+    g_assert_cmphex(qtest_readl(to, tc1_ch0 + TCB_IMR), ==, TCB_INT_CPCS);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_TCB1_BASE + TCB_BMR), ==, 0x2a);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_TCB1_BASE + TCB_WPMR), ==,
+                    TCB_WPMR_WPEN);
+    g_assert_true(qtest_readl(to, tc1_ch0 + TCB_CSR) & TCB_SR_CLKSTA);
+    g_assert_cmpuint(get_clock_period(to,
+                                     "/machine/soc/pmc/pclk[45]"), !=, 0);
+
+    /* qtest virtual clocks are independent; align the destination clock. */
+    g_assert_cmpint(qtest_clock_set(to, from_clock), ==, from_clock);
+    migrated = qtest_readl(to, tc1_ch0 + TCB_CV);
+    g_assert_cmpuint(migrated, >=, before);
+    qtest_clock_step(to, 100000);
+    g_assert_cmpuint(qtest_readl(to, tc1_ch0 + TCB_CV), >, migrated);
+
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
 static uint32_t xdmac_waitl(QTestState *qts, uint64_t offset,
@@ -17158,6 +17357,12 @@ int main(int argc, char **argv)
                    test_pit64b_timing_gating_and_irq);
     qtest_add_func("sam9x75/tcb/clocksource-clockevent-and-protection",
                    test_tcb_clocksource_clockevent_and_protection);
+    qtest_add_func("sam9x75/tcb1/reset-masks-and-independence",
+                   test_tcb1_reset_masks_and_independence);
+    qtest_add_func("sam9x75/tcb1/clock-gating-and-irq",
+                   test_tcb1_clock_gating_and_irq);
+    qtest_add_func("sam9x75/tcb1/active-timer-migration",
+                   test_tcb1_active_timer_migration);
     qtest_add_func("sam9x75/xdmac/registers-memcpy-and-descriptors",
                    test_xdmac_registers_memcpy_and_descriptors);
     qtest_add_func("sam9x75/xdmac/pacing-striding-and-errors",

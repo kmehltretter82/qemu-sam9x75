@@ -106,6 +106,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_MCAN0_BASE            0xf8000000
 #define SAM9X7_MCAN1_BASE            0xf8004000
 #define SAM9X7_TCB_BASE              0xf8008000
+#define SAM9X7_TCB1_BASE             0xf800c000
 #define SAM9X7_SFR_BASE              0xf8050000
 #define SAM9X7_GMAC_BASE             0xf802c000
 #define SAM9X7_UDPHS_BASE            0xf803c000
@@ -183,6 +184,7 @@ struct SAM9X7State {
     AT91RTTState rtt;
     AT91RTCState rtc;
     AT91TCBState tcb;
+    AT91TCBState tcb1;
     AT91WDTState wdt;
     OrIRQState sys_irq;
     OrIRQState ebi_irq;

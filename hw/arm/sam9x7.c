@@ -302,6 +302,14 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->tcb), 0,
                        qdev_get_gpio_in(DEVICE(&s->aic), 17));
 
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->tcb1), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->tcb1), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_TCB1_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->tcb1), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 45));
+
     object_property_set_link(OBJECT(&s->xdmac), "dma-memory",
                              OBJECT(s->memory), &error_abort);
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->xdmac), errp)) {
@@ -842,6 +850,14 @@ static void sam9x7_init(Object *obj)
     qdev_connect_clock_in(DEVICE(&s->tcb), "gclk",
                           qdev_get_clock_out(DEVICE(&s->pmc), "gclk[17]"));
     qdev_connect_clock_in(DEVICE(&s->tcb), "slck",
+                          qdev_get_clock_out(DEVICE(&s->sckc), "md-slck"));
+
+    object_initialize_child(obj, "tcb1", &s->tcb1, TYPE_AT91_TCB);
+    qdev_connect_clock_in(DEVICE(&s->tcb1), "pclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "pclk[45]"));
+    qdev_connect_clock_in(DEVICE(&s->tcb1), "gclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "gclk[45]"));
+    qdev_connect_clock_in(DEVICE(&s->tcb1), "slck",
                           qdev_get_clock_out(DEVICE(&s->sckc), "md-slck"));
 
     object_initialize_child(obj, "xdmac", &s->xdmac, TYPE_AT91_XDMAC);

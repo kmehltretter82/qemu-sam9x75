@@ -456,12 +456,15 @@ Support matrix
        displacement.  LED intensity and every switch path have board qtests.
    * - Timers, ADC, PWM and SSC
      - Initial
-     - TC0 has three 32-bit channels, GCLK/MCK-divided/slow-clock selection,
+     - TC0 and TC1 each expose the modeled ``0x100``-byte, three-channel TCB
+       subset with independent state, GCLK/MCK-divided/slow-clock selection,
        PMC gating, free-running and RC-reset waveform timing, synchronization,
-       periodic and one-shot interrupts, write protection and migration state.
-       This covers the unmodified Linux clocksource and clockevent paths.
-       External TCLK/TIO capture and waveform routing, up/down modes, QDEC,
-       TC1, ADC inputs, PWM outputs and synchronous serial operation remain.
+       periodic and one-shot interrupts, write protection and active-timer
+       migration.  TC0 uses PID/AIC source 17 and TC1 uses PID/AIC source 45.
+       The TC0 instance covers the unmodified Linux clocksource and clockevent
+       paths.  The common TCB model does not yet cover external TCLK/TIO
+       capture and waveform routing, up/down modes or QDEC.  ADC inputs, PWM
+       outputs and synchronous serial operation also remain.
    * - Audio
      - Initial
      - I2SMCC register state, clocking, mono/compact/TDM framing, interrupts,
@@ -650,9 +653,10 @@ phase green merely by avoiding it in the device tree.
    client/SMBus/PEC and high-speed/arbitration behavior; extend the XDMAC FIFO
    path to descriptors, cyclic and multi-microblock transfers and complete
    GWAC/CNDC.QOS behavior;
-   and wire every remaining documented XDMAC request.  Complete SSC, TC1,
-   external timer pins, PWM and ADC so expansion-board drivers can use normal
-   QEMU chardev, SSI, I2C and analog/digital endpoint abstractions.
+   and wire every remaining documented XDMAC request.  Complete SSC, the
+   remaining TCB modes and external timer pins, PWM and ADC so expansion-board
+   drivers can use normal QEMU chardev, SSI, I2C and analog/digital endpoint
+   abstractions.
 #. **Close storage and memory-controller fidelity.**  Complete SDHCI command,
    error, media-change and migration behavior; complete NAND OOB, bad-block,
    ready/busy timing, PMECC generation/correction and DMA; finish SMC
