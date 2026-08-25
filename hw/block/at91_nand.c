@@ -12,6 +12,8 @@
 #include "hw/block/at91_nand.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
+#include "hw/core/resettable.h"
+#include "migration/qemu-file-types.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/bswap.h"
@@ -39,12 +41,43 @@
 #define NAND_CMD_RESET          0xff
 
 #define NAND_STATUS_FAIL        BIT(0)
+#define NAND_STATUS_TRUE_READY  BIT(5)
 #define NAND_STATUS_READY       BIT(6)
 #define NAND_STATUS_WP          BIT(7)
 
 #define ONFI_PARAM_SIZE         256
-#define ONFI_PARAM_COPIES       3
+#define ONFI_PARAM_COPIES       8
 #define ONFI_CRC_BASE           0x4f4e
+
+#define NAND_FEATURE_TIMING_MODE        0x01
+#define NAND_FEATURE_IO_DRIVE_STRENGTH  0x80
+#define NAND_FEATURE_RECOVERY_READ      0x89
+#define NAND_FEATURE_ARRAY_MODE         0x90
+#define NAND_FEATURE_CONFIGURATION      0xb0
+
+static void at91_nand_clear_sparse_pages(AT91NANDState *s)
+{
+    unsigned int page;
+
+    if (!s->sparse_pages) {
+        return;
+    }
+    for (page = 0; page < AT91_NAND_NUM_PAGES; page++) {
+        g_clear_pointer(&s->sparse_pages[page], g_free);
+    }
+}
+
+static bool at91_nand_has_sparse_pages(const AT91NANDState *s)
+{
+    unsigned int page;
+
+    for (page = 0; page < AT91_NAND_NUM_PAGES; page++) {
+        if (s->sparse_pages[page]) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static uint16_t at91_nand_onfi_crc(uint16_t crc, const uint8_t *p,
                                    size_t len)
@@ -201,39 +234,43 @@ static void at91_nand_prepare_parameter_page(AT91NANDState *s)
 
     memset(p, 0, ONFI_PARAM_SIZE);
     memcpy(p, "ONFI", 4);
-    stw_le_p(p + 4, BIT(5));             /* ONFI 2.3 */
-    stw_le_p(p + 6, 0);                  /* x8, no extended page */
-    stw_le_p(p + 8, 0);                  /* no optional commands needed */
-    p[14] = ONFI_PARAM_COPIES;
+    stw_le_p(p + 4, 0x0002);             /* ONFI 1.0 */
+    stw_le_p(p + 6, 0x0018);  /* interleaving + no odd/even copyback limit */
+    stw_le_p(p + 8, 0x003f);             /* supported optional commands */
 
     memset(p + 32, ' ', 12);
     memcpy(p + 32, "MACRONIX", 8);
     memset(p + 44, ' ', 20);
-    memcpy(p + 44, "MX30LF4G28AD-XKI", 17);
+    memcpy(p + 44, "MX30LF4G28AD", 12);
     p[64] = 0xc2;
 
     stl_le_p(p + 80, AT91_NAND_PAGE_SIZE);
     stw_le_p(p + 84, AT91_NAND_OOB_SIZE);
-    stl_le_p(p + 86, 0);
-    stw_le_p(p + 90, 0);
+    stl_le_p(p + 86, 1024);
+    stw_le_p(p + 90, 64);
     stl_le_p(p + 92, AT91_NAND_PAGES_PER_BLOCK);
     stl_le_p(p + 96, AT91_NAND_NUM_BLOCKS);
     p[100] = 1;                          /* one LUN */
-    p[101] = 0x32;                       /* 3 row + 2 column cycles */
+    p[101] = 0x23;                       /* 3 row + 2 column cycles */
     p[102] = 1;                          /* SLC */
     stw_le_p(p + 103, 40);
-    stw_le_p(p + 105, 1000);
-    p[107] = 1;
-    stw_le_p(p + 108, 1000);
-    p[110] = 1;
+    stw_le_p(p + 105, 0x0406);
+    p[107] = 8;
+    stw_le_p(p + 108, 0);
+    p[110] = 4;
     p[112] = 8;                          /* ECC bits per 512 bytes */
+    p[113] = 1;
+    p[114] = 0x0e;
 
     p[128] = 10;
     stw_le_p(p + 129, 0x003f);           /* async timing modes 0..5 */
-    stw_le_p(p + 133, 600);
-    stw_le_p(p + 135, 5000);
+    stw_le_p(p + 131, 0x003f);           /* cache timing modes 0..5 */
+    stw_le_p(p + 133, 700);
+    stw_le_p(p + 135, 6000);
     stw_le_p(p + 137, 25);
-    stw_le_p(p + 139, 70);
+    stw_le_p(p + 139, 60);
+    p[167] = 3;                          /* randomizer and recovery read */
+    p[169] = 5;                          /* recovery-read levels */
 
     crc = at91_nand_onfi_crc(ONFI_CRC_BASE, p, 254);
     stw_le_p(p + 254, crc);
@@ -242,6 +279,53 @@ static void at91_nand_prepare_parameter_page(AT91NANDState *s)
     }
     s->data_pos = 0;
     s->data_len = ONFI_PARAM_SIZE * ONFI_PARAM_COPIES;
+}
+
+static uint8_t at91_nand_feature_mask(uint8_t address)
+{
+    switch (address) {
+    case NAND_FEATURE_TIMING_MODE:
+    case NAND_FEATURE_RECOVERY_READ:
+        return 0x07;
+    case NAND_FEATURE_IO_DRIVE_STRENGTH:
+        return 0x01;
+    case NAND_FEATURE_ARRAY_MODE:
+        return 0x03;
+    case NAND_FEATURE_CONFIGURATION:
+        return 0x07;
+    default:
+        return 0;
+    }
+}
+
+static bool at91_nand_feature_value_valid(uint8_t address, uint8_t value)
+{
+    switch (address) {
+    case NAND_FEATURE_TIMING_MODE:
+    case NAND_FEATURE_RECOVERY_READ:
+        return value <= 5;
+    case NAND_FEATURE_IO_DRIVE_STRENGTH:
+    case NAND_FEATURE_CONFIGURATION:
+        return true;
+    case NAND_FEATURE_ARRAY_MODE:
+        return value == 0 || value == 1 || value == 3;
+    default:
+        return false;
+    }
+}
+
+static bool at91_nand_commit_features(AT91NANDState *s)
+{
+    uint8_t address = s->feature_address;
+    uint8_t value = s->data[0] & at91_nand_feature_mask(address);
+
+    if (!at91_nand_feature_value_valid(address, value)) {
+        return false;
+    }
+
+    memset(s->features[address], 0, sizeof(s->features[address]));
+    s->features[address][0] = value;
+    return true;
 }
 
 static void at91_nand_prepare_features(AT91NANDState *s)
@@ -305,13 +389,35 @@ static void at91_nand_erase_block(AT91NANDState *s)
     }
 }
 
+static bool at91_nand_data_output_command(uint8_t command)
+{
+    switch (command) {
+    case NAND_CMD_READ0:
+    case NAND_CMD_READ_PARAM:
+    case NAND_CMD_GET_FEATURES:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void at91_nand_command(AT91NANDState *s, uint8_t command)
 {
     uint8_t previous = s->command;
+    uint8_t status_return = s->previous_command;
 
-    s->previous_command = previous;
     switch (command) {
     case NAND_CMD_READ0:
+        /* 00h re-enables data output after an intervening status read. */
+        if (previous == NAND_CMD_STATUS &&
+            at91_nand_data_output_command(status_return)) {
+            command = status_return;
+            break;
+        }
+        s->address_len = 0;
+        s->data_pos = 0;
+        s->data_len = 0;
+        break;
     case NAND_CMD_READ_ID:
     case NAND_CMD_READ_PARAM:
     case NAND_CMD_GET_FEATURES:
@@ -356,7 +462,8 @@ static void at91_nand_command(AT91NANDState *s, uint8_t command)
     case NAND_CMD_STATUS:
         break;
     case NAND_CMD_RESET:
-        s->status = NAND_STATUS_READY | NAND_STATUS_WP;
+        s->status = NAND_STATUS_TRUE_READY | NAND_STATUS_READY |
+                    NAND_STATUS_WP;
         s->address_len = 0;
         s->data_pos = 0;
         s->data_len = 0;
@@ -365,6 +472,9 @@ static void at91_nand_command(AT91NANDState *s, uint8_t command)
         qemu_log_mask(LOG_GUEST_ERROR,
                       TYPE_AT91_NAND ": unknown command 0x%02x\n", command);
         break;
+    }
+    if (command != NAND_CMD_STATUS || previous != NAND_CMD_STATUS) {
+        s->previous_command = previous;
     }
     s->command = command;
 }
@@ -393,7 +503,10 @@ static void at91_nand_data_write(AT91NANDState *s, uint8_t value)
             s->feature_address = s->address_len ? s->address[0] : 0;
         }
         if (s->data_pos < 4) {
-            s->features[s->feature_address][s->data_pos++] = value;
+            s->data[s->data_pos++] = value;
+            if (s->data_pos == 4) {
+                at91_nand_commit_features(s);
+            }
         }
     }
 }
@@ -481,13 +594,19 @@ static void at91_nand_nce(void *opaque, int n, int level)
     s->selected = !level;
 }
 
-static void at91_nand_reset(DeviceState *dev)
+static void at91_nand_reset_hold(Object *obj, ResetType type)
 {
-    AT91NANDState *s = AT91_NAND(dev);
+    AT91NANDState *s = AT91_NAND(obj);
+
+    /* The external NAND is not connected to the SoC's core-reset net. */
+    if (type == RESET_TYPE_WAKEUP) {
+        return;
+    }
 
     s->command = NAND_CMD_READ0;
     s->previous_command = NAND_CMD_READ0;
-    s->status = NAND_STATUS_READY | NAND_STATUS_WP;
+    s->status = NAND_STATUS_TRUE_READY | NAND_STATUS_READY |
+                NAND_STATUS_WP;
     memset(s->address, 0, sizeof(s->address));
     s->address_len = 0;
     s->feature_address = 0;
@@ -531,21 +650,231 @@ static void at91_nand_realize(DeviceState *dev, Error **errp)
 static void at91_nand_finalize(Object *obj)
 {
     AT91NANDState *s = AT91_NAND(obj);
-    unsigned int i;
 
     if (s->sparse_pages) {
-        for (i = 0; i < AT91_NAND_NUM_PAGES; i++) {
-            g_free(s->sparse_pages[i]);
-        }
+        at91_nand_clear_sparse_pages(s);
         g_free(s->sparse_pages);
     }
 }
 
-/* Flash contents are storage state; the in-flight NAND protocol is migrated. */
+static bool at91_nand_sparse_payload(AT91NANDState *s, size_t size,
+                                     size_t *offset, Error **errp)
+{
+    if (size == AT91_NAND_PAGE_TOTAL_SIZE) {
+        if (s->blk) {
+            error_setg(errp, "full sparse NAND state requires no backend");
+            return false;
+        }
+        *offset = 0;
+        return true;
+    }
+
+    if (size == AT91_NAND_OOB_SIZE) {
+        if (!s->blk || s->raw_backend) {
+            error_setg(errp,
+                       "sparse NAND OOB state requires a data-only backend");
+            return false;
+        }
+        *offset = AT91_NAND_PAGE_SIZE;
+        return true;
+    }
+
+    error_setg(errp, "invalid sparse NAND payload size %zu", size);
+    return false;
+}
+
+static bool at91_nand_sparse_save(QEMUFile *f, void *pv, size_t size,
+                                  const VMStateField *field,
+                                  JSONWriter *vmdesc, Error **errp)
+{
+    AT91NANDState *s = pv;
+    uint32_t count = 0;
+    size_t offset;
+    unsigned int page;
+
+    if (!at91_nand_sparse_payload(s, size, &offset, errp)) {
+        return false;
+    }
+
+    for (page = 0; page < AT91_NAND_NUM_PAGES; page++) {
+        count += s->sparse_pages[page] != NULL;
+    }
+
+    qemu_put_be32(f, count);
+    for (page = 0; page < AT91_NAND_NUM_PAGES; page++) {
+        if (!s->sparse_pages[page]) {
+            continue;
+        }
+        qemu_put_be32(f, page);
+        qemu_put_buffer(f, s->sparse_pages[page] + offset, size);
+    }
+    return true;
+}
+
+static bool at91_nand_sparse_load(QEMUFile *f, void *pv, size_t size,
+                                  const VMStateField *field, Error **errp)
+{
+    AT91NANDState *s = pv;
+    uint32_t count, page, previous = 0;
+    size_t offset;
+    unsigned int i;
+
+    if (!at91_nand_sparse_payload(s, size, &offset, errp)) {
+        return false;
+    }
+    if (at91_nand_has_sparse_pages(s)) {
+        error_setg(errp, "duplicate sparse NAND migration subsection");
+        return false;
+    }
+
+    count = qemu_get_be32(f);
+    if (qemu_file_get_error(f) < 0) {
+        error_setg(errp, "truncated sparse NAND page count");
+        return false;
+    }
+    if (count > AT91_NAND_NUM_PAGES) {
+        error_setg(errp, "invalid sparse NAND page count %" PRIu32, count);
+        return false;
+    }
+
+    for (i = 0; i < count; i++) {
+        uint8_t *data;
+
+        page = qemu_get_be32(f);
+        if (qemu_file_get_error(f) < 0 ||
+            page >= AT91_NAND_NUM_PAGES || (i && page <= previous)) {
+            error_setg(errp, "invalid sparse NAND page index %" PRIu32,
+                       page);
+            goto fail;
+        }
+
+        data = g_malloc0(AT91_NAND_PAGE_TOTAL_SIZE);
+        if (qemu_get_buffer(f, data + offset, size) != size) {
+            g_free(data);
+            error_setg(errp, "truncated sparse NAND page %" PRIu32, page);
+            goto fail;
+        }
+
+        s->sparse_pages[page] = data;
+        previous = page;
+    }
+
+    return true;
+
+fail:
+    at91_nand_clear_sparse_pages(s);
+    return false;
+}
+
+static const VMStateInfo at91_nand_sparse_info = {
+    .name = "at91-nand-sparse-pages",
+    .load = at91_nand_sparse_load,
+    .save = at91_nand_sparse_save,
+};
+
+static bool at91_nand_sparse_full_needed(void *opaque)
+{
+    AT91NANDState *s = opaque;
+
+    return !s->blk && at91_nand_has_sparse_pages(s);
+}
+
+static bool at91_nand_sparse_oob_needed(void *opaque)
+{
+    AT91NANDState *s = opaque;
+
+    return s->blk && !s->raw_backend && at91_nand_has_sparse_pages(s);
+}
+
+static const VMStateDescription at91_nand_sparse_full_vmstate = {
+    .name = TYPE_AT91_NAND "/sparse-full-pages",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = at91_nand_sparse_full_needed,
+    .fields = (const VMStateField[]) {
+        {
+            .name = "pages",
+            .size = AT91_NAND_PAGE_TOTAL_SIZE,
+            .info = &at91_nand_sparse_info,
+            .flags = VMS_SINGLE,
+            .offset = 0,
+        },
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription at91_nand_sparse_oob_vmstate = {
+    .name = TYPE_AT91_NAND "/sparse-oob-pages",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = at91_nand_sparse_oob_needed,
+    .fields = (const VMStateField[]) {
+        {
+            .name = "pages",
+            .size = AT91_NAND_OOB_SIZE,
+            .info = &at91_nand_sparse_info,
+            .flags = VMS_SINGLE,
+            .offset = 0,
+        },
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static bool at91_nand_pre_load(void *opaque, Error **errp)
+{
+    at91_nand_clear_sparse_pages(opaque);
+    return true;
+}
+
+static bool at91_nand_post_load(void *opaque, int version_id, Error **errp)
+{
+    AT91NANDState *s = opaque;
+
+    if (s->address_len > ARRAY_SIZE(s->address)) {
+        error_setg(errp, "invalid NAND address length %u", s->address_len);
+        return false;
+    }
+    if (s->data_pos > sizeof(s->data) || s->data_len > sizeof(s->data)) {
+        error_setg(errp, "invalid NAND data cursor %" PRIu32 "/%" PRIu32,
+                   s->data_pos, s->data_len);
+        return false;
+    }
+    if (s->command == NAND_CMD_SET_FEATURES && s->data_pos > 4) {
+        error_setg(errp, "invalid NAND Set Features cursor %" PRIu32,
+                   s->data_pos);
+        return false;
+    }
+    if (s->program_column > UINT16_MAX ||
+        (s->program_pos != UINT32_MAX && s->program_pos > UINT16_MAX)) {
+        error_setg(errp, "invalid NAND program cursor %" PRIu32 "/%" PRIu32,
+                   s->program_column, s->program_pos);
+        return false;
+    }
+    if (s->raw_backend && at91_nand_has_sparse_pages(s)) {
+        error_setg(errp, "raw NAND backend has unexpected sparse state");
+        return false;
+    }
+
+    /*
+     * Versions 1 and 2 staged an in-flight Set Features transaction in the
+     * feature array itself.  Recover those bytes so P4 can atomically commit
+     * the transaction using the version 3 representation.
+     */
+    if (version_id < 3 && s->command == NAND_CMD_SET_FEATURES &&
+        s->data_pos && s->data_pos < 4) {
+        memcpy(s->data, s->features[s->feature_address], s->data_pos);
+    }
+
+    return true;
+}
+
+/* External backend data is shared storage; device-owned sparse state moves. */
 static const VMStateDescription at91_nand_vmstate = {
     .name = TYPE_AT91_NAND,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
+    .pre_load_errp = at91_nand_pre_load,
+    .post_load_errp = at91_nand_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8(command, AT91NANDState),
         VMSTATE_BOOL_V(selected, AT91NANDState, 2),
@@ -563,6 +892,11 @@ static const VMStateDescription at91_nand_vmstate = {
         VMSTATE_BUFFER(data, AT91NANDState),
         VMSTATE_BUFFER(program, AT91NANDState),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &at91_nand_sparse_full_vmstate,
+        &at91_nand_sparse_oob_vmstate,
+        NULL
     },
 };
 
@@ -585,13 +919,14 @@ static void at91_nand_init(Object *obj)
 static void at91_nand_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->desc = "Macronix MX30LF4G28AD raw NAND on AT91 SMC";
     dc->realize = at91_nand_realize;
     dc->vmsd = &at91_nand_vmstate;
-    device_class_set_legacy_reset(dc, at91_nand_reset);
     device_class_set_props(dc, at91_nand_properties);
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
+    rc->phases.hold = at91_nand_reset_hold;
 }
 
 static const TypeInfo at91_nand_info = {

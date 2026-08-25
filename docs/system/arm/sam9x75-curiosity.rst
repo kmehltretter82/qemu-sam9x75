@@ -19,6 +19,8 @@ The implementation and tests are pinned to the following inputs:
   ``37b51cecee93146f97cb1082461bfc1051059f8bf2a42e9c4205d7dc4f6400ce``.
 * SAM9X7 Series data sheet DS60001813E.
 * SAM9X7 Series silicon errata DS80001082G.
+* Macronix MX30LF1G28AD/MX30LF2G28AD/MX30LF4G28AD data sheet PM2579,
+  revision 1.3, August 2022.
 * AT91Bootstrap v4.0.13, commit
   ``c2e3f87bf694a4c27c60d24db512adcdd4d7b442``.
 * U-Boot ``linux4microchip-2026.04``, commit
@@ -204,10 +206,29 @@ Support matrix
        widths and the ROM quad-mode erratum need further coverage.
    * - EBI/SMC and raw NAND
      - Initial
-     - The MX30LF4G28AD identity, ONFI parameter data, page program/read and
-       erase paths, SMC registers, and initial PMECC/PMERRLOC control/status are
-       present.  Real ECC generation/correction, OOB/bad-block behavior and DMA
-       remain missing.
+     - The MX30LF4G28AD identity and its first eight known ONFI parameter-page
+       copies match the device data sheet.  After the documented pre-data
+       ``70h`` completion poll, ``00h`` enables parameter, page and Get Features
+       transfer; that poll-to-transfer state also survives migration.  Set
+       Features accepts P1--P4 before updating volatile readback and implements
+       the documented P1 masks and reset values for board-valid registers.  A
+       malformed interruption before P4 follows a deterministic emulator policy
+       that has not been compared with hardware.  The resulting volatile
+       feature state survives ``FFh`` and SoC core resets but not a power-on
+       reset.  Feature address ``A0h`` is invalid because the board
+       leaves the NAND PT pin unconnected and its internal pull-down holds PT
+       low.  Page and OOB program/read/erase paths,
+       migration of device-owned sparse/OOB state with shared backend data, SMC
+       registers, and initial PMECC/PMERRLOC control/status are present.  An
+       unmodified NAND AT91Bootstrap detects ONFI, selects timing mode 3, loads
+       U-Boot from offset ``0x40000`` and reaches the prompt.
+       Ready/busy timing and pin signaling, the additional redundant parameter
+       pages, real PMECC generation/correction, complete bad-block/OOB behavior,
+       unique-ID, Read Status Enhanced, cache, copyback, interleaved, two-plane,
+       protection, recovery-read and randomizer command effects, I/O-strength
+       and randomizer default-fuse programming, invalid-feature-address
+       readback, page-program order/NOP/endurance constraints, storage-error
+       handling and DMA remain missing.
    * - GEM and LAN8840
      - Initial
      - GEM0 has six priority queues, DMA transmit/receive, AIC sources 24 and
@@ -407,10 +428,10 @@ phase green merely by avoiding it in the device tree.
    pins, PWM and ADC so expansion-board drivers can use normal QEMU chardev,
    SSI, I2C and analog/digital endpoint abstractions.
 #. **Close storage and memory-controller fidelity.**  Complete SDHCI command,
-   error, media-change and migration behavior; implement NAND OOB, bad-block,
-   PMECC generation/correction and DMA; finish SMC, matrix and MPDDRC-visible
-   behavior, including per-host remap and arbitration effects; and cover
-   persistent QSPI protocol widths and errata.
+   error, media-change and migration behavior; complete NAND OOB, bad-block,
+   ready/busy timing, PMECC generation/correction and DMA; finish SMC, matrix
+   and MPDDRC-visible behavior, including per-host remap and arbitration
+   effects; and cover persistent QSPI protocol widths and errata.
 #. **Boot like the board.**  Implement the mask-ROM media-selection state
    machine, straps, authentication/error fallbacks and the documented QSPI
    erratum on top of the modeled reset and SRAM remap path.  Prove cold boot
@@ -486,12 +507,36 @@ loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
 reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
 AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
 hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The normal-path board qtests in the 98-test suite and this boot are clean of
+The normal-path board qtests in the 106-test suite and this boot are clean of
 SAM9X75 model warnings with ``-d unimp,guest_errors``; intentional negative
 and unsupported-command qtests exercise the corresponding diagnostics.
 Generic SD diagnostics still report the expected failed MMC/SDIO probes
 against a memory-only SD card.  ``-kernel`` remains a development entry path
 and is not a substitute for ROM media selection.
+
+The populated raw NAND path can be exercised independently with the pinned
+NAND AT91Bootstrap.  Create an exactly 512 MiB data-only image, place U-Boot
+at the board boot offset, and start it with::
+
+  qemu-img create -f raw sam9x75-nand.bin 512M
+  qemu-io -f raw -c 'write -P 0xff 0 512M' sam9x75-nand.bin
+  dd if=u-boot.bin of=sam9x75-nand.bin bs=4096 seek=64 conv=notrunc
+  qemu-system-arm -M sam9x75-curiosity \
+    -kernel sam9x7-nandflashboot-uboot-4.0.13.elf \
+    -drive file=sam9x75-nand.bin,if=mtd,index=0,format=raw \
+    -nic none -nographic
+
+The unmodified bootstrap performs the device's documented ONFI status-poll and
+read-resume sequence, changes timing mode through Set/Get Features, initializes
+PMECC and copies 1 MiB from NAND before entering U-Boot.  This verifies the
+firmware media path but, like the SD command above, deliberately bypasses the
+proprietary mask ROM.
+
+Do not mechanically replay the exhaustive feature-register qtest on a physical
+board.  Keep ``80h``, ``90h`` and ``B0h`` checks read-only: those registers
+include OTP-protection or one-time default-programming controls.  Initial
+differential tests should use read-only defaults plus reversible timing and
+recovery-read changes unless the NAND device is explicitly sacrificial.
 
 A complete dump of the SAM9X7 mask ROM can instead enter through the real
 reset vector::
@@ -647,7 +692,7 @@ electrical route changes.
 Completion gates
 ----------------
 
-Polling DBGU from SRAM, interrupt-driven bare metal, unmodified SD
+Polling DBGU from SRAM, interrupt-driven bare metal, unmodified SD and NAND
 AT91Bootstrap into U-Boot, a Linux shell from SD, and GEM/LAN8840 packet
 exchange and the populated LED/button paths are achieved.  The remaining
 integration gates include full guest ``mmc_spi`` operation through J24, the

@@ -1155,6 +1155,14 @@
 #define NAND_DATA               SAM9X7_NAND_BASE
 #define NAND_ALE                (SAM9X7_NAND_BASE + BIT(21))
 #define NAND_CLE                (SAM9X7_NAND_BASE + BIT(22))
+#define NAND_PAGE_SIZE          4096
+#define NAND_OOB_SIZE           256
+#define NAND_PAGE_TOTAL_SIZE    (NAND_PAGE_SIZE + NAND_OOB_SIZE)
+#define NAND_NUM_PAGES          (64 * 2048)
+#define NAND_DATA_SIZE          ((uint64_t)NAND_PAGE_SIZE * NAND_NUM_PAGES)
+#define NAND_RAW_SIZE           ((uint64_t)NAND_PAGE_TOTAL_SIZE * \
+                                 NAND_NUM_PAGES)
+#define NAND_TEST_OOB_COLUMN    (NAND_PAGE_SIZE + 17)
 
 #define NAND_CMD_READ0          0x00
 #define NAND_CMD_PAGE_PROGRAM   0x10
@@ -1165,9 +1173,15 @@
 #define NAND_CMD_READ_ID        0x90
 #define NAND_CMD_ERASE_START    0xd0
 #define NAND_CMD_READ_PARAM     0xec
+#define NAND_CMD_GET_FEATURES   0xee
+#define NAND_CMD_SET_FEATURES   0xef
+#define NAND_CMD_RESET          0xff
 
+#define NAND_STATUS_TRUE_READY  BIT(5)
 #define NAND_STATUS_READY       BIT(6)
 #define NAND_STATUS_WP          BIT(7)
+#define NAND_STATUS_IDLE        (NAND_STATUS_TRUE_READY | \
+                                 NAND_STATUS_READY | NAND_STATUS_WP)
 
 #define SMC_SETUP2              0x20
 #define SMC_PULSE2              0x24
@@ -9883,19 +9897,104 @@ static void nand_address(QTestState *qts, uint8_t address)
     qtest_writeb(qts, NAND_ALE, address);
 }
 
-static uint16_t nand_onfi_crc(const uint8_t *data, size_t length)
+static void nand_page_address(QTestState *qts, uint32_t column,
+                              uint32_t page)
 {
-    uint16_t crc = 0x4f4e;
+    nand_address(qts, column);
+    nand_address(qts, column >> 8);
+    nand_address(qts, page);
+    nand_address(qts, page >> 8);
+    nand_address(qts, page >> 16);
+}
+
+static void nand_program(QTestState *qts, uint32_t page, uint32_t column,
+                         const uint8_t *data, size_t length)
+{
+    size_t i;
+
+    nand_command(qts, NAND_CMD_PROGRAM_START);
+    nand_page_address(qts, column, page);
+    for (i = 0; i < length; i++) {
+        qtest_writeb(qts, NAND_DATA, data[i]);
+    }
+    nand_command(qts, NAND_CMD_PAGE_PROGRAM);
+    nand_command(qts, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
+}
+
+static void nand_start_read(QTestState *qts, uint32_t page, uint32_t column)
+{
+    nand_command(qts, NAND_CMD_READ0);
+    nand_page_address(qts, column, page);
+    nand_command(qts, NAND_CMD_READ_START);
+}
+
+static void nand_set_features(QTestState *qts, uint8_t address,
+                              const uint8_t *data, size_t length)
+{
+    size_t i;
+
+    nand_command(qts, NAND_CMD_SET_FEATURES);
+    nand_address(qts, address);
+    for (i = 0; i < length; i++) {
+        qtest_writeb(qts, NAND_DATA, data[i]);
+    }
+}
+
+static void nand_get_features(QTestState *qts, uint8_t address,
+                              uint8_t data[4])
+{
     unsigned int i;
 
-    while (length--) {
-        crc ^= *data++ << 8;
-        for (i = 0; i < 8; i++) {
-            crc = (crc << 1) ^ ((crc & 0x8000) ? 0x8005 : 0);
-        }
+    nand_command(qts, NAND_CMD_GET_FEATURES);
+    nand_address(qts, address);
+    for (i = 0; i < 4; i++) {
+        data[i] = qtest_readb(qts, NAND_DATA);
     }
-    return crc;
 }
+
+static void nand_migrate(QTestState *from, QTestState *to)
+{
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+}
+
+static const uint8_t nand_parameter_page[256] = {
+    0x4f, 0x4e, 0x46, 0x49, 0x02, 0x00, 0x18, 0x00,
+    0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x4d, 0x41, 0x43, 0x52, 0x4f, 0x4e, 0x49, 0x58,
+    0x20, 0x20, 0x20, 0x20, 0x4d, 0x58, 0x33, 0x30,
+    0x4c, 0x46, 0x34, 0x47, 0x32, 0x38, 0x41, 0x44,
+    0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+    0xc2, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x04,
+    0x00, 0x00, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00,
+    0x00, 0x08, 0x00, 0x00, 0x01, 0x23, 0x01, 0x28,
+    0x00, 0x06, 0x04, 0x08, 0x00, 0x00, 0x04, 0x00,
+    0x08, 0x01, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x0a, 0x3f, 0x00, 0x3f, 0x00, 0xbc, 0x02, 0x70,
+    0x17, 0x19, 0x00, 0x3c, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+    0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8d, 0xed,
+};
 
 static void test_nand_identification_program_and_erase(void)
 {
@@ -9905,8 +10004,16 @@ static void test_nand_identification_program_and_erase(void)
     static const uint8_t payload[] = {
         0x5a, 0xa5, 0x00, 0xff, 0x36, 0xc9,
     };
+    static const uint8_t oob_payload[] = {
+        0x69, 0x96, 0x3c,
+    };
+    static const uint8_t feature[] = {
+        0x03, 0x00, 0x00, 0x00,
+    };
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
     uint8_t parameter_page[256];
+    uint8_t redundant_page[256];
+    unsigned int copy;
     unsigned int i;
 
     g_assert_true(qtest_qom_get_bool(qts, "/machine", "nand-cs"));
@@ -9926,18 +10033,41 @@ static void test_nand_identification_program_and_erase(void)
 
     nand_command(qts, NAND_CMD_READ_PARAM);
     nand_address(qts, 0x00);
+    nand_command(qts, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
+    /* Repeated status commands must retain the suspended data producer. */
+    nand_command(qts, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
+    nand_command(qts, NAND_CMD_READ0);
     for (i = 0; i < sizeof(parameter_page); i++) {
         parameter_page[i] = qtest_readb(qts, NAND_DATA);
     }
-    g_assert_cmpmem(parameter_page, 4, "ONFI", 4);
-    g_assert_cmpmem(parameter_page + 32, 8, "MACRONIX", 8);
-    g_assert_cmpmem(parameter_page + 44, 17, "MX30LF4G28AD-XKI", 17);
-    g_assert_cmpuint(ldl_le_p(parameter_page + 80), ==, 4096);
-    g_assert_cmpuint(lduw_le_p(parameter_page + 84), ==, 256);
-    g_assert_cmpuint(ldl_le_p(parameter_page + 92), ==, 64);
-    g_assert_cmpuint(ldl_le_p(parameter_page + 96), ==, 2048);
-    g_assert_cmphex(lduw_le_p(parameter_page + 254), ==,
-                    nand_onfi_crc(parameter_page, 254));
+    g_assert_cmpmem(parameter_page, sizeof(parameter_page),
+                    nand_parameter_page, sizeof(nand_parameter_page));
+    g_assert_cmphex(lduw_le_p(parameter_page + 254), ==, 0xed8d);
+    for (copy = 1; copy < 8; copy++) {
+        for (i = 0; i < sizeof(redundant_page); i++) {
+            redundant_page[i] = qtest_readb(qts, NAND_DATA);
+        }
+        g_assert_cmpmem(redundant_page, sizeof(redundant_page),
+                        parameter_page, sizeof(parameter_page));
+    }
+
+    nand_command(qts, NAND_CMD_SET_FEATURES);
+    nand_address(qts, 0x01);
+    for (i = 0; i < G_N_ELEMENTS(feature); i++) {
+        qtest_writeb(qts, NAND_DATA, feature[i]);
+    }
+    nand_command(qts, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
+    nand_command(qts, NAND_CMD_GET_FEATURES);
+    nand_address(qts, 0x01);
+    nand_command(qts, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
+    nand_command(qts, NAND_CMD_READ0);
+    for (i = 0; i < G_N_ELEMENTS(feature); i++) {
+        g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, feature[i]);
+    }
 
     nand_command(qts, NAND_CMD_PROGRAM_START);
     nand_address(qts, 0x00);
@@ -9950,8 +10080,20 @@ static void test_nand_identification_program_and_erase(void)
     }
     nand_command(qts, NAND_CMD_PAGE_PROGRAM);
     nand_command(qts, NAND_CMD_STATUS);
-    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==,
-                    NAND_STATUS_READY | NAND_STATUS_WP);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
+
+    nand_command(qts, NAND_CMD_PROGRAM_START);
+    nand_address(qts, NAND_TEST_OOB_COLUMN & 0xff);
+    nand_address(qts, NAND_TEST_OOB_COLUMN >> 8);
+    nand_address(qts, 0x03);
+    nand_address(qts, 0x00);
+    nand_address(qts, 0x00);
+    for (i = 0; i < G_N_ELEMENTS(oob_payload); i++) {
+        qtest_writeb(qts, NAND_DATA, oob_payload[i]);
+    }
+    nand_command(qts, NAND_CMD_PAGE_PROGRAM);
+    nand_command(qts, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
 
     nand_command(qts, NAND_CMD_READ0);
     nand_address(qts, 0x00);
@@ -9960,8 +10102,25 @@ static void test_nand_identification_program_and_erase(void)
     nand_address(qts, 0x00);
     nand_address(qts, 0x00);
     nand_command(qts, NAND_CMD_READ_START);
+    nand_command(qts, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
+    nand_command(qts, NAND_CMD_READ0);
     for (i = 0; i < G_N_ELEMENTS(payload); i++) {
         g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, payload[i]);
+    }
+
+    nand_command(qts, NAND_CMD_READ0);
+    nand_address(qts, NAND_TEST_OOB_COLUMN & 0xff);
+    nand_address(qts, NAND_TEST_OOB_COLUMN >> 8);
+    nand_address(qts, 0x03);
+    nand_address(qts, 0x00);
+    nand_address(qts, 0x00);
+    nand_command(qts, NAND_CMD_READ_START);
+    nand_command(qts, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
+    nand_command(qts, NAND_CMD_READ0);
+    for (i = 0; i < G_N_ELEMENTS(oob_payload); i++) {
+        g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, oob_payload[i]);
     }
 
     nand_command(qts, NAND_CMD_ERASE);
@@ -9980,7 +10139,337 @@ static void test_nand_identification_program_and_erase(void)
         g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0xff);
     }
 
+    nand_command(qts, NAND_CMD_READ0);
+    nand_address(qts, NAND_TEST_OOB_COLUMN & 0xff);
+    nand_address(qts, NAND_TEST_OOB_COLUMN >> 8);
+    nand_address(qts, 0x03);
+    nand_address(qts, 0x00);
+    nand_address(qts, 0x00);
+    nand_command(qts, NAND_CMD_READ_START);
+    for (i = 0; i < G_N_ELEMENTS(oob_payload); i++) {
+        g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0xff);
+    }
+
     qtest_quit(qts);
+}
+
+static void test_nand_features_and_reset_domains(void)
+{
+    static const struct {
+        uint8_t address;
+        uint8_t value[4];
+    } feature_cases[] = {
+        /* Emulator-only: do not replay these writes on physical NAND. */
+        { 0x01, { 4, 0, 0, 0 } },
+        { 0x80, { 1, 0, 0, 0 } },
+        { 0x89, { 5, 0, 0, 0 } },
+        { 0x90, { 3, 0, 0, 0 } },
+        { 0xb0, { 7, 0, 0, 0 } },
+    };
+    static const uint8_t timing_mode_0[4] = { 0, 0, 0, 0 };
+    static const uint8_t timing_mode_3[4] = { 3, 0, 0, 0 };
+    static const uint8_t timing_mode_4_reserved[4] = {
+        0xf4, 0xaa, 0x55, 0xff,
+    };
+    static const uint8_t timing_mode_4[4] = { 4, 0, 0, 0 };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint8_t feature[4];
+    uint32_t value;
+    unsigned int i;
+
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    for (i = 0; i < G_N_ELEMENTS(feature_cases); i++) {
+        nand_get_features(qts, feature_cases[i].address, feature);
+        g_assert_cmpmem(feature, sizeof(feature), timing_mode_0,
+                        sizeof(timing_mode_0));
+        nand_set_features(qts, feature_cases[i].address,
+                          feature_cases[i].value,
+                          sizeof(feature_cases[i].value));
+        nand_get_features(qts, feature_cases[i].address, feature);
+        g_assert_cmpmem(feature, sizeof(feature), feature_cases[i].value,
+                        sizeof(feature_cases[i].value));
+    }
+    /* U5.PT is unconnected and pulled low, so feature A0h is invalid. */
+    nand_get_features(qts, 0xa0, feature);
+    g_assert_cmpmem(feature, sizeof(feature), timing_mode_0,
+                    sizeof(timing_mode_0));
+
+    nand_set_features(qts, 0x01, timing_mode_3, sizeof(timing_mode_3));
+    nand_get_features(qts, 0x01, feature);
+    g_assert_cmpmem(feature, sizeof(feature), timing_mode_3,
+                    sizeof(timing_mode_3));
+
+    /* Deterministic emulator policy for a malformed interruption before P4. */
+    nand_set_features(qts, 0x01, timing_mode_4, 1);
+    nand_command(qts, NAND_CMD_READ_ID);
+    nand_address(qts, 0x00);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0xc2);
+    nand_get_features(qts, 0x01, feature);
+    g_assert_cmpmem(feature, sizeof(feature), timing_mode_3,
+                    sizeof(timing_mode_3));
+
+    /* Reserved parameter bits and P2-P4 do not affect the target. */
+    nand_set_features(qts, 0x01, timing_mode_4_reserved,
+                      sizeof(timing_mode_4_reserved));
+    nand_get_features(qts, 0x01, feature);
+    g_assert_cmpmem(feature, sizeof(feature), timing_mode_4,
+                    sizeof(timing_mode_4));
+
+    nand_command(qts, NAND_CMD_RESET);
+    nand_command(qts, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
+    for (i = 0; i < G_N_ELEMENTS(feature_cases); i++) {
+        nand_get_features(qts, feature_cases[i].address, feature);
+        g_assert_cmpmem(feature, sizeof(feature), feature_cases[i].value,
+                        sizeof(feature_cases[i].value));
+    }
+
+    /* The external NAND protocol and volatile features survive PROCRST. */
+    nand_command(qts, NAND_CMD_GET_FEATURES);
+    nand_address(qts, 0x01);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 4);
+    qtest_writel(qts, SAM9X7_RSTC_BASE + RSTC_CR,
+                 RSTC_KEY | RSTC_CR_PROCRST);
+    qtest_qmp_eventwait(qts, "RESET");
+    value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_SOFTWARE));
+    for (i = 1; i < sizeof(feature); i++) {
+        g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0);
+    }
+    nand_get_features(qts, 0x01, feature);
+    g_assert_cmpmem(feature, sizeof(feature), timing_mode_4,
+                    sizeof(timing_mode_4));
+
+    qtest_system_reset(qts);
+    for (i = 0; i < G_N_ELEMENTS(feature_cases); i++) {
+        nand_get_features(qts, feature_cases[i].address, feature);
+        g_assert_cmpmem(feature, sizeof(feature), timing_mode_0,
+                        sizeof(timing_mode_0));
+    }
+    nand_get_features(qts, 0xa0, feature);
+    g_assert_cmpmem(feature, sizeof(feature), timing_mode_0,
+                    sizeof(timing_mode_0));
+
+    qtest_quit(qts);
+}
+
+static void test_nand_parameter_status_poll_migration(void)
+{
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *middle = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    uint8_t parameter_page[256];
+    unsigned int i;
+
+    nand_command(from, NAND_CMD_READ_PARAM);
+    nand_address(from, 0x00);
+    nand_command(from, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(from, NAND_DATA), ==, NAND_STATUS_IDLE);
+    nand_migrate(from, middle);
+
+    nand_command(middle, NAND_CMD_READ0);
+    for (i = 0; i < 37; i++) {
+        g_assert_cmphex(qtest_readb(middle, NAND_DATA), ==,
+                        nand_parameter_page[i]);
+    }
+
+    nand_migrate(middle, to);
+
+    memcpy(parameter_page, nand_parameter_page, i);
+    for (; i < sizeof(parameter_page); i++) {
+        parameter_page[i] = qtest_readb(to, NAND_DATA);
+    }
+    g_assert_cmpmem(parameter_page, sizeof(parameter_page),
+                    nand_parameter_page, sizeof(nand_parameter_page));
+
+    qtest_quit(to);
+    qtest_quit(middle);
+    qtest_quit(from);
+}
+
+static void test_nand_page_status_poll_migration(void)
+{
+    static const uint8_t first_payload[] = {
+        0x5a, 0xa5, 0x00, 0xff, 0x36, 0xc9,
+    };
+    static const uint8_t first_oob[] = { 0x69, 0x96, 0x3c };
+    static const uint8_t last_payload[] = { 0xde, 0xad, 0xbe, 0xef };
+    const uint32_t last_page = NAND_NUM_PAGES - 1;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *middle = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    unsigned int i;
+
+    nand_program(from, 0, 0, first_payload, sizeof(first_payload));
+    nand_program(from, 0, NAND_TEST_OOB_COLUMN,
+                 first_oob, sizeof(first_oob));
+    nand_program(from, last_page, 5, last_payload, sizeof(last_payload));
+
+    nand_start_read(from, 0, 0);
+    nand_command(from, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(from, NAND_DATA), ==, NAND_STATUS_IDLE);
+    nand_migrate(from, middle);
+
+    nand_command(middle, NAND_CMD_READ0);
+    for (i = 0; i < 2; i++) {
+        g_assert_cmphex(qtest_readb(middle, NAND_DATA), ==,
+                        first_payload[i]);
+    }
+
+    nand_migrate(middle, to);
+
+    for (; i < sizeof(first_payload); i++) {
+        g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, first_payload[i]);
+    }
+    nand_start_read(to, 0, NAND_TEST_OOB_COLUMN);
+    for (i = 0; i < sizeof(first_oob); i++) {
+        g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, first_oob[i]);
+    }
+    nand_start_read(to, last_page, 5);
+    for (i = 0; i < sizeof(last_payload); i++) {
+        g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, last_payload[i]);
+    }
+
+    qtest_quit(to);
+    qtest_quit(middle);
+    qtest_quit(from);
+}
+
+static void test_nand_features_status_poll_migration(void)
+{
+    static const uint8_t timing_mode_3[4] = { 3, 0, 0, 0 };
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *middle = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    unsigned int i;
+
+    nand_set_features(from, 0x01, timing_mode_3, sizeof(timing_mode_3));
+    nand_command(from, NAND_CMD_GET_FEATURES);
+    nand_address(from, 0x01);
+    nand_command(from, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(from, NAND_DATA), ==, NAND_STATUS_IDLE);
+    nand_migrate(from, middle);
+
+    nand_command(middle, NAND_CMD_READ0);
+    g_assert_cmphex(qtest_readb(middle, NAND_DATA), ==, timing_mode_3[0]);
+
+    nand_migrate(middle, to);
+
+    for (i = 1; i < sizeof(timing_mode_3); i++) {
+        g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, timing_mode_3[i]);
+    }
+
+    qtest_quit(to);
+    qtest_quit(middle);
+    qtest_quit(from);
+}
+
+static void test_nand_set_features_migration(void)
+{
+    static const uint8_t timing_mode_4[4] = { 4, 0, 0, 0 };
+    const char *source_env = g_getenv("QTEST_QEMU_BINARY_OLD") ?
+                             "QTEST_QEMU_BINARY_OLD" :
+                             "QTEST_QEMU_BINARY";
+    QTestState *from = qtest_init_ext(source_env, SAM9X75_MACHINE,
+                                      NULL, true);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    uint8_t feature[4];
+    unsigned int i;
+
+    nand_set_features(from, 0x01, timing_mode_4, 2);
+    nand_migrate(from, to);
+    for (i = 2; i < sizeof(timing_mode_4); i++) {
+        qtest_writeb(to, NAND_DATA, timing_mode_4[i]);
+    }
+    nand_get_features(to, 0x01, feature);
+    g_assert_cmpmem(feature, sizeof(feature), timing_mode_4,
+                    sizeof(timing_mode_4));
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
+static void test_nand_empty_media_migration(void)
+{
+    static const uint8_t payload[] = { 0x12, 0x34, 0x56, 0x78 };
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    unsigned int i;
+
+    /* Incoming state replaces, rather than merges with, destination media. */
+    nand_program(to, 9, 0, payload, sizeof(payload));
+    nand_migrate(from, to);
+    nand_start_read(to, 9, 0);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, 0xff);
+    }
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
+static void nand_test_backend_migration(bool raw)
+{
+    static const uint8_t payload[] = { 0xa6, 0x59, 0x3c, 0xc3 };
+    static const uint8_t oob[] = { 0x96, 0x69, 0x5a };
+    const uint32_t page = 11;
+    const uint64_t image_size = raw ? NAND_RAW_SIZE : NAND_DATA_SIZE;
+    const size_t erased_size = raw ? NAND_PAGE_TOTAL_SIZE : NAND_PAGE_SIZE;
+    g_autofree uint8_t *erased = g_malloc(erased_size);
+    g_autofree char *image_path = NULL;
+    g_autofree char *args = NULL;
+    GError *error = NULL;
+    QTestState *from;
+    QTestState *to;
+    off_t offset;
+    ssize_t ret;
+    unsigned int i;
+    int fd;
+
+    fd = g_file_open_tmp("sam9x75-nand-XXXXXX", &image_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, image_size), ==, 0);
+    memset(erased, 0xff, erased_size);
+    offset = (off_t)page * erased_size;
+    ret = pwrite(fd, erased, erased_size, offset);
+    g_assert_cmpint(ret, ==, erased_size);
+    close(fd);
+
+    args = g_strdup_printf(
+        SAM9X75_MACHINE
+        " -drive file=%s,file.locking=off,if=mtd,index=0,format=raw",
+        image_path);
+    from = qtest_init(args);
+    to = qtest_initf("%s -incoming defer", args);
+
+    nand_program(from, page, 0, payload, sizeof(payload));
+    nand_program(from, page, NAND_TEST_OOB_COLUMN, oob, sizeof(oob));
+    nand_migrate(from, to);
+
+    nand_start_read(to, page, 0);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, payload[i]);
+    }
+    nand_start_read(to, page, NAND_TEST_OOB_COLUMN);
+    for (i = 0; i < sizeof(oob); i++) {
+        g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, oob[i]);
+    }
+
+    qtest_quit(to);
+    qtest_quit(from);
+    unlink(image_path);
+}
+
+static void test_nand_data_backend_migration(void)
+{
+    nand_test_backend_migration(false);
+}
+
+static void test_nand_raw_backend_migration(void)
+{
+    nand_test_backend_migration(true);
 }
 
 static void qspi_configure_read(QTestState *qts, uint8_t opcode,
@@ -10391,6 +10880,22 @@ int main(int argc, char **argv)
                    test_board_m2_interface_jumper);
     qtest_add_func("sam9x75/nand/identification-program-and-erase",
                    test_nand_identification_program_and_erase);
+    qtest_add_func("sam9x75/nand/features-and-reset-domains",
+                   test_nand_features_and_reset_domains);
+    qtest_add_func("sam9x75/nand/parameter-status-poll-migration",
+                   test_nand_parameter_status_poll_migration);
+    qtest_add_func("sam9x75/nand/page-status-poll-migration",
+                   test_nand_page_status_poll_migration);
+    qtest_add_func("sam9x75/nand/features-status-poll-migration",
+                   test_nand_features_status_poll_migration);
+    qtest_add_func("sam9x75/nand/set-features-migration",
+                   test_nand_set_features_migration);
+    qtest_add_func("sam9x75/nand/empty-media-migration",
+                   test_nand_empty_media_migration);
+    qtest_add_func("sam9x75/nand/data-backend-migration",
+                   test_nand_data_backend_migration);
+    qtest_add_func("sam9x75/nand/raw-backend-migration",
+                   test_nand_raw_backend_migration);
     qtest_add_func("sam9x75/board/memory-cs-jumpers",
                    test_board_memory_cs_jumpers);
     qtest_add_func("sam9x75/smc-pmecc/registers",
