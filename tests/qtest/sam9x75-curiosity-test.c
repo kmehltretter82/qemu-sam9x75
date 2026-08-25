@@ -814,7 +814,9 @@
 
 #define MPDDRC_RTR              0x04
 #define MPDDRC_CR               0x08
+#define MPDDRC_LPR              0x1c
 #define MPDDRC_IO_CALIBR        0x34
+#define MPDDRC_CONF_ARBITER     0x44
 #define MPDDRC_IER              0xc0
 #define MPDDRC_IMR              0xc8
 #define MPDDRC_ISR              0xcc
@@ -9952,6 +9954,11 @@ static void test_mpddrc_registers_errors_and_irq(void)
     g_assert_cmphex(qtest_readl(qts,
                                SAM9X7_MPDDRC_BASE + MPDDRC_IO_CALIBR), ==,
                     0x00870000);
+    qtest_writel(qts, SAM9X7_MPDDRC_BASE + MPDDRC_CONF_ARBITER,
+                 UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_MPDDRC_BASE + MPDDRC_CONF_ARBITER), ==,
+                    0x7f7f7f0f);
 
     aic_configure(qts, 49, AIC_SMR_LEVEL_HIGH | 3, 0x49494949);
     qtest_writel(qts, SAM9X7_MPDDRC_BASE + MPDDRC_IER, 1);
@@ -9976,6 +9983,12 @@ static void test_mpddrc_registers_errors_and_irq(void)
     qtest_writel(qts, SAM9X7_MPDDRC_BASE + MPDDRC_WPMR,
                  MPDDRC_WPMR_KEY);
     qtest_writel(qts, SAM9X7_MPDDRC_BASE + MPDDRC_RTR, 1);
+    qtest_writel(qts, SAM9X7_MPDDRC_BASE + MPDDRC_LPR, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MPDDRC_BASE + MPDDRC_LPR), ==,
+                    0x0133f007);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MPDDRC_BASE + MPDDRC_WPSR), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_MPDDRC_BASE + MPDDRC_ISR), ==, 0);
     qtest_writel(qts, SAM9X7_MPDDRC_BASE + MPDDRC_IO_CALIBR, 0x1234);
     g_assert_cmphex(qtest_readl(qts,
                                SAM9X7_MPDDRC_BASE + MPDDRC_IO_CALIBR), ==,

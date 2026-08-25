@@ -170,7 +170,6 @@ static bool at91_mpddrc_is_config(hwaddr offset)
     case MPDDRC_TPR0:
     case MPDDRC_TPR1:
     case MPDDRC_TPR2:
-    case MPDDRC_LPR:
     case MPDDRC_MD:
     case MPDDRC_DDR3_CAL:
     case MPDDRC_DDR3_TIM_CAL:
@@ -211,6 +210,8 @@ static uint32_t at91_mpddrc_write_mask(hwaddr offset)
         return 0x00007fff;
     case MPDDRC_OCMS:
         return 0x00000011;
+    case MPDDRC_CONF_ARBITER:
+        return 0x7f7f7f0f;
     case MPDDRC_TIMEOUT:
         return 0x0fffffff;
     case MPDDRC_REQ_PORT_456:
