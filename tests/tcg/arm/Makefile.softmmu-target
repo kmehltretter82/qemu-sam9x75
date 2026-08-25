@@ -20,6 +20,31 @@ run-test-armv6m-undef: QEMU_OPTS=-semihosting-config enable=on,target=native,cha
 
 ARM_TESTS+=test-armv6m-undef
 
+test-arm-short-desc-domain-v5: test-arm-short-desc-domain.S \
+		test-arm-short-desc-domain.ld
+	$(CC) -march=armv5te -mfloat-abi=soft -DTEST_ARMV6=0 \
+		-Wl,--build-id=none -Wa,--noexecstack -x assembler-with-cpp \
+		$< -o $@ -nostdlib -static \
+		-T $(ARM_SRC)/test-arm-short-desc-domain.ld
+
+test-arm-short-desc-domain-v6: test-arm-short-desc-domain.S \
+		test-arm-short-desc-domain.ld
+	$(CC) -march=armv5te -mfloat-abi=soft -DTEST_ARMV6=1 \
+		-Wl,--build-id=none -Wa,--noexecstack -x assembler-with-cpp \
+		$< -o $@ -nostdlib -static \
+		-T $(ARM_SRC)/test-arm-short-desc-domain.ld
+
+run-test-arm-short-desc-domain-v5: QEMU_OPTS=-M versatilepb,audiodev=audio0 \
+	-cpu arm926 -audiodev none,id=audio0 -serial none \
+	-semihosting-config enable=on,target=native,chardev=output -kernel
+
+run-test-arm-short-desc-domain-v6: QEMU_OPTS=-M versatilepb,audiodev=audio0 \
+	-cpu arm1176 -audiodev none,id=audio0 -serial none \
+	-semihosting-config enable=on,target=native,chardev=output -kernel
+
+ARM_TESTS+=test-arm-short-desc-domain-v5
+ARM_TESTS+=test-arm-short-desc-domain-v6
+
 # These objects provide the basic boot code and helper functions for all tests
 CRT_OBJS=boot.o
 

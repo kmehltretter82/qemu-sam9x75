@@ -1175,10 +1175,6 @@ static bool get_phys_addr_v5(CPUARMState *env, S1Translate *ptw,
     if (type != 2) {
         level = 2;
     }
-    if (domain_prot == 0 || domain_prot == 2) {
-        fi->type = ARMFault_Domain;
-        goto do_fault;
-    }
     if (type == 2) {
         /* 1Mb section.  */
         phys_addr = (desc & 0xfff00000) | (address & 0x000fffff);
@@ -1238,6 +1234,14 @@ static bool get_phys_addr_v5(CPUARMState *env, S1Translate *ptw,
             /* Never happens, but compiler isn't smart enough to tell.  */
             g_assert_not_reached();
         }
+    }
+    /*
+     * For a page mapping, the L2 descriptor must be fetched and validated
+     * before checking the domain inherited from the L1 descriptor.
+     */
+    if (domain_prot == 0 || domain_prot == 2) {
+        fi->type = ARMFault_Domain;
+        goto do_fault;
     }
     result->f.prot = ap_to_rw_prot(env, ptw->in_mmu_idx, ap, domain_prot);
     result->f.prot |= result->f.prot ? PAGE_EXEC : 0;
@@ -1309,11 +1313,6 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
         level = 2;
     }
     domain_prot = (dacr >> (domain * 2)) & 3;
-    if (domain_prot == 0 || domain_prot == 2) {
-        /* Section or Page domain fault */
-        fi->type = ARMFault_Domain;
-        goto do_fault;
-    }
     if (type != 1) {
         if (desc & (1 << 18)) {
             /* Supersection.  */
@@ -1363,6 +1362,14 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
             /* Never happens, but compiler isn't smart enough to tell.  */
             g_assert_not_reached();
         }
+    }
+    /*
+     * For a page mapping, the L2 descriptor must be fetched and validated
+     * before checking the domain inherited from the L1 descriptor.
+     */
+    if (domain_prot == 0 || domain_prot == 2) {
+        fi->type = ARMFault_Domain;
+        goto do_fault;
     }
     out_space = ptw->cur_space;
     if (ns) {
