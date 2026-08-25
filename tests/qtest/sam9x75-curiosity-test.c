@@ -1276,8 +1276,11 @@
 
 #define QSPI_CR                 0x00
 #define QSPI_MR                 0x04
+#define QSPI_RDR                0x08
+#define QSPI_TDR                0x0c
 #define QSPI_ISR                0x10
 #define QSPI_IER                0x14
+#define QSPI_IDR                0x18
 #define QSPI_IMR                0x1c
 #define QSPI_SCR                0x20
 #define QSPI_SR                 0x24
@@ -1290,11 +1293,18 @@
 #define QSPI_WPSR               0xe8
 
 #define QSPI_CR_QSPIEN          BIT(0)
+#define QSPI_CR_QSPIDIS         BIT(1)
 #define QSPI_CR_STTFR           BIT(9)
 #define QSPI_CR_LASTXFER        BIT(24)
 #define QSPI_MR_SMM             BIT(0)
+#define QSPI_ISR_RDRF           BIT(0)
 #define QSPI_ISR_TDRE           BIT(1)
 #define QSPI_ISR_TXEMPTY        BIT(2)
+#define QSPI_ISR_OVRES          BIT(3)
+#define QSPI_ISR_CSR            BIT(8)
+#define QSPI_ISR_LWRA           BIT(11)
+#define QSPI_ISR_CSFA           BIT(14)
+#define QSPI_ISR_CSRA           BIT(15)
 #define QSPI_ISR_RFRSHD         BIT(16)
 #define QSPI_SR_QSPIENS         BIT(1)
 #define QSPI_SR_CSS             BIT(2)
@@ -12332,6 +12342,208 @@ static void qspi_configure_read(QTestState *qts, uint8_t opcode,
     qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_IFR, ifr);
 }
 
+static void test_qspi_status_irq_and_edges(void)
+{
+    const char *path = "/machine/soc/qspi";
+    const uint32_t addressed_data = QSPI_IFR_INSTEN | QSPI_IFR_ADDREN |
+                                    QSPI_IFR_DATAEN | QSPI_IFR_ADDRL_3 |
+                                    QSPI_IFR_TFRTYP_MEM;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+
+    qtest_irq_intercept_out_named(qts, path, "sysbus-irq");
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_SR), ==, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_SCR, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_SCR), ==,
+                    0x00ff0003);
+
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_IER,
+                 QSPI_ISR_TDRE | QSPI_ISR_TXEMPTY | BIT(9));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_IMR), ==,
+                    QSPI_ISR_TDRE | QSPI_ISR_TXEMPTY);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_CR, QSPI_CR_QSPIEN);
+    g_assert_true(qtest_get_irq(qts, 0));
+    value = qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR);
+    g_assert_cmphex(value & (QSPI_ISR_TDRE | QSPI_ISR_TXEMPTY |
+                            QSPI_ISR_RFRSHD), ==,
+                    QSPI_ISR_TDRE | QSPI_ISR_TXEMPTY | QSPI_ISR_RFRSHD);
+    g_assert_false(value & BIT(9));
+    value = qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR);
+    g_assert_cmphex(value & (QSPI_ISR_TDRE | QSPI_ISR_TXEMPTY), ==,
+                    QSPI_ISR_TDRE | QSPI_ISR_TXEMPTY);
+    g_assert_false(value & QSPI_ISR_RFRSHD);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_CR, QSPI_CR_QSPIDIS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_SR), ==, 0);
+    value = qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR);
+    g_assert_false(value & (QSPI_ISR_TDRE | QSPI_ISR_TXEMPTY));
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_CR, QSPI_CR_QSPIEN);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_IDR, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_IMR), ==, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR);
+
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_IER, QSPI_ISR_OVRES);
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_TDR, 0x9f);
+    value = qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR);
+    g_assert_true(value & QSPI_ISR_RDRF);
+    g_assert_true(value & QSPI_ISR_CSFA);
+    g_assert_false(value & (QSPI_ISR_OVRES | QSPI_ISR_CSRA));
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_TDR, 0);
+    g_assert_true(qtest_get_irq(qts, 0));
+    value = qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR);
+    g_assert_true(value & (QSPI_ISR_RDRF | QSPI_ISR_OVRES));
+    g_assert_false(qtest_get_irq(qts, 0));
+    value = qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR);
+    g_assert_true(value & QSPI_ISR_RDRF);
+    g_assert_false(value & QSPI_ISR_OVRES);
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_TDR, 0);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_true(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR) &
+                  QSPI_ISR_OVRES);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_RDR);
+    qspi_finish_transfer(qts);
+    qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR);
+
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_IDR, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_IER,
+                 QSPI_ISR_CSFA | QSPI_ISR_CSRA);
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_TDR, 0x9f);
+    g_assert_true(qtest_get_irq(qts, 0));
+    value = qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR);
+    g_assert_true(value & QSPI_ISR_CSFA);
+    g_assert_false(value & QSPI_ISR_CSRA);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_RDR);
+    qspi_finish_transfer(qts);
+    g_assert_true(qtest_get_irq(qts, 0));
+    value = qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR);
+    g_assert_cmphex(value & (QSPI_ISR_CSR | QSPI_ISR_CSFA |
+                            QSPI_ISR_CSRA), ==,
+                    QSPI_ISR_CSR | QSPI_ISR_CSRA);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    /* A rise autoclears an unread fall event. */
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_TDR, 0x9f);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_RDR);
+    qspi_finish_transfer(qts);
+    value = qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR);
+    g_assert_cmphex(value & (QSPI_ISR_CSR | QSPI_ISR_CSFA |
+                            QSPI_ISR_CSRA), ==,
+                    QSPI_ISR_CSR | QSPI_ISR_CSRA);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    /* A fall autoclears an unread rise-autoclear event. */
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_TDR, 0x9f);
+    qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_RDR);
+    qspi_finish_transfer(qts);
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_TDR, 0x9f);
+    value = qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR);
+    g_assert_cmphex(value & (QSPI_ISR_CSR | QSPI_ISR_CSFA |
+                            QSPI_ISR_CSRA), ==,
+                    QSPI_ISR_CSR | QSPI_ISR_CSFA);
+    qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_RDR);
+    qspi_finish_transfer(qts);
+    qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR);
+
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_IDR, UINT32_MAX);
+    qspi_command(qts, 0x06, 0, QSPI_IFR_INSTEN);
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_MR, QSPI_MR_SMM);
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_WICR, 0x02);
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_IFR, addressed_data);
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_WRACNT, 0);
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_IER, QSPI_ISR_LWRA);
+    qtest_writeb(qts, SAM9X7_QSPI_MEM_BASE + 0x40000, 0xa5);
+    qspi_finish_transfer(qts);
+    g_assert_false(qtest_get_irq(qts, 0));
+    value = qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR);
+    g_assert_false(value & QSPI_ISR_LWRA);
+
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_WRACNT, 2);
+    qtest_writeb(qts, SAM9X7_QSPI_MEM_BASE + 0x40010, 0x5a);
+    g_assert_false(qtest_get_irq(qts, 0));
+    g_assert_false(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR) &
+                   QSPI_ISR_LWRA);
+    qtest_writeb(qts, SAM9X7_QSPI_MEM_BASE + 0x40011, 0xc3);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_true(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR) &
+                  QSPI_ISR_LWRA);
+    g_assert_false(qtest_get_irq(qts, 0));
+    g_assert_false(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR) &
+                   QSPI_ISR_LWRA);
+    qtest_writeb(qts, SAM9X7_QSPI_MEM_BASE + 0x40012, 0x3c);
+    g_assert_false(qtest_get_irq(qts, 0));
+    g_assert_false(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR) &
+                   QSPI_ISR_LWRA);
+    qspi_finish_transfer(qts);
+
+    qtest_quit(qts);
+}
+
+static void test_qspi_status_migration_and_reset(void)
+{
+    const char *path = "/machine/soc/qspi";
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    uint32_t value;
+
+    qtest_irq_intercept_out_named(from, path, "sysbus-irq");
+    qtest_irq_intercept_out_named(to, path, "sysbus-irq");
+    qtest_writel(from, SAM9X7_QSPI_BASE + QSPI_IER, QSPI_ISR_OVRES);
+    qtest_writel(from, SAM9X7_QSPI_BASE + QSPI_CR, QSPI_CR_QSPIEN);
+    qtest_readl(from, SAM9X7_QSPI_BASE + QSPI_ISR);
+    qtest_writel(from, SAM9X7_QSPI_BASE + QSPI_TDR, 0x9f);
+    g_assert_false(qtest_get_irq(from, 0));
+    qtest_writel(from, SAM9X7_QSPI_BASE + QSPI_TDR, 0);
+    g_assert_true(qtest_get_irq(from, 0));
+    g_assert_cmphex(qtest_readl(from, SAM9X7_QSPI_BASE + QSPI_SR), ==,
+                    QSPI_SR_QSPIENS);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_true(qtest_get_irq(to, 0));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_QSPI_BASE + QSPI_IMR), ==,
+                    QSPI_ISR_OVRES);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_QSPI_BASE + QSPI_SR), ==,
+                    QSPI_SR_QSPIENS);
+    value = qtest_readl(to, SAM9X7_QSPI_BASE + QSPI_ISR);
+    g_assert_true(value & QSPI_ISR_RDRF);
+    g_assert_true(value & QSPI_ISR_OVRES);
+    g_assert_false(qtest_get_irq(to, 0));
+    value = qtest_readl(to, SAM9X7_QSPI_BASE + QSPI_ISR);
+    g_assert_true(value & QSPI_ISR_RDRF);
+    g_assert_false(value & QSPI_ISR_OVRES);
+    qtest_readl(to, SAM9X7_QSPI_BASE + QSPI_RDR);
+
+    qtest_system_reset(to);
+    g_assert_false(qtest_get_irq(to, 0));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_QSPI_BASE + QSPI_ISR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_QSPI_BASE + QSPI_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_QSPI_BASE + QSPI_SR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_QSPI_BASE + QSPI_SCR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_QSPI_BASE + QSPI_WRACNT), ==, 0);
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
 static void test_qspi_flash_read_program_and_erase(void)
 {
     const uint32_t addressed_data = QSPI_IFR_INSTEN | QSPI_IFR_ADDREN |
@@ -12350,7 +12562,7 @@ static void test_qspi_flash_read_program_and_erase(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_MR), ==,
                     0xffff2fbd);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_SCR), ==,
-                    0x00ffff03);
+                    0x00ff0003);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_IFR), ==,
                     0x7fffdfff);
 
@@ -12704,6 +12916,10 @@ int main(int argc, char **argv)
                    test_smc_shared_irq_migration_and_reset);
     qtest_add_func("sam9x75/system/or-irq-migration-and-reset",
                    test_sys_irq_migration_and_reset);
+    qtest_add_func("sam9x75/qspi/status-irq-and-edges",
+                   test_qspi_status_irq_and_edges);
+    qtest_add_func("sam9x75/qspi/status-migration-and-reset",
+                   test_qspi_status_migration_and_reset);
     qtest_add_func("sam9x75/qspi/flash-read-program-and-erase",
                    test_qspi_flash_read_program_and_erase);
 

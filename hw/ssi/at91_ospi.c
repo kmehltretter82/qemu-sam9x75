@@ -68,8 +68,9 @@
 #define ISR_RFRSHD             BIT(16)
 #define ISR_TOUT               BIT(17)
 #define ISR_MASK               0x0003fd0f
-#define ISR_READ_CLEAR_MASK    (ISR_CSR | ISR_INSTRE | ISR_QITF | ISR_QITR | \
-                                ISR_CSFA | ISR_CSRA | ISR_RFRSHD | ISR_TOUT)
+#define ISR_READ_CLEAR_MASK    (ISR_OVRES | ISR_CSR | ISR_INSTRE | ISR_LWRA | \
+                                ISR_QITF | ISR_QITR | ISR_CSFA | ISR_CSRA | \
+                                ISR_RFRSHD)
 
 #define SR_SYNCBSY             BIT(0)
 #define SR_QSPIENS             BIT(1)
@@ -114,7 +115,13 @@ static void at91_ospi_set_cs(AT91OSPIState *s, bool asserted)
 
     s->cs_asserted = asserted;
     qemu_set_irq(s->cs, asserted ? 0 : 1);
-    s->isr |= asserted ? ISR_CSFA : (ISR_CSR | ISR_CSRA);
+    if (asserted) {
+        s->isr &= ~ISR_CSRA;
+        s->isr |= ISR_CSFA;
+    } else {
+        s->isr &= ~ISR_CSFA;
+        s->isr |= ISR_CSR | ISR_CSRA;
+    }
     at91_ospi_update_irq(s);
 }
 
@@ -379,6 +386,7 @@ static void at91_ospi_reg_write(void *opaque, hwaddr offset, uint64_t value,
         if (v & CR_QSPIDIS) {
             at91_ospi_end_transfer(s);
             s->enabled = false;
+            s->isr &= ~(ISR_TDRE | ISR_TXEMPTY);
         } else if (v & CR_QSPIEN) {
             s->enabled = true;
             /* Enabling starts the OSPI analog-block refresh sequence. */
@@ -411,6 +419,9 @@ static void at91_ospi_reg_write(void *opaque, hwaddr offset, uint64_t value,
         if (!s->transfer_active) {
             at91_ospi_begin_transfer(s, true, s->iar);
         }
+        if (s->isr & ISR_RDRF) {
+            s->isr |= ISR_OVRES;
+        }
         s->rdr = ssi_transfer(s->spi, v & 0xffff);
         s->isr |= ISR_RDRF | ISR_TDRE | ISR_TXEMPTY;
         at91_ospi_update_irq(s);
@@ -424,7 +435,7 @@ static void at91_ospi_reg_write(void *opaque, hwaddr offset, uint64_t value,
         at91_ospi_update_irq(s);
         break;
     case OSPI_SCR:
-        s->scr = v & 0x00ffff03;
+        s->scr = v & 0x00ff0003;
         break;
     case OSPI_IAR:
         s->iar = v;
@@ -524,6 +535,7 @@ static void at91_ospi_memory_write(void *opaque, hwaddr offset,
                                    uint64_t value, unsigned int size)
 {
     AT91OSPIState *s = AT91_OSPI(opaque);
+    uint32_t previous_count;
     unsigned int i;
 
     if (!s->enabled || !(s->mr & MR_SMM) || !(s->ifr & IFR_DATAEN)) {
@@ -538,13 +550,15 @@ static void at91_ospi_memory_write(void *opaque, hwaddr offset,
         at91_ospi_begin_transfer(s, true, offset);
     }
 
+    previous_count = s->transfer_count;
     for (i = 0; i < size; i++) {
         ssi_transfer(s->spi, extract64(value, 8 * i, 8));
     }
     s->next_addr = offset + size;
     s->transfer_count += size;
     trace_at91_ospi_memory_write(offset, size, value);
-    if (!s->wracnt || s->transfer_count >= s->wracnt) {
+    if (s->wracnt && previous_count < s->wracnt &&
+        s->transfer_count >= s->wracnt) {
         s->isr |= ISR_LWRA;
         at91_ospi_update_irq(s);
     }
