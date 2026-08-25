@@ -99,10 +99,16 @@ Support matrix
        not yet modeled.
    * - SRAM and DDR3L
      - Initial
-     - 64 KiB SRAM0, 4 KiB SRAM1 and fixed 256 MiB DDR mapped.  SRAM1 can hold
-       the OTPC emulation packet chain selected by ``MR.EMUL`` and an unkeyed
-       ``REFRESH`` command.  The BSC request is state that RomBOOT reads; there
-       is deliberately no direct BSC-to-OTPC hardware signal.  MPDDRC
+     - 64 KiB SRAM0, 4 KiB SRAM1 and fixed 256 MiB DDR are present.  The DDR
+       window is unavailable at the hardware reset value and follows
+       ``SFR_CCFG.EBI_CS1A``; disabling and reassigning the window preserves
+       its contents, and the assignment follows reset and migration.  Direct
+       Linux boot synthesizes only the firmware-established ``EBI_CS1A`` bit,
+       while mask-ROM and AT91Bootstrap boot retain the true reset value.
+       SRAM1 can hold the OTPC emulation packet chain selected by ``MR.EMUL``
+       and an unkeyed ``REFRESH`` command.  The BSC request is state that
+       RomBOOT reads; there is deliberately no direct BSC-to-OTPC hardware
+       signal.  MPDDRC
        configuration, refresh, error reporting, interrupts and write
        protection have an initial register model.  Runtime low-power-register
        updates, the arbitration masks and write-after-initialization safety
@@ -231,9 +237,10 @@ Support matrix
        Host preset registers, the SAM9X7 Host Control 2 writable mask, combined
        command/data/all software reset, the vendor registers covered by
        ``SWRSTALL``, and the Linux ADMA descriptor form are covered.  Writable
-       Host Control 2 state survives migration.  The
-       unmodified AT91Bootstrap SD/ADMA path loads U-Boot, and Linux mounts the
-       SD root filesystem and reaches a shell.  SDIO I/O functions, full M.2
+       Host Control 2 state survives migration.  The unmodified
+       AT91Bootstrap SD/ADMA path was validated before exact EBI decode was
+       introduced and is pending a repeat with the pinned artifacts.  SDIO
+       I/O functions, full M.2
        ``mmc_spi`` guest integration, DMA fault termination and dynamic
        card-detect/media-change completeness remain under audit.
    * - OSPI/QSPI NOR
@@ -246,8 +253,17 @@ Support matrix
        quad-mode erratum need further coverage.
    * - EBI/SMC and raw NAND
      - Initial
-     - The MX30LF4G28AD identity and its first eight known ONFI parameter-page
-       copies match the device data sheet.  After the documented pre-data
+     - The Curiosity U5 interface occupies the complete 256 MiB CS2 window and
+       is available only when ``SFR_CCFG.EBI_CS2A`` and
+       ``SFR_CCFG.NFD0_ON_D16`` are both set; J9 independently controls its
+       physical chip enable.  ALE on A21 and CLE on A22 repeat the protocol
+       view through all 32 8 MiB slices because A23--A27 are ignored.
+       Assignment state follows reset and migration.  A processor-only reset
+       clears the assignment while retaining external NAND protocol state; a
+       whole-system reset also resets that protocol state but preserves flash
+       contents.  The MX30LF4G28AD identity and its first eight known
+       ONFI parameter-page copies match the device data sheet.  After the
+       documented pre-data
        ``70h`` completion poll, ``00h`` enables parameter, page and Get Features
        transfer; that poll-to-transfer state also survives migration.  Set
        Features accepts P1--P4 before updating volatile readback and implements
@@ -268,9 +284,9 @@ Support matrix
        PMECC/PMERRLOC control/status behavior.  The current upstream Linux
        ``sam9x7.dtsi`` describes only ``0x300`` bytes for that first resource
        and needs a separate correction before software can map the upper
-       banks.  An
-       unmodified NAND AT91Bootstrap detects ONFI, selects timing mode 3, loads
-       U-Boot from offset ``0x40000`` and reaches the prompt.
+       banks.  The unmodified NAND AT91Bootstrap path was validated before
+       exact EBI decode was introduced and is pending a repeat to confirm its
+       CS2 and dedicated-data-path setup.
        Ready/busy timing and pin signaling, the additional redundant parameter
        pages, real PMECC generation/correction, complete bad-block/OOB behavior,
        unique-ID, Read Status Enhanced, cache, copyback, interleaved, two-plane,
@@ -513,6 +529,12 @@ The initial machine can be inspected with qtest or started without firmware::
 
   qemu-system-arm -M sam9x75-curiosity -nographic
 
+This uses the true ``SFR_CCFG`` reset value: external DDR and NAND windows are
+not assigned until guest firmware configures them.  For a raw or uImage Linux
+``-kernel`` boot, QEMU acts as the skipped firmware only for DDR assignment and
+sets ``EBI_CS1A`` on reset.  It does not implicitly assign NAND or enable the
+DDR multi-port performance route.
+
 ``serial0`` is the dedicated DBGU console.  ``serial1`` through ``serial13``
 are FLEXCOM0 through FLEXCOM12 respectively, so FLEXCOM0 can instead be used
 as the interactive character backend with::
@@ -547,26 +569,22 @@ an irreplaceable image or for a dump that is your only record of a physical
 device.  OTP images, VM snapshots and migration streams may contain key-packet
 material; protect stored artifacts and use an encrypted migration channel.
 
-An unmodified AT91Bootstrap ELF and SD image can exercise the current media
-boot path directly::
+The following pinned AT91Bootstrap ELF and SD image are the integration target
+for the current media boot path.  This flow was exercised before exact EBI
+decode was introduced and must be repeated with the same artifacts::
 
   qemu-system-arm -M sam9x75-curiosity \
     -kernel sam9x7-sdcardboot-uboot-4.0.13.elf \
     -drive file=sam9x75-sdcard.img,if=sd,format=raw \
     -nic user,mac=02:00:00:09:75:01 -nographic
 
-This loads unmodified U-Boot, initializes DDR, NAND, MMC and QSPI, discovers
-the LAN8840, and supports DHCP and packet exchange through GEM0.  It then
-loads Linux from SD, uses ADMA for the card, mounts the root filesystem and
-reaches the image's interactive shell.  RTC, RTT, reset, shutdown, watchdog,
-AES, SHA, TDES, TRNG, I2SMCC and Class-D drivers all probe their modeled
-hardware; the crypto and audio paths acquire their documented XDMAC requests.
-The normal-path board qtests in the full suite and this boot are clean of
-SAM9X75 model warnings with ``-d unimp,guest_errors``; intentional negative and
-unsupported-command qtests exercise the corresponding diagnostics.
-Generic SD diagnostics still report the expected failed MMC/SDIO probes
-against a memory-only SD card.  ``-kernel`` remains a development entry path
-and is not a substitute for ROM media selection.
+A successful repeat must load unmodified U-Boot, initialize DDR, NAND, MMC and
+QSPI, discover the LAN8840, exchange packets through GEM0, and reach the Linux
+shell from the SD root filesystem.  It must also remain clean of SAM9X75 model
+warnings with ``-d unimp,guest_errors`` apart from the previously recorded
+generic failed MMC/SDIO probes against a memory-only SD card.  ``-kernel``
+remains a development entry path and is not a substitute for ROM media
+selection.
 
 The populated raw NAND path can be exercised independently with the pinned
 NAND AT91Bootstrap.  Create an exactly 512 MiB data-only image, place U-Boot
@@ -580,11 +598,11 @@ at the board boot offset, and start it with::
     -drive file=sam9x75-nand.bin,if=mtd,index=0,format=raw \
     -nic none -nographic
 
-The unmodified bootstrap performs the device's documented ONFI status-poll and
+The repeat must prove that the unmodified bootstrap assigns CS2 and the
+dedicated eight-bit NAND path, performs the documented ONFI status-poll and
 read-resume sequence, changes timing mode through Set/Get Features, initializes
-PMECC and copies 1 MiB from NAND before entering U-Boot.  This verifies the
-firmware media path but, like the SD command above, deliberately bypasses the
-proprietary mask ROM.
+PMECC and copies 1 MiB from NAND before entering U-Boot.  Like the SD command
+above, this deliberately bypasses the proprietary mask ROM.
 
 Do not mechanically replay the exhaustive feature-register qtest on a physical
 board.  Keep ``80h``, ``90h`` and ``B0h`` checks read-only: those registers
@@ -740,9 +758,11 @@ deselected by opening its jumper at machine creation::
 
   -M sam9x75-curiosity,nand-cs=off,qspi-cs=off
 
-An open J9 makes NAND bus reads return the deselected value and ignores writes.
-An open J10 holds the serial flash chip select inactive while leaving the QSPI
-controller available.
+Software must still assign CS2 and select the dedicated eight-bit NAND data
+path through ``SFR_CCFG`` before U5 is decoded.  An open J9 then makes decoded
+NAND bus reads return the deselected value and ignores writes.  An open J10
+holds the serial flash chip select inactive while leaving the QSPI controller
+and its CCFG-independent memory window available.
 
 J12 is closed by default and supplies the 25 MHz reference clock required by
 the LAN8840 on the Ethernet daughterboard.  Open it with::
@@ -840,11 +860,12 @@ must follow the hardware result.
 Completion gates
 ----------------
 
-Polling DBGU from SRAM, interrupt-driven bare metal, unmodified SD and NAND
-AT91Bootstrap into U-Boot, a Linux shell from SD, and GEM/LAN8840 packet
-exchange and the populated LED/button paths are achieved.  The remaining
-integration gates include full guest ``mmc_spi`` operation through J24, the
-remaining board jumper and mux behavior, genuine QSPI and NAND RomBOOT, USB,
-CAN, expansion buses, multimedia/security, whole-machine migration and finally
-hardware differential validation.  Normal supported boots must be clean with
-``-d unimp,guest_errors``.
+Polling DBGU from SRAM, interrupt-driven bare metal and the populated
+LED/button paths are achieved.  SD and NAND AT91Bootstrap into U-Boot, the
+Linux shell from SD, and GEM/LAN8840 packet exchange were achieved against the
+earlier fixed-decode model and are pending one repeat against exact EBI decode.
+The other remaining integration gates include full guest ``mmc_spi`` operation
+through J24, the remaining board jumper and mux behavior, genuine QSPI and NAND
+RomBOOT, USB, CAN, expansion buses, multimedia/security, whole-machine
+migration and finally hardware differential validation.  Normal supported
+boots must be clean with ``-d unimp,guest_errors``.
