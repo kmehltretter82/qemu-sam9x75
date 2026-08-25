@@ -18,7 +18,7 @@ The implementation and tests are pinned to the following inputs:
 * SAM9X75 Curiosity User Guide DS60001859C, January 2026, SHA-256
   ``37b51cecee93146f97cb1082461bfc1051059f8bf2a42e9c4205d7dc4f6400ce``.
 * SAM9X7 Series data sheet DS60001813E.
-* SAM9X7 Series silicon errata DS80001082G.
+* SAM9X7 Series silicon errata DS80001082H.
 * Macronix MX30LF1G28AD/MX30LF2G28AD/MX30LF4G28AD data sheet PM2579,
   revision 1.3, August 2022.
 * AT91Bootstrap v4.0.13, commit
@@ -223,17 +223,22 @@ Support matrix
        the M.2 socket through SDMMC1.  Its SPI position electrically
        disconnects that host and attaches the same drive to FLEXCOM4 NPCS1;
        a board qtest clocks the card and receives its SPI-mode CMD0 response.
-       Host preset registers and the Linux ADMA descriptor form are covered.
-       The unmodified AT91Bootstrap SD/ADMA path loads U-Boot, and Linux mounts
-       the SD root filesystem and reaches a shell.  SDIO I/O functions,
-       full M.2 ``mmc_spi`` guest integration, register, command, DMA error and
-       media-change completeness remain under audit.
+       Host preset registers, the SAM9X7 Host Control 2 writable mask, combined
+       command/data/all software reset, the vendor registers covered by
+       ``SWRSTALL``, and the Linux ADMA descriptor form are covered.  Writable
+       Host Control 2 state survives migration.  The
+       unmodified AT91Bootstrap SD/ADMA path loads U-Boot, and Linux mounts the
+       SD root filesystem and reaches a shell.  SDIO I/O functions, full M.2
+       ``mmc_spi`` guest integration, DMA fault termination and dynamic
+       card-detect/media-change completeness remain under audit.
    * - OSPI/QSPI NOR
      - Initial
      - Controller and XIP windows, SST26VF064BEUI identity, SFDP/EUI data,
-       program/erase and U-Boot probing are modeled.  The EUI-48 follows the
-       configured GEM MAC address.  Persistence with a drive, all protocol
-       widths and the ROM quad-mode erratum need further coverage.
+       program/erase and U-Boot probing are modeled.  Erase commands select the
+       containing erase unit even for unaligned addresses, with an end-of-flash
+       bounds regression test.  The EUI-48 follows the configured GEM MAC
+       address.  Persistence with a drive, all protocol widths and the ROM
+       quad-mode erratum need further coverage.
    * - EBI/SMC and raw NAND
      - Initial
      - The MX30LF4G28AD identity and its first eight known ONFI parameter-page
@@ -247,9 +252,11 @@ Support matrix
        feature state survives ``FFh`` and SoC core resets but not a power-on
        reset.  Feature address ``A0h`` is invalid because the board
        leaves the NAND PT pin unconnected and its internal pull-down holds PT
-       low.  Page and OOB program/read/erase paths,
-       migration of device-owned sparse/OOB state with shared backend data, SMC
-       registers, and initial PMECC/PMERRLOC control/status are present.  An
+       low.  Page and OOB program/read/erase paths, including the AT91Bootstrap
+       ``80h``/``85h``/``10h`` Random Data Input sequence, are present.  Active
+       ordinary and random-input programs, device-owned sparse/OOB state and
+       shared backend data have migration coverage.  SMC registers and initial
+       PMECC/PMERRLOC control/status are present.  An
        unmodified NAND AT91Bootstrap detects ONFI, selects timing mode 3, loads
        U-Boot from offset ``0x40000`` and reaches the prompt.
        Ready/busy timing and pin signaling, the additional redundant parameter
