@@ -597,7 +597,8 @@ Support matrix
        expose the core's user/privileged mode on the AHB ``HPROT`` attributes,
        so an undocumented privilege check remains possible.  QEMU therefore
        remains permissive until the same access is compared from privileged
-       kernel and bare-metal code and the aborting bus transaction is isolated.
+       bare-metal code with a tested data-abort handler and the aborting bus
+       transaction is isolated.
 
        The maximum-address pre-programming probe exposes raw bits at the
        prospective packet tail.  Corrupt-header reads also expose the
@@ -696,7 +697,10 @@ phase green merely by avoiding it in the device tree.
    reset values, reserved-bit behavior, interrupt timing, DMA ordering,
    clocks, error paths and board I/O.  Record unavoidable nondeterminism,
    resolve every actionable difference, rerun migration and integration
-   tests, and split the result into reviewable upstream QEMU series.
+   tests, and split the result into reviewable upstream QEMU series.  Exclude
+   OTPC emulation, mutation and command-characterization tests from physical
+   hardware even when their QEMU-only equivalents are safe against disposable
+   VM-local state.
 
 Current invocation
 ------------------
@@ -847,9 +851,9 @@ The ROM loader makes genuine RomBOOT execution possible, but the real image
 and its SD, QSPI and NAND selection/fallback flows have not yet been
 validated.
 
-The initial VDDBU/factory value of ``BSC_CR.BOOT`` defaults to zero and can be
-set to the OTP-emulation request value for RomBOOT experiments with, for
-example::
+The initial VDDBU/factory value of ``BSC_CR.BOOT`` defaults to zero.  This
+QEMU-only option can set it to the OTP-emulation request value for RomBOOT
+experiments, for example::
 
   -global at91-bsc.factory-boot-sequence=1
 
@@ -859,35 +863,25 @@ software requests SRAM1 emulation with ``OTPC_MR.EMUL`` and then issues the
 unkeyed ``OTPC_CR.REFRESH``.  The requested and active states are separate,
 and ``OTPC_SR.EMUL`` reports the active state after refresh.
 
-Real-hardware validation must start, and remain, on the SRAM1 emulation path.
-The board's physical factory OTP array must never be used as test material and
-must never receive ``PGM``, ``INVLD``, ``HIDE`` or ``CKSGEN`` during these
-experiments.  Use a RAM-resident probe with an abort path that cannot fall
-through to a physical-array command.  Populate a disposable packet chain and
-guard words in SRAM1, request ``MR.EMUL``, issue the unkeyed ``REFRESH``, and
-require ``SR.EMUL == 1``.  Re-read and require ``SR.EMUL == 1`` immediately
-before every subsequent OTPC command; abort without issuing the command if the
-bit is clear or changes unexpectedly.
+Do not use a physical board to characterize the OTPC command model.  In
+particular, never enter OTP emulation mode, write SRAM1, or issue programming,
+invalidation, hiding, checksum/key-generation or key-bus commands.  This also
+rules out ``PGM``, ``INVLD``, ``HIDE`` and ``CKSGEN`` even when software
+believes emulation is active.  The boundary between SRAM emulation and the
+factory OTP array has not been independently established well enough to make
+those experiments safe.
 
-The same SRAM1-only probe should record undocumented command outcomes without
-asserting them in QEMU yet, including repeated ``INVLD`` and ``HIDE``, hiding
-key or invalid packets, simultaneous command bits, and each command blocked by
-a UHC protection bit.  QEMU currently ignores simultaneous command bits as a
-non-destructive safety fallback until that priority is characterized.
-
-The unpublished checksum can be characterized safely only after that guard is
-in place.  Start with an unlocked regular packet in SRAM1, save the complete
-4 KiB SRAM1 contents, issue ``CKSGEN`` while ``SR.EMUL`` is still asserted,
-then capture SRAM1 again together with ``MR``, ``SR``, ``ISR``, ``HR`` and
-``LRMR``.  Repeat from a freshly initialized SRAM1 image while changing one
-header field, payload word or packet size at a time.  Record the exact raw
-before/after bytes rather than assuming CRC bit ordering, initial values or
-final XOR behavior.  Only after the regular-packet transformation is
-understood should the same guarded procedure cover the special packet types.
-Reset or power-cycle after the probe; do not switch back to the physical array
-and continue issuing commands in the same run.  Likewise, BSC values 2--7
-must not be programmed until their undocumented boot effects have been
-established safely with a recovery path available.
+The only pending OTPC hardware follow-up is a privileged access-control probe
+for ``AR``.  A privileged bare-metal payload with code, vectors, stack, log
+buffer and a tested data-abort handler all outside SRAM1 may attempt one
+aligned word write of a benign address value.  It may read ``AR`` back only if
+the write completes without an abort or loss of OTPC decode.  On either
+failure, it must stop all OTPC access and reboot; it must not issue a recovery
+command.  The probe must not write ``CR`` or ``MR``, read ``DR`` or
+device-unique registers, or use a kernel path that may turn an imprecise abort
+into a panic.  The existing Linux userspace abort is already established and
+should not be repeated merely for confirmation.  Leave ``BSC_CR.BOOT``
+unchanged on physical hardware.
 
 The pinned Linux ``i2c-at91`` driver probes the FLEXCOM6 FIFO and obtains its
 XDMAC channels.  Byte-width DMA, including an unaligned 13-byte transfer,
