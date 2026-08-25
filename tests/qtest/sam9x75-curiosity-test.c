@@ -140,6 +140,7 @@
 #define SDHCI_INT_XFER_COMPLETE BIT(1)
 #define SDHCI_INT_DMA           BIT(3)
 #define SDHCI_INT_ERROR         BIT(15)
+#define SDHCI_ERR_CMD_TIMEOUT   BIT(0)
 #define SDHCI_ERR_ADMA          BIT(9)
 
 #define SDHCI_CMD_INDEX(index)  ((index) << 8)
@@ -12341,6 +12342,67 @@ static void sdhci_issue_command(QTestState *qts, uint16_t block_size,
     qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_CMDREG, command);
 }
 
+static void test_sdcard_native_protocol_probes(void)
+{
+    static const uint8_t commands[] = { 1, 5, 52, 53 };
+    g_autofree char *sd_path = NULL;
+    g_autofree char *log_path = NULL;
+    g_autofree char *log = NULL;
+    QTestState *qts;
+    GError *error = NULL;
+    unsigned int i;
+    int fd;
+    int ret;
+
+    fd = g_file_open_tmp("sam9x75-sd-probe-XXXXXX", &sd_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = ftruncate(fd, 1 << 20);
+    g_assert_cmpint(ret, ==, 0);
+    close(fd);
+
+    fd = g_file_open_tmp("sam9x75-sd-probe-log-XXXXXX", &log_path,
+                         &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+
+    qts = qtest_initf(SAM9X75_MACHINE
+                      " -drive file=%s,if=sd,format=raw,auto-read-only=off"
+                      " -d unimp,guest_errors -D %s",
+                      sd_path, log_path);
+    qtest_writeb(qts, SAM9X7_SDMMC0_BASE + SDHCI_SWRST,
+                 SDHCI_RESET_ALL);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_CLKCON,
+                 SDHCI_CLOCK_ENABLE);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_ERRINTSTSEN,
+                 SDHCI_ERR_CMD_TIMEOUT);
+
+    for (i = 0; i < ARRAY_SIZE(commands); i++) {
+        qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_NORINTSTS,
+                     UINT16_MAX);
+        sdhci_issue_command(qts, 0, 0, 0, 0,
+                            SDHCI_CMD_INDEX(commands[i]) |
+                            SDHCI_CMD_RESPONSE);
+        g_assert_cmphex(qtest_readw(qts,
+                                    SAM9X7_SDMMC0_BASE + SDHCI_ERRINTSTS),
+                        ==, SDHCI_ERR_CMD_TIMEOUT);
+        g_assert_true(qtest_readw(qts,
+                                  SAM9X7_SDMMC0_BASE + SDHCI_NORINTSTS) &
+                      SDHCI_INT_ERROR);
+        g_assert_false(qtest_readw(qts,
+                                   SAM9X7_SDMMC0_BASE + SDHCI_NORINTSTS) &
+                       SDHCI_INT_CMD_COMPLETE);
+    }
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(log_path, &log, NULL, &error));
+    g_assert_no_error(error);
+    g_assert_cmpstr(log, ==, "");
+    g_assert_cmpint(g_unlink(log_path), ==, 0);
+    g_assert_cmpint(g_unlink(sd_path), ==, 0);
+}
+
 static QTestState *sdhci_start_test_card(const uint8_t *contents,
                                          size_t contents_len,
                                          char **sd_path)
@@ -12958,6 +13020,90 @@ static uint8_t flexcom_spi_transfer_byte(QTestState *qts, uint64_t base,
     qtest_clock_step(qts, transfer_ns);
     g_assert_true(qtest_readl(qts, base + SPI_SR) & SPI_INT_RDRF);
     return qtest_readb(qts, base + SPI_RDR);
+}
+
+static uint8_t flexcom_spi_sd_command(QTestState *qts, uint8_t command)
+{
+    uint8_t request[] = { 0x40 | command, 0, 0, 0, 0,
+                          command == 0 ? 0x95 : 0xff };
+    uint8_t response;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(request); i++) {
+        g_assert_cmphex(flexcom_spi_transfer_byte(qts, SAM9X7_SPI4_BASE,
+                                                 13, request[i], 217),
+                        ==, 0xff);
+    }
+
+    /* One Ncr byte precedes the single-byte SPI response. */
+    g_assert_cmphex(flexcom_spi_transfer_byte(qts, SAM9X7_SPI4_BASE,
+                                             13, 0xff, 217), ==, 0xff);
+    response = flexcom_spi_transfer_byte(qts, SAM9X7_SPI4_BASE,
+                                         13, 0xff, 217);
+    g_assert_cmphex(flexcom_spi_transfer_byte(qts, SAM9X7_SPI4_BASE,
+                                             13, 0xff, 217), ==, 0xff);
+    return response;
+}
+
+static void test_sdcard_spi_protocol_probes(void)
+{
+    static const uint8_t commands[] = { 5, 52, 53 };
+    g_autofree char *sd_path = NULL;
+    g_autofree char *log_path = NULL;
+    g_autofree char *log = NULL;
+    QTestState *qts;
+    GError *error = NULL;
+    unsigned int i;
+    int fd;
+    int ret;
+
+    fd = g_file_open_tmp("sam9x75-spi-sd-probe-XXXXXX", &sd_path,
+                         &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = ftruncate(fd, 1 << 20);
+    g_assert_cmpint(ret, ==, 0);
+    close(fd);
+
+    fd = g_file_open_tmp("sam9x75-spi-sd-probe-log-XXXXXX", &log_path,
+                         &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+
+    qts = qtest_initf(SAM9X75_MACHINE ",m2-interface=spi"
+                      " -drive file=%s,if=sd,index=1,format=raw,"
+                      "auto-read-only=off"
+                      " -d unimp,guest_errors -D %s",
+                      sd_path, log_path);
+    pmc_write_pcr(qts, 13, PMC_PCR_EN);
+    qtest_writeb(qts, SAM9X7_FLEXCOM4_BASE + FLEX_MR, FLEX_MODE_SPI);
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_MR,
+                 SPI_MR_MSTR | SPI_MR_PCS(0xd));
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_CSR(1),
+                 SPI_CSR_CSAAT | SPI_CSR_BITS(8) |
+                 SPI_CSR_SCBR(217) | SPI_CSR_DLYBS(1));
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_CR, SPI_CR_SPIEN);
+
+    for (i = 0; i < 10; i++) {
+        g_assert_cmphex(flexcom_spi_transfer_byte(qts, SAM9X7_SPI4_BASE,
+                                                 13, 0xff, 217), ==, 0xff);
+    }
+    g_assert_cmphex(flexcom_spi_sd_command(qts, 0), ==, 0x01);
+    for (i = 0; i < ARRAY_SIZE(commands); i++) {
+        g_assert_cmphex(flexcom_spi_sd_command(qts, commands[i]), ==, 0x05);
+    }
+    /* A valid command reports the previous error once, then clears it. */
+    g_assert_cmphex(flexcom_spi_sd_command(qts, 59), ==, 0x05);
+    g_assert_cmphex(flexcom_spi_sd_command(qts, 59), ==, 0x01);
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_CR, SPI_CR_LASTXFER);
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(log_path, &log, NULL, &error));
+    g_assert_no_error(error);
+    g_assert_cmpstr(log, ==, "");
+    g_assert_cmpint(g_unlink(log_path), ==, 0);
+    g_assert_cmpint(g_unlink(sd_path), ==, 0);
 }
 
 static void test_board_m2_interface_jumper(void)
@@ -19276,6 +19422,10 @@ int main(int argc, char **argv)
                    test_sdhci_software_reset_all);
     qtest_add_func("sam9x75/sdhci/software-reset-command-irq",
                    test_sdhci_software_reset_command_irq);
+    qtest_add_func("sam9x75/sdcard/native-protocol-probes",
+                   test_sdcard_native_protocol_probes);
+    qtest_add_func("sam9x75/sdcard/spi-protocol-probes",
+                   test_sdcard_spi_protocol_probes);
     qtest_add_func("sam9x75/board/m2-interface-jumper",
                    test_board_m2_interface_jumper);
     qtest_add_func("sam9x75/ebi/chip-select-assignments",

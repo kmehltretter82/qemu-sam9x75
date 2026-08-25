@@ -1610,6 +1610,15 @@ static sd_rsp_type_t sd_cmd_optional(SDState *sd, SDRequest req)
     return sd_illegal;
 }
 
+/*
+ * Commands used to probe for other card types are expected during
+ * enumeration.  Keep the protocol response behavior without diagnosing them.
+ */
+static sd_rsp_type_t sd_cmd_probe(SDState *sd, SDRequest req)
+{
+    return sd_illegal;
+}
+
 /* Configure fields for following sd_generic_write_data() calls */
 static sd_rsp_type_t sd_cmd_to_receivingdata(SDState *sd, SDRequest req,
                                              uint64_t start, size_t size)
@@ -2592,6 +2601,9 @@ send_response:
         sd->data_offset = 0;
         /* fall-through */
     case sd_illegal:
+        if (sd_is_spi(sd)) {
+            sd_response_r1_make(sd, response);
+        }
         break;
     default:
         g_assert_not_reached();
@@ -2911,7 +2923,7 @@ static const SDProto sd_proto_spi = {
     .cmd = {
         [0]  = {0,  sd_spi, "GO_IDLE_STATE", sd_cmd_GO_IDLE_STATE},
         [1]  = {0,  sd_spi, "SEND_OP_COND", sd_cmd_SEND_OP_COND},
-        [5]  = {9,  sd_spi, "IO_SEND_OP_COND", sd_cmd_optional},
+        [5]  = {9,  sd_spi, "IO_SEND_OP_COND", sd_cmd_probe},
         [6]  = {10, sd_spi, "SWITCH_FUNCTION", sd_cmd_SWITCH_FUNCTION},
         [8]  = {0,  sd_spi, "SEND_IF_COND", sd_cmd_SEND_IF_COND},
         [9]  = {0,  sd_spi, "SEND_CSD", spi_cmd_SEND_CSD},
@@ -2934,8 +2946,8 @@ static const SDProto sd_proto_spi = {
         [38] = {5,  sd_spi, "ERASE", sd_cmd_ERASE},
         [42] = {7,  sd_spi, "LOCK_UNLOCK", sd_cmd_LOCK_UNLOCK},
         [50] = {10, sd_spi, "DIRECT_SECURE_READ", sd_cmd_optional},
-        [52] = {9,  sd_spi, "IO_RW_DIRECT", sd_cmd_optional},
-        [53] = {9,  sd_spi, "IO_RW_EXTENDED", sd_cmd_optional},
+        [52] = {9,  sd_spi, "IO_RW_DIRECT", sd_cmd_probe},
+        [53] = {9,  sd_spi, "IO_RW_EXTENDED", sd_cmd_probe},
         [55] = {8,  sd_spi, "APP_CMD", sd_cmd_APP_CMD},
         [56] = {8,  sd_spi, "GEN_CMD", sd_cmd_GEN_CMD},
         [57] = {10, sd_spi, "DIRECT_SECURE_WRITE", sd_cmd_optional},
@@ -2956,10 +2968,11 @@ static const SDProto sd_proto_sd = {
     .name = "SD",
     .cmd = {
         [0]  = {0,  sd_bc,   "GO_IDLE_STATE", sd_cmd_GO_IDLE_STATE},
+        [1]  = {0,  sd_bcr,  "SEND_OP_COND", sd_cmd_probe},
         [2]  = {0,  sd_bcr,  "ALL_SEND_CID", sd_cmd_ALL_SEND_CID},
         [3]  = {0,  sd_bcr,  "SEND_RELATIVE_ADDR", sd_cmd_SEND_RELATIVE_ADDR},
         [4]  = {0,  sd_bc,   "SEND_DSR", sd_cmd_unimplemented},
-        [5]  = {9,  sd_bc,   "IO_SEND_OP_COND", sd_cmd_optional},
+        [5]  = {9,  sd_bc,   "IO_SEND_OP_COND", sd_cmd_probe},
         [6]  = {10, sd_adtc, "SWITCH_FUNCTION", sd_cmd_SWITCH_FUNCTION},
         [7]  = {0,  sd_ac,   "(DE)SELECT_CARD", sd_cmd_DE_SELECT_CARD},
         [8]  = {0,  sd_bcr,  "SEND_IF_COND", sd_cmd_SEND_IF_COND},
@@ -2995,8 +3008,8 @@ static const SDProto sd_proto_sd = {
         [48] = {1,  sd_adtc, "READ_EXTR_SINGLE", sd_cmd_optional},
         [49] = {1,  sd_adtc, "WRITE_EXTR_SINGLE", sd_cmd_optional},
         [50] = {10, sd_adtc, "DIRECT_SECURE_READ", sd_cmd_optional},
-        [52] = {9,  sd_bc,   "IO_RW_DIRECT", sd_cmd_optional},
-        [53] = {9,  sd_bc,   "IO_RW_EXTENDED", sd_cmd_optional},
+        [52] = {9,  sd_bc,   "IO_RW_DIRECT", sd_cmd_probe},
+        [53] = {9,  sd_bc,   "IO_RW_EXTENDED", sd_cmd_probe},
         [55] = {8,  sd_ac,   "APP_CMD", sd_cmd_APP_CMD},
         [56] = {8,  sd_adtc, "GEN_CMD", sd_cmd_GEN_CMD},
         [57] = {10, sd_adtc, "DIRECT_SECURE_WRITE", sd_cmd_optional},
