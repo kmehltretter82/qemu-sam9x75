@@ -490,9 +490,14 @@ Support matrix
        overwrite modes, watermarks, acknowledgements, transmit events,
        internal loopback, interrupt routing, Message-RAM fault atomicity,
        clock gating, reset and migration have qtests, including traffic
-       between the two controllers.  Bus-error confinement/retry, bit-level
-       arbitration, debug-message handling, timestamp synchronization pins
-       and precise timestamp-unit behavior remain incomplete.  A Linux
+       between the two controllers.  SAM9X7 DBTP/TEST/RWD masks, timeout
+       reload selection, the TSCFG/ATB destructive-read behavior, effective
+       transmit FDF/BRS/ESI normalization without changing guest Message RAM,
+       and disabled, internal and reserved timestamp-source selection are
+       also covered.  Bus-error confinement/retry, bit-level arbitration,
+       debug-message handling, timestamp synchronization pins, the external
+       timestamp source and precise timestamp-unit timing remain incomplete.
+       A Linux
        7.2.0-rc7-next-20260814 guest with a DT overlay probes ``can0`` and
        ``can1`` and passes bidirectional
        CAN FD/BRS traffic (including a 64-byte frame) plus classic CAN traffic

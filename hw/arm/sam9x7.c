@@ -944,6 +944,9 @@ static void sam9x7_init(Object *obj)
             g_strdup_printf("gclk[%u]", mcan_pid[i]);
 
         object_initialize_child(obj, name, &s->mcan[i], TYPE_BOSCH_M_CAN);
+        qdev_prop_set_uint32(DEVICE(&s->mcan[i]), "dbtp-mask", 0x009f1ff7);
+        qdev_prop_set_bit(DEVICE(&s->mcan[i]), "tsu-destructive-read", true);
+        qdev_prop_set_bit(DEVICE(&s->mcan[i]), "rwd-unprotected", true);
         qdev_connect_clock_in(DEVICE(&s->mcan[i]), "hclk",
                              qdev_get_clock_out(DEVICE(&s->pmc), pclk_name));
         qdev_connect_clock_in(DEVICE(&s->mcan[i]), "cclk",

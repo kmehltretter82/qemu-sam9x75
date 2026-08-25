@@ -82,6 +82,8 @@ enum {
 
 #define MCAN_REG(s, offset) ((s)->regs[(offset) / sizeof(uint32_t)])
 
+#define MCAN_CCCR_BRSE      BIT(9)
+#define MCAN_CCCR_FDOE      BIT(8)
 #define MCAN_CCCR_TEST      BIT(7)
 #define MCAN_CCCR_MON       BIT(5)
 #define MCAN_CCCR_CSR       BIT(4)
@@ -93,6 +95,17 @@ enum {
     (MCAN_CCCR_CSR | MCAN_CCCR_CCE | MCAN_CCCR_INIT)
 
 #define MCAN_TEST_LBCK      BIT(4)
+#define MCAN_TEST_WRITABLE_MASK 0x00000070
+
+#define MCAN_RWD_WDC_MASK   0x000000ff
+
+#define MCAN_TSCC_TSS_MASK  0x00000003
+#define MCAN_TSCC_TSS_INTERNAL 1
+#define MCAN_TSCC_TSS_EXTERNAL 2
+
+#define MCAN_TOCC_TOS_SHIFT 1
+#define MCAN_TOCC_TOS_LEN   2
+#define MCAN_TOCC_TOP_SHIFT 16
 
 #define MCAN_IR_RF0N        BIT(0)
 #define MCAN_IR_RF0W        BIT(1)
@@ -174,6 +187,8 @@ enum {
 #define MCAN_TX_EVENT_ET_TX   (1U << 22)
 
 #define MCAN_TSCFG_MASK      0x0000ff07
+#define MCAN_TSCFG_TBPRE_MASK 0x0000ff00
+#define MCAN_DBTP_GENERIC_MASK 0x009f1fff
 #define MCAN_TSS2_DOCUMENTED_RESET 0x000a0000
 
 static const uint8_t mcan_data_size[8] = {
@@ -316,10 +331,16 @@ static bool bosch_m_can_mram_write32(BoschMCanState *s, hwaddr address,
 
 static uint16_t bosch_m_can_capture_timestamp(BoschMCanState *s)
 {
-    uint16_t timestamp = s->timestamp_counter;
+    unsigned tss = MCAN_REG(s, MCAN_TSCC) & MCAN_TSCC_TSS_MASK;
+    uint16_t timestamp = 0;
+
+    if (tss == MCAN_TSCC_TSS_INTERNAL ||
+        tss == MCAN_TSCC_TSS_EXTERNAL) {
+        timestamp = s->timestamp_counter;
+    }
 
     /* Untimed approximation: internal TSS advances once per frame. */
-    if ((MCAN_REG(s, MCAN_TSCC) & 3) == 1) {
+    if (tss == MCAN_TSCC_TSS_INTERNAL) {
         s->timestamp_counter++;
         if (s->timestamp_counter == 0) {
             bosch_m_can_raise_ir(s, MCAN_IR_TSW);
@@ -874,9 +895,13 @@ static bool bosch_m_can_fetch_tx(BoschMCanState *s, unsigned index,
                                  qemu_can_frame *frame, uint32_t *word0,
                                  uint32_t *word1)
 {
+    uint32_t cccr = MCAN_REG(s, MCAN_CCCR);
     unsigned data_size = mcan_data_size[MCAN_REG(s, MCAN_TXESC) & 7];
     unsigned length;
     unsigned padded_length;
+    bool fd;
+    bool brs;
+    bool esi;
     hwaddr address = (MCAN_REG(s, MCAN_TXBC) & MCAN_TXBC_TBSA_MASK) +
                      index * (8 + data_size);
 
@@ -885,6 +910,25 @@ static bool bosch_m_can_fetch_tx(BoschMCanState *s, unsigned index,
         !bosch_m_can_mram_read32(s, address + 4, word1)) {
         bosch_m_can_raise_ir(s, MCAN_IR_MRAF);
         return false;
+    }
+
+    fd = (cccr & MCAN_CCCR_FDOE) && !(*word0 & MCAN_ELEMENT_RTR) &&
+         (*word1 & MCAN_ELEMENT_FDF);
+    brs = fd && (cccr & MCAN_CCCR_BRSE) &&
+          (*word1 & MCAN_ELEMENT_BRS);
+    esi = fd && (*word0 & MCAN_ELEMENT_ESI);
+
+    /* Keep Message RAM intact, but report and transmit the effective format. */
+    *word0 &= ~MCAN_ELEMENT_ESI;
+    *word1 &= ~(MCAN_ELEMENT_FDF | MCAN_ELEMENT_BRS);
+    if (esi) {
+        *word0 |= MCAN_ELEMENT_ESI;
+    }
+    if (fd) {
+        *word1 |= MCAN_ELEMENT_FDF;
+    }
+    if (brs) {
+        *word1 |= MCAN_ELEMENT_BRS;
     }
 
     memset(frame, 0, sizeof(*frame));
@@ -1084,11 +1128,11 @@ static bool bosch_m_can_config_enabled(BoschMCanState *s)
            (MCAN_CCCR_INIT | MCAN_CCCR_CCE);
 }
 
-static uint32_t bosch_m_can_register_mask(hwaddr offset)
+static uint32_t bosch_m_can_register_mask(BoschMCanState *s, hwaddr offset)
 {
     switch (offset) {
-    case MCAN_DBTP:  return 0x009f1fff;
-    case MCAN_RWD:   return 0x0000ffff;
+    case MCAN_DBTP:  return s->dbtp_mask;
+    case MCAN_RWD:   return MCAN_RWD_WDC_MASK;
     case MCAN_NBTP:  return 0xffffff7f;
     case MCAN_TSCC:  return 0x000f0003;
     case MCAN_TOCC:  return 0xffff0007;
@@ -1170,7 +1214,29 @@ static uint64_t bosch_m_can_read(void *opaque, hwaddr offset,
     case MCAN_CUST:
         return 0;
     case MCAN_TSCV:
-        return s->timestamp_counter;
+        switch (MCAN_REG(s, MCAN_TSCC) & MCAN_TSCC_TSS_MASK) {
+        case MCAN_TSCC_TSS_INTERNAL:
+        case MCAN_TSCC_TSS_EXTERNAL:
+            return s->timestamp_counter;
+        default:
+            return 0;
+        }
+    case MCAN_TSU_TSCFG: {
+        uint32_t value = MCAN_REG(s, offset);
+
+        if (s->tsu_destructive_read) {
+            MCAN_REG(s, offset) = 0;
+        }
+        return value;
+    }
+    case MCAN_TSU_ATB: {
+        uint32_t value = MCAN_REG(s, offset);
+
+        if (s->tsu_destructive_read) {
+            MCAN_REG(s, MCAN_TSU_TSCFG) &= ~MCAN_TSCFG_TBPRE_MASK;
+        }
+        return value;
+    }
     case MCAN_RXF0S:
         return bosch_m_can_rxf_status(s, 0);
     case MCAN_RXF1S:
@@ -1191,7 +1257,7 @@ static void bosch_m_can_write_protected(BoschMCanState *s, hwaddr offset,
         return;
     }
 
-    MCAN_REG(s, offset) = value & bosch_m_can_register_mask(offset);
+    MCAN_REG(s, offset) = value & bosch_m_can_register_mask(s, offset);
     switch (offset) {
     case MCAN_RXF0C:
         s->rxf0_get = s->rxf0_put = s->rxf0_fill = 0;
@@ -1225,10 +1291,17 @@ static void bosch_m_can_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case MCAN_TEST:
         if (MCAN_REG(s, MCAN_CCCR) & MCAN_CCCR_TEST) {
-            MCAN_REG(s, MCAN_TEST) = v & 0x003f3ff0;
+            MCAN_REG(s, MCAN_TEST) = v & MCAN_TEST_WRITABLE_MASK;
         }
         break;
-    case MCAN_DBTP: case MCAN_RWD: case MCAN_NBTP: case MCAN_TSCC:
+    case MCAN_RWD:
+        if (s->rwd_unprotected) {
+            MCAN_REG(s, MCAN_RWD) = v & MCAN_RWD_WDC_MASK;
+        } else {
+            bosch_m_can_write_protected(s, offset, v);
+        }
+        break;
+    case MCAN_DBTP: case MCAN_NBTP: case MCAN_TSCC:
     case MCAN_TOCC: case MCAN_TDCR: case MCAN_GFC: case MCAN_SIDFC:
     case MCAN_XIDFC: case MCAN_XIDAM: case MCAN_RXF0C: case MCAN_RXBC:
     case MCAN_RXF1C: case MCAN_RXESC: case MCAN_TXBC: case MCAN_TXESC:
@@ -1236,10 +1309,17 @@ static void bosch_m_can_write(void *opaque, hwaddr offset, uint64_t value,
         bosch_m_can_write_protected(s, offset, v);
         break;
     case MCAN_TSCV:
-        s->timestamp_counter = 0;
+        if ((MCAN_REG(s, MCAN_TSCC) & MCAN_TSCC_TSS_MASK) !=
+            MCAN_TSCC_TSS_EXTERNAL) {
+            s->timestamp_counter = 0;
+        }
         break;
     case MCAN_TOCV:
-        MCAN_REG(s, MCAN_TOCV) = v & 0xffff;
+        if (extract32(MCAN_REG(s, MCAN_TOCC), MCAN_TOCC_TOS_SHIFT,
+                      MCAN_TOCC_TOS_LEN) == 0) {
+            MCAN_REG(s, MCAN_TOCV) =
+                extract32(MCAN_REG(s, MCAN_TOCC), MCAN_TOCC_TOP_SHIFT, 16);
+        }
         break;
     case MCAN_IR:
         MCAN_REG(s, MCAN_IR) &= ~(v & MCAN_IR_MASK);
@@ -1283,7 +1363,9 @@ static void bosch_m_can_write(void *opaque, hwaddr offset, uint64_t value,
         bosch_m_can_ack_txe(s, v);
         break;
     case MCAN_TSU_TSCFG:
-        MCAN_REG(s, offset) = v & MCAN_TSCFG_MASK;
+        if (bosch_m_can_config_enabled(s)) {
+            MCAN_REG(s, offset) = v & MCAN_TSCFG_MASK;
+        }
         break;
     case MCAN_CREL: case MCAN_ENDN: case MCAN_CUST: case MCAN_ECR:
     case MCAN_PSR: case MCAN_HPMS: case MCAN_RXF0S: case MCAN_RXF1S:
@@ -1328,7 +1410,7 @@ static void bosch_m_can_reset(DeviceState *dev)
     BoschMCanState *s = BOSCH_M_CAN(dev);
 
     memset(s->regs, 0, sizeof(s->regs));
-    MCAN_REG(s, MCAN_DBTP) = 0x00000a33;
+    MCAN_REG(s, MCAN_DBTP) = 0x00000a33 & s->dbtp_mask;
     MCAN_REG(s, MCAN_CCCR) = MCAN_CCCR_INIT;
     MCAN_REG(s, MCAN_NBTP) = 0x06000a03;
     MCAN_REG(s, MCAN_TOCC) = 0xffff0000;
@@ -1432,6 +1514,15 @@ static int bosch_m_can_post_load(void *opaque, int version_id)
     MCAN_REG(s, MCAN_IE) &= MCAN_IR_MASK;
     MCAN_REG(s, MCAN_ILS) &= MCAN_IR_MASK;
     MCAN_REG(s, MCAN_ILE) &= 3;
+    MCAN_REG(s, MCAN_DBTP) &= s->dbtp_mask;
+    MCAN_REG(s, MCAN_RWD) &= MCAN_RWD_WDC_MASK;
+    MCAN_REG(s, MCAN_TOCV) &= 0xffff;
+    MCAN_REG(s, MCAN_TSU_TSCFG) &= MCAN_TSCFG_MASK;
+    if (MCAN_REG(s, MCAN_CCCR) & MCAN_CCCR_TEST) {
+        MCAN_REG(s, MCAN_TEST) &= MCAN_TEST_WRITABLE_MASK;
+    } else {
+        MCAN_REG(s, MCAN_TEST) = 0;
+    }
 
     size = mcan_rxf0_size(s);
     if (size) {
@@ -1504,6 +1595,12 @@ static const Property bosch_m_can_properties[] = {
     DEFINE_PROP_UINT32("crel", BoschMCanState, crel, 0x33000000),
     DEFINE_PROP_UINT32("sam-tss2-reset", BoschMCanState, sam_tss2_reset,
                        MCAN_TSS2_DOCUMENTED_RESET),
+    DEFINE_PROP_UINT32("dbtp-mask", BoschMCanState, dbtp_mask,
+                       MCAN_DBTP_GENERIC_MASK),
+    DEFINE_PROP_BOOL("tsu-destructive-read", BoschMCanState,
+                     tsu_destructive_read, false),
+    DEFINE_PROP_BOOL("rwd-unprotected", BoschMCanState, rwd_unprotected,
+                     false),
     DEFINE_PROP_LINK("message-ram", BoschMCanState, message_ram,
                      TYPE_MEMORY_REGION, MemoryRegion *),
     DEFINE_PROP_LINK("canbus", BoschMCanState, canbus, TYPE_CAN_BUS,

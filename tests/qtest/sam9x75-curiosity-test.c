@@ -322,9 +322,13 @@
 #define MCAN_ENDN               0x004
 #define MCAN_DBTP               0x00c
 #define MCAN_TEST               0x010
+#define MCAN_RWD                0x014
 #define MCAN_CCCR               0x018
 #define MCAN_NBTP               0x01c
 #define MCAN_TSCC               0x020
+#define MCAN_TSCV               0x024
+#define MCAN_TOCC               0x028
+#define MCAN_TOCV               0x02c
 #define MCAN_PSR                0x044
 #define MCAN_IR                 0x050
 #define MCAN_IE                 0x054
@@ -356,7 +360,9 @@
 #define MCAN_TXEFC              0x0f0
 #define MCAN_TXEFS              0x0f4
 #define MCAN_TXEFA              0x0f8
+#define MCAN_TSU_TSCFG          0x164
 #define MCAN_TSU_TSS2           0x16c
+#define MCAN_TSU_ATB            0x1b0
 
 #define MCAN_CCCR_INIT          BIT(0)
 #define MCAN_CCCR_CCE           BIT(1)
@@ -381,6 +387,7 @@
 #define MCAN_ILE_EINT0          BIT(0)
 #define MCAN_ILE_EINT1          BIT(1)
 #define MCAN_ELEMENT_EFC        BIT(23)
+#define MCAN_ELEMENT_ESI        BIT(31)
 #define MCAN_ELEMENT_RTR        BIT(29)
 #define MCAN_ELEMENT_XTD        BIT(30)
 #define MCAN_ELEMENT_FDF        BIT(21)
@@ -416,6 +423,8 @@
 #define MCAN_TXEFS_STATUS(fill, get, put) \
     ((uint32_t)(fill) | ((uint32_t)(get) << 8) | \
      ((uint32_t)(put) << 16))
+#define MCAN_TOCC_TOS(tos)      ((uint32_t)(tos) << 1)
+#define MCAN_TOCC_TOP(top)      ((uint32_t)(top) << 16)
 
 #define MATRIX_MCFG(n)          ((n) * 4)
 #define MATRIX_SCFG(n)          (0x40 + (n) * 4)
@@ -17140,6 +17149,306 @@ static void mcan_set_gfc(QTestState *qts, uint64_t base, uint32_t gfc)
     mcan_end_loopback_configuration(qts, base);
 }
 
+static uint32_t mcan_wait_register(QTestState *qts, uint64_t address,
+                                   uint32_t mask, uint32_t expected)
+{
+    int64_t deadline = g_get_monotonic_time() + G_TIME_SPAN_SECOND;
+    uint32_t value;
+
+    do {
+        value = qtest_readl(qts, address);
+        if ((value & mask) == expected) {
+            return value;
+        }
+        g_usleep(1000);
+    } while (g_get_monotonic_time() < deadline);
+
+    g_error("timed out waiting for M_CAN register 0x%" PRIx64
+            " mask 0x%08x to become 0x%08x (value 0x%08x)",
+            address, mask, expected, value);
+}
+
+static void test_mcan_sam_register_semantics(void)
+{
+    static const uint64_t bases[] = {
+        SAM9X7_MCAN0_BASE, SAM9X7_MCAN1_BASE,
+    };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(bases); i++) {
+        uint32_t timeout;
+        unsigned int tos;
+
+        /* SAM9X7 exposes only WDC[7:0], without requiring CCE. */
+        qtest_writel(qts, bases[i] + MCAN_RWD, 0x1234abcd);
+        g_assert_cmphex(qtest_readl(qts, bases[i] + MCAN_RWD), ==, 0xcd);
+
+        /* DBTP remains protected and uses the SAM9X7 mask (bit 3 is RES0). */
+        qtest_writel(qts, bases[i] + MCAN_DBTP, UINT32_MAX);
+        g_assert_cmphex(qtest_readl(qts, bases[i] + MCAN_DBTP), ==,
+                        0x00000a33);
+
+        /* TSCFG is likewise writable only while INIT and CCE are set. */
+        qtest_writel(qts, bases[i] + MCAN_TSU_TSCFG, 0x00005a07);
+        g_assert_cmphex(qtest_readl(qts, bases[i] + MCAN_TSU_TSCFG), ==, 0);
+
+        qtest_writel(qts, bases[i] + MCAN_CCCR,
+                     MCAN_CCCR_INIT | MCAN_CCCR_CCE);
+        qtest_writel(qts, bases[i] + MCAN_DBTP, UINT32_MAX);
+        g_assert_cmphex(qtest_readl(qts, bases[i] + MCAN_DBTP), ==,
+                        0x009f1ff7);
+
+        qtest_writel(qts, bases[i] + MCAN_CCCR,
+                     MCAN_CCCR_INIT | MCAN_CCCR_CCE | MCAN_CCCR_TEST);
+        qtest_writel(qts, bases[i] + MCAN_TEST, UINT32_MAX);
+        g_assert_cmphex(qtest_readl(qts, bases[i] + MCAN_TEST), ==, 0x70);
+
+        /* A write reloads TOP only for the continuous timeout source. */
+        qtest_writel(qts, bases[i] + MCAN_TOCC, MCAN_TOCC_TOP(0x1234));
+        qtest_writel(qts, bases[i] + MCAN_TOCV, 0xdeadbeef);
+        timeout = qtest_readl(qts, bases[i] + MCAN_TOCV);
+        g_assert_cmphex(timeout, ==, 0x1234);
+        for (tos = 1; tos < 4; tos++) {
+            qtest_writel(qts, bases[i] + MCAN_TOCC,
+                         MCAN_TOCC_TOP(0x2000 + tos) |
+                         MCAN_TOCC_TOS(tos));
+            qtest_writel(qts, bases[i] + MCAN_TOCV,
+                         0xa5000000 | tos);
+            g_assert_cmphex(qtest_readl(qts, bases[i] + MCAN_TOCV), ==,
+                            timeout);
+        }
+
+        /* TSCFG itself is destructive; ATB clears only TBPRE[15:8]. */
+        qtest_writel(qts, bases[i] + MCAN_TSU_TSCFG, 0x00005a07);
+        g_assert_cmphex(qtest_readl(qts, bases[i] + MCAN_TSU_TSCFG), ==,
+                        0x00005a07);
+        g_assert_cmphex(qtest_readl(qts, bases[i] + MCAN_TSU_TSCFG), ==,
+                        0);
+        qtest_writel(qts, bases[i] + MCAN_TSU_TSCFG, 0x0000a507);
+        g_assert_cmphex(qtest_readl(qts, bases[i] + MCAN_TSU_ATB), ==, 0);
+        g_assert_cmphex(qtest_readl(qts, bases[i] + MCAN_TSU_TSCFG), ==,
+                        0x00000007);
+        g_assert_cmphex(qtest_readl(qts, bases[i] + MCAN_TSU_TSCFG), ==,
+                        0);
+    }
+
+    qtest_quit(qts);
+}
+
+static void test_mcan_sam_register_migration(void)
+{
+    static const uint64_t bases[] = {
+        SAM9X7_MCAN0_BASE, SAM9X7_MCAN1_BASE,
+    };
+    static const uint32_t rwd[] = { 0x5a, 0xa5 };
+    static const uint32_t timeout[] = { 0x1234, 0x5678 };
+    static const uint32_t tscfg[] = { 0x00004107, 0x00005203 };
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(bases); i++) {
+        qtest_writel(from, bases[i] + MCAN_RWD, rwd[i]);
+        qtest_writel(from, bases[i] + MCAN_CCCR,
+                     MCAN_CCCR_INIT | MCAN_CCCR_CCE);
+        qtest_writel(from, bases[i] + MCAN_DBTP, UINT32_MAX);
+        qtest_writel(from, bases[i] + MCAN_CCCR,
+                     MCAN_CCCR_INIT | MCAN_CCCR_CCE | MCAN_CCCR_TEST);
+        qtest_writel(from, bases[i] + MCAN_TEST, UINT32_MAX);
+        qtest_writel(from, bases[i] + MCAN_TOCC,
+                     MCAN_TOCC_TOP(timeout[i]));
+        qtest_writel(from, bases[i] + MCAN_TOCV, UINT32_MAX);
+        qtest_writel(from, bases[i] + MCAN_TSU_TSCFG, tscfg[i]);
+    }
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    for (i = 0; i < ARRAY_SIZE(bases); i++) {
+        g_assert_cmphex(qtest_readl(to, bases[i] + MCAN_RWD), ==, rwd[i]);
+        g_assert_cmphex(qtest_readl(to, bases[i] + MCAN_DBTP), ==,
+                        0x009f1ff7);
+        g_assert_cmphex(qtest_readl(to, bases[i] + MCAN_TEST), ==, 0x70);
+        g_assert_cmphex(qtest_readl(to, bases[i] + MCAN_TOCV), ==,
+                        timeout[i]);
+
+        /* The restored value still observes the SAM destructive-read rule. */
+        g_assert_cmphex(qtest_readl(to, bases[i] + MCAN_TSU_TSCFG), ==,
+                        tscfg[i]);
+        g_assert_cmphex(qtest_readl(to, bases[i] + MCAN_TSU_TSCFG), ==, 0);
+    }
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
+static void mcan_configure_tx_format_case(QTestState *qts, uint64_t base,
+                                          uint32_t rx_offset,
+                                          uint32_t txe_offset,
+                                          uint32_t tx_offset,
+                                          uint32_t features, uint32_t tss)
+{
+    uint32_t mode = MCAN_CCCR_TEST | MCAN_CCCR_MON | features;
+
+    qtest_writel(qts, base + MCAN_CCCR,
+                 MCAN_CCCR_INIT | MCAN_CCCR_CCE);
+    qtest_writel(qts, base + MCAN_CCCR,
+                 MCAN_CCCR_INIT | MCAN_CCCR_CCE | mode);
+    qtest_writel(qts, base + MCAN_GFC, 0);
+    qtest_writel(qts, base + MCAN_RXESC, 0);
+    qtest_writel(qts, base + MCAN_RXF0C,
+                 rx_offset | MCAN_RXF0C_SIZE(1));
+    qtest_writel(qts, base + MCAN_TXESC, 0);
+    qtest_writel(qts, base + MCAN_TXBC,
+                 tx_offset | MCAN_TXBC_FIFO_SIZE(1));
+    qtest_writel(qts, base + MCAN_TXEFC,
+                 txe_offset | MCAN_TXEFC_SIZE(1));
+    qtest_writel(qts, base + MCAN_TSCC, tss);
+    qtest_writel(qts, base + MCAN_TEST, MCAN_TEST_LBCK);
+    qtest_writel(qts, base + MCAN_CCCR, mode);
+}
+
+static void mcan_set_timestamp_source(QTestState *qts, uint64_t base,
+                                      uint32_t tss)
+{
+    uint32_t mode = qtest_readl(qts, base + MCAN_CCCR) &
+                    (MCAN_CCCR_TEST | MCAN_CCCR_MON | MCAN_CCCR_FDOE |
+                     MCAN_CCCR_BRSE);
+
+    qtest_writel(qts, base + MCAN_CCCR,
+                 MCAN_CCCR_INIT | MCAN_CCCR_CCE);
+    qtest_writel(qts, base + MCAN_CCCR,
+                 MCAN_CCCR_INIT | MCAN_CCCR_CCE | mode);
+    qtest_writel(qts, base + MCAN_TSCC, tss);
+    qtest_writel(qts, base + MCAN_CCCR, mode);
+}
+
+static void test_mcan_tx_flag_normalization_and_timestamps(void)
+{
+    static const struct {
+        uint32_t features;
+        uint32_t tss;
+        bool remote;
+        uint32_t effective_word0_flags;
+        uint32_t effective_word1_flags;
+        uint16_t timestamp;
+        uint16_t visible_counter;
+    } cases[] = {
+        { 0, 1, false, 0, 0, 0, 1 },
+        { MCAN_CCCR_FDOE, 0, false, MCAN_ELEMENT_ESI,
+          MCAN_ELEMENT_FDF, 0, 0 },
+        { MCAN_CCCR_FDOE | MCAN_CCCR_BRSE, 1, false,
+          MCAN_ELEMENT_ESI, MCAN_ELEMENT_FDF | MCAN_ELEMENT_BRS, 1, 2 },
+        { MCAN_CCCR_FDOE | MCAN_CCCR_BRSE, 3, true, 0, 0, 0, 0 },
+    };
+    const uint64_t base = SAM9X7_MCAN0_BASE;
+    const uint32_t rx_offset = 0x3400;
+    const uint32_t txe_offset = 0x4600;
+    const uint32_t tx_offset = 0x4700;
+    const uint32_t data[] = { 0x44332211, 0x88776655 };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int i;
+
+    mcan_enable_clocks(qts, 29);
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        uint32_t id = (0x500U + i) << 18;
+        uint32_t remote = 0;
+        uint32_t guest_word0 = id | MCAN_ELEMENT_ESI | remote;
+        uint32_t guest_word1 = MCAN_ELEMENT_EFC | MCAN_ELEMENT_MM(i) |
+                               MCAN_ELEMENT_DLC(8) | MCAN_ELEMENT_FDF |
+                               MCAN_ELEMENT_BRS;
+        uint32_t effective_word0 = id | cases[i].effective_word0_flags |
+                                   remote;
+        uint32_t effective_word1 = cases[i].effective_word1_flags;
+
+        if (cases[i].remote) {
+            remote = MCAN_ELEMENT_RTR;
+            guest_word0 |= remote;
+            effective_word0 |= remote;
+        }
+
+        mcan_configure_tx_format_case(qts, base, rx_offset, txe_offset,
+                                      tx_offset, cases[i].features,
+                                      cases[i].tss);
+        if (cases[i].tss == 0 || cases[i].tss == 3) {
+            g_assert_cmphex(qtest_readl(qts, base + MCAN_TSCV), ==, 0);
+        }
+
+        mcan_write_tx_element(qts, tx_offset, guest_word0, guest_word1,
+                              data, ARRAY_SIZE(data));
+        qtest_writel(qts, base + MCAN_TXBAR, BIT(0));
+        mcan_wait_register(qts, base + MCAN_TXBTO, BIT(0), BIT(0));
+        mcan_wait_register(qts, base + MCAN_RXF0S, 0x7f, 1);
+        mcan_wait_register(qts, base + MCAN_TXEFS, 0x3f, 1);
+
+        /* Effective bus/event flags must not rewrite the guest Tx element. */
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + tx_offset),
+                        ==, guest_word0);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + tx_offset + 4),
+                        ==, guest_word1);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + tx_offset + 8),
+                        ==, data[0]);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + tx_offset + 12),
+                        ==, data[1]);
+
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + rx_offset),
+                        ==, effective_word0);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + rx_offset + 4),
+                        ==, BIT(31) | MCAN_ELEMENT_DLC(8) |
+                            effective_word1 | cases[i].timestamp);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + txe_offset),
+                        ==, effective_word0);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + txe_offset + 4),
+                        ==, MCAN_TX_EVENT_ET_TX | MCAN_ELEMENT_MM(i) |
+                            MCAN_ELEMENT_DLC(8) | effective_word1 |
+                            cases[i].timestamp);
+        g_assert_cmphex(qtest_readl(qts, base + MCAN_TSCV), ==,
+                        cases[i].visible_counter);
+
+        if (i == 1) {
+            /* TSS=0 captures zero without advancing the internal count. */
+            mcan_set_timestamp_source(qts, base, 1);
+            g_assert_cmphex(qtest_readl(qts, base + MCAN_TSCV), ==, 1);
+        } else if (i == 3) {
+            /* Reserved TSS=3 also captures zero without advancing it. */
+            mcan_set_timestamp_source(qts, base, 1);
+            g_assert_cmphex(qtest_readl(qts, base + MCAN_TSCV), ==, 2);
+        }
+    }
+
+    /* TSCV writes clear the hidden counter for TSS=0 and reserved TSS=3. */
+    mcan_set_timestamp_source(qts, base, 0);
+    qtest_writel(qts, base + MCAN_TSCV, UINT32_MAX);
+    mcan_set_timestamp_source(qts, base, 1);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TSCV), ==, 0);
+    qtest_writel(qts, base + MCAN_TXBAR, BIT(0));
+    mcan_wait_register(qts, base + MCAN_TXBTO, BIT(0), BIT(0));
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TSCV), ==, 1);
+
+    mcan_set_timestamp_source(qts, base, 3);
+    qtest_writel(qts, base + MCAN_TSCV, UINT32_MAX);
+    mcan_set_timestamp_source(qts, base, 1);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TSCV), ==, 0);
+    qtest_writel(qts, base + MCAN_TXBAR, BIT(0));
+    mcan_wait_register(qts, base + MCAN_TXBTO, BIT(0), BIT(0));
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TSCV), ==, 1);
+
+    /* The external-source approximation alone ignores TSCV writes. */
+    mcan_set_timestamp_source(qts, base, 2);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TSCV), ==, 1);
+    qtest_writel(qts, base + MCAN_TSCV, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TSCV), ==, 1);
+    mcan_set_timestamp_source(qts, base, 1);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TSCV), ==, 1);
+    qtest_writel(qts, base + MCAN_TSCV, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TSCV), ==, 0);
+
+    qtest_quit(qts);
+}
+
 static void test_mcan_registers_configuration_and_reset(void)
 {
     static const uint64_t bases[] = {
@@ -18172,6 +18481,12 @@ int main(int argc, char **argv)
     qtest_add_func("sam9x75/uhphs/ohci-active-async-migration",
                    test_uhphs_ohci_active_async_migration);
     qtest_add_func("sam9x75/uhphs/migration", test_uhphs_migration);
+    qtest_add_func("sam9x75/mcan/sam-register-semantics",
+                   test_mcan_sam_register_semantics);
+    qtest_add_func("sam9x75/mcan/sam-register-migration",
+                   test_mcan_sam_register_migration);
+    qtest_add_func("sam9x75/mcan/tx-flag-normalization-and-timestamps",
+                   test_mcan_tx_flag_normalization_and_timestamps);
     qtest_add_func("sam9x75/mcan/registers-configuration-and-reset",
                    test_mcan_registers_configuration_and_reset);
     qtest_add_func("sam9x75/mcan/internal-loopback-clocks-and-irqs",

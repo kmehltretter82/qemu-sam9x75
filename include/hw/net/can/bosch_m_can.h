@@ -42,6 +42,11 @@ struct BoschMCanState {
     uint32_t crel;
     uint32_t sam_tss2_reset;
 
+    /* Integration-specific register behavior. */
+    uint32_t dbtp_mask;
+    bool tsu_destructive_read;
+    bool rwd_unprotected;
+
     /* Canonical FIFO state; status registers are derived from these. */
     uint8_t rxf0_get;
     uint8_t rxf0_put;
