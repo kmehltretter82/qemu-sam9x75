@@ -73,6 +73,8 @@
 #define PMC_PLL_SSR_MASK            0x10ffffff
 #define PMC_PLL_ACR_MASK            0x3f073fff
 #define PMC_PLL_ACR_RESET           0x00020033
+#define PMC_PLL_ACR_UTMIBG          BIT(13)
+#define PMC_PLL_ACR_UTMIVR          BIT(12)
 #define PMC_PLL_UPDT_ID_MASK        0x00000007
 #define PMC_PLL_UPDT_UPDATE         BIT(8)
 #define PMC_PLL_UPDT_STUPTIM_MASK   0x003f0000
@@ -298,7 +300,13 @@ static void at91_pmc_update_clocks(AT91PMCState *s)
      * separate USB clock controller selects PLLACK or UPLLCK and divides it
      * down to UHP48M for the OHCI block; UHP12M is derived internally.
      */
-    clock_update_hz(s->utmi, at91_pmc_clamp_hz(pll_hz[PMC_UPLL]));
+    source_hz = pll_hz[PMC_UPLL];
+    if ((s->active_pll_acr[PMC_UPLL] &
+         (PMC_PLL_ACR_UTMIBG | PMC_PLL_ACR_UTMIVR)) !=
+        (PMC_PLL_ACR_UTMIBG | PMC_PLL_ACR_UTMIVR)) {
+        source_hz = 0;
+    }
+    clock_update_hz(s->utmi, at91_pmc_clamp_hz(source_hz));
     switch (s->usb & PMC_USB_USBS_MASK) {
     case 0:
         source_hz = pll_hz[PMC_PLLA];
