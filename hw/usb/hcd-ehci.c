@@ -848,6 +848,11 @@ static void ehci_attach(USBPort *port)
 
     trace_usb_ehci_port_attach(port->index, owner, port->dev->product_desc);
 
+    /* A platform mux may temporarily make a root port unavailable. */
+    if (s->port_disabled[port->index]) {
+        return;
+    }
+
     if (*portsc & PORTSC_POWNER) {
         USBPort *companion = s->companion_ports[port->index];
         companion->dev = port->dev;
@@ -859,6 +864,32 @@ static void ehci_attach(USBPort *port)
     *portsc |= PORTSC_CSC;
 
     ehci_raise_irq(s, USBSTS_PCD);
+}
+
+void ehci_set_port_available(EHCIState *s, unsigned int index,
+                             bool available)
+{
+    USBPort *port;
+    USBDevice *dev;
+
+    g_assert(index < s->portnr);
+    if (s->port_disabled[index] == !available) {
+        return;
+    }
+
+    port = &s->ports[index];
+    dev = port->dev;
+    if (!available) {
+        if (dev && dev->attached && dev->state != USB_STATE_NOTATTACHED) {
+            port->ops->detach(port);
+        }
+        s->port_disabled[index] = true;
+    } else {
+        s->port_disabled[index] = false;
+        if (dev && dev->attached && dev->state != USB_STATE_NOTATTACHED) {
+            port->ops->attach(port);
+        }
+    }
 }
 
 static void ehci_detach(USBPort *port)

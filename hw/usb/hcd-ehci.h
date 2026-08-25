@@ -312,6 +312,7 @@ struct EHCIState {
     uint32_t pstate;         /* Current state in periodic schedule     */
     USBPort ports[EHCI_PORTS];
     USBPort *companion_ports[EHCI_PORTS];
+    bool port_disabled[EHCI_PORTS];
     uint32_t usbsts_pending;
     uint32_t usbsts_frindex;
     EHCIQueueHead aqueues;
@@ -356,6 +357,8 @@ void usb_ehci_finalize(EHCIState *s);
 void usb_ehci_realize(EHCIState *s, DeviceState *dev, Error **errp);
 void usb_ehci_unrealize(EHCIState *s, DeviceState *dev);
 void ehci_reset(void *opaque);
+void ehci_set_port_available(EHCIState *s, unsigned int index,
+                             bool available);
 
 #define TYPE_PCI_EHCI "pci-ehci-usb"
 OBJECT_DECLARE_SIMPLE_TYPE(EHCIPCIState, PCI_EHCI)
@@ -398,6 +401,7 @@ struct AT91UHPHSEHCIState {
     Clock *pclk;
     Clock *utmi;
     bool legacy_clock_bypass;
+    bool device_mode;
     uint32_t insnreg06;
     uint32_t insnreg07;
 };

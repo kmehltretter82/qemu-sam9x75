@@ -198,12 +198,29 @@ static void ehci_at91_uhphs_dma_error(void *opaque, uint64_t addr)
     at91_uhphs_ehci_record_dma_error(opaque, addr);
 }
 
+static void ehci_at91_uhphs_update_port_a(AT91UHPHSEHCIState *s)
+{
+    EHCIState *ehci = &s->parent_obj.ehci;
+
+    /* UDPHS owns Port A's shared UTMI transceiver and connector. */
+    ehci_set_port_available(ehci, 0, !s->device_mode);
+}
+
+static void ehci_at91_uhphs_device_mode(void *opaque, int n, int level)
+{
+    AT91UHPHSEHCIState *s = opaque;
+
+    s->device_mode = level;
+    ehci_at91_uhphs_update_port_a(s);
+}
+
 static void ehci_at91_uhphs_reset(void *opaque)
 {
     AT91UHPHSEHCIState *s = opaque;
 
     s->insnreg06 = 0;
     s->insnreg07 = 0;
+    ehci_at91_uhphs_update_port_a(s);
 }
 
 static bool ehci_at91_uhphs_clocked(void *opaque)
@@ -275,6 +292,8 @@ static void ehci_at91_uhphs_init(Object *obj)
     s->utmi = qdev_init_clock_in(DEVICE(obj), "utmi",
                                  ehci_at91_uhphs_clock_changed, s,
                                  ClockUpdate);
+    qdev_init_gpio_in_named(DEVICE(obj), ehci_at91_uhphs_device_mode,
+                            "device-mode", 1);
 
     /* SAM9X7 Series Data Sheet, UHPHS register reset values. */
     i->ehci.caps[0x08] = 0x26;
