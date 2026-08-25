@@ -11218,6 +11218,7 @@ static void test_qspi_flash_read_program_and_erase(void)
                                     QSPI_IFR_DATAEN | QSPI_IFR_ADDRL_3 |
                                     QSPI_IFR_TFRTYP_MEM;
     const uint32_t flash_offset = 0x1234;
+    const uint32_t last_flash_word = 0x7ffffc;
     const uint32_t payload = 0xa55ac33c;
     QTestState *qts = qtest_init(
         SAM9X75_MACHINE " -nic user,mac=02:00:00:09:75:01");
@@ -11288,11 +11289,33 @@ static void test_qspi_flash_read_program_and_erase(void)
     qspi_finish_transfer(qts);
 
     qspi_command(qts, 0x06, 0, QSPI_IFR_INSTEN);
-    qspi_command(qts, 0x20, flash_offset,
+    qspi_command(qts, 0x20, flash_offset + 0x800,
                  QSPI_IFR_INSTEN | QSPI_IFR_ADDREN | QSPI_IFR_ADDRL_3);
     qspi_configure_read(qts, 0x03, addressed_data);
     g_assert_cmphex(qtest_readl(qts,
                                SAM9X7_QSPI_MEM_BASE + flash_offset), ==,
+                    UINT32_MAX);
+    qspi_finish_transfer(qts);
+
+    qspi_command(qts, 0x06, 0, QSPI_IFR_INSTEN);
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_WICR, 0x02);
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_WRACNT, sizeof(payload));
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_IFR, addressed_data);
+    qtest_writel(qts, SAM9X7_QSPI_MEM_BASE + last_flash_word, payload);
+    qspi_finish_transfer(qts);
+
+    qspi_configure_read(qts, 0x03, addressed_data);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_QSPI_MEM_BASE + last_flash_word), ==,
+                    payload);
+    qspi_finish_transfer(qts);
+
+    qspi_command(qts, 0x06, 0, QSPI_IFR_INSTEN);
+    qspi_command(qts, 0x20, 0x7fffff,
+                 QSPI_IFR_INSTEN | QSPI_IFR_ADDREN | QSPI_IFR_ADDRL_3);
+    qspi_configure_read(qts, 0x03, addressed_data);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_QSPI_MEM_BASE + last_flash_word), ==,
                     UINT32_MAX);
     qspi_finish_transfer(qts);
 

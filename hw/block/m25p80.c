@@ -611,7 +611,7 @@ static inline void flash_sync_area(Flash *s, int64_t off, int64_t len)
     blk_aio_pwritev(s->blk, off, iov, 0, blk_sync_complete, iov);
 }
 
-static void flash_erase(Flash *s, int offset, FlashCMD cmd)
+static void flash_erase(Flash *s, uint32_t offset, FlashCMD cmd)
 {
     uint32_t len;
     uint8_t capa_to_assert = 0;
@@ -646,6 +646,16 @@ static void flash_erase(Flash *s, int offset, FlashCMD cmd)
         break;
     default:
         abort();
+    }
+
+    /* Erase commands ignore address bits below the erase-unit size. */
+    offset -= offset % len;
+    if (len > s->size || offset > s->size - len) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "M25P80: erase range 0x%08" PRIx32
+                      "+0x%08" PRIx32 " exceeds device size 0x%08" PRIx32
+                      "\n", offset, len, s->size);
+        return;
     }
 
     trace_m25p80_flash_erase(s, offset, len);
