@@ -57,6 +57,8 @@ struct SAM9X75CuriosityMachineState {
     bool nand_cs;
     bool qspi_cs;
     bool ethernet_25mhz;
+    bool otpc_write_enable;
+    char *otpc_drive;
     SAM9X75PAC1934Route pac1934_route;
     SAM9X75M2Interface m2_interface;
     SAM9X7State *soc;
@@ -254,6 +256,12 @@ static void sam9x75_curiosity_init(MachineState *machine)
     qdev_prop_set_bit(DEVICE(&soc->gmac), "phy-clocked",
                       board->ethernet_25mhz);
     qemu_macaddr_default_if_unset(&soc->gmac.conf.macaddr);
+    if (board->otpc_drive) {
+        object_property_set_str(OBJECT(&soc->otpc), "drive",
+                                board->otpc_drive, &error_fatal);
+    }
+    qdev_prop_set_bit(DEVICE(&soc->otpc), "write-enable",
+                      board->otpc_write_enable);
     nand_dinfo = drive_get(IF_MTD, 0, 0);
     if (nand_dinfo) {
         qdev_prop_set_drive_err(DEVICE(&soc->nand), "drive",
@@ -449,6 +457,35 @@ static void sam9x75_curiosity_set_m2_interface(Object *obj,
     }
 }
 
+static char *sam9x75_curiosity_get_otpc_drive(Object *obj, Error **errp)
+{
+    return g_strdup(SAM9X75_CURIOSITY_MACHINE(obj)->otpc_drive);
+}
+
+static void sam9x75_curiosity_set_otpc_drive(Object *obj,
+                                              const char *value,
+                                              Error **errp)
+{
+    SAM9X75CuriosityMachineState *board =
+        SAM9X75_CURIOSITY_MACHINE(obj);
+
+    g_free(board->otpc_drive);
+    board->otpc_drive = g_strdup(value);
+}
+
+static bool sam9x75_curiosity_get_otpc_write_enable(Object *obj,
+                                                     Error **errp)
+{
+    return SAM9X75_CURIOSITY_MACHINE(obj)->otpc_write_enable;
+}
+
+static void sam9x75_curiosity_set_otpc_write_enable(Object *obj,
+                                                     bool value,
+                                                     Error **errp)
+{
+    SAM9X75_CURIOSITY_MACHINE(obj)->otpc_write_enable = value;
+}
+
 static void sam9x75_curiosity_machine_instance_init(Object *obj)
 {
     SAM9X75CuriosityMachineState *board =
@@ -459,6 +496,14 @@ static void sam9x75_curiosity_machine_instance_init(Object *obj)
     board->ethernet_25mhz = true;
     board->pac1934_route = SAM9X75_PAC1934_ROUTE_SOC;
     board->m2_interface = SAM9X75_M2_INTERFACE_SDIO;
+}
+
+static void sam9x75_curiosity_machine_instance_finalize(Object *obj)
+{
+    SAM9X75CuriosityMachineState *board =
+        SAM9X75_CURIOSITY_MACHINE(obj);
+
+    g_free(board->otpc_drive);
 }
 
 static void sam9x75_curiosity_machine_reset(MachineState *machine,
@@ -517,6 +562,16 @@ static void sam9x75_curiosity_machine_class_init(ObjectClass *oc,
                                   sam9x75_curiosity_set_m2_interface);
     object_class_property_set_description(oc, "m2-interface",
         "Route the J24 M.2 host-interface jumper to sdio or spi");
+    object_class_property_add_str(oc, "otpc-drive",
+                                  sam9x75_curiosity_get_otpc_drive,
+                                  sam9x75_curiosity_set_otpc_drive);
+    object_class_property_set_description(oc, "otpc-drive",
+        "Block node or drive ID for the raw 10 KiB physical OTP image");
+    object_class_property_add_bool(oc, "otpc-write-enable",
+                                   sam9x75_curiosity_get_otpc_write_enable,
+                                   sam9x75_curiosity_set_otpc_write_enable);
+    object_class_property_set_description(oc, "otpc-write-enable",
+        "Permit irreversible writes to the configured physical OTP image");
 }
 
 static const TypeInfo sam9x75_curiosity_machine_types[] = {
@@ -525,6 +580,8 @@ static const TypeInfo sam9x75_curiosity_machine_types[] = {
         .parent = TYPE_MACHINE,
         .class_init = sam9x75_curiosity_machine_class_init,
         .instance_init = sam9x75_curiosity_machine_instance_init,
+        .instance_finalize =
+            sam9x75_curiosity_machine_instance_finalize,
         .instance_size = sizeof(SAM9X75CuriosityMachineState),
         .interfaces = arm_machine_interfaces,
     },

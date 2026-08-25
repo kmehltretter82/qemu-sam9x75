@@ -8,12 +8,16 @@
 
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/nvram/at91_otpc.h"
+#include "migration/blocker.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/bitops.h"
+#include "qemu/error-report.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "system/block-backend.h"
 
 #define OTPC_CR                 0x00
 #define OTPC_MR                 0x04
@@ -50,6 +54,18 @@
 #define OTPC_UHC1R_MASK         0x0003c7ff
 #define OTPC_UHC1R_URDDIS       BIT(0)
 #define OTPC_UHC1R_UPGDIS       BIT(1)
+#define OTPC_UHC1R_UHCINVDIS    BIT(2)
+#define OTPC_UHC1R_UHCLKDIS     BIT(3)
+#define OTPC_UHC1R_UHCPGDIS     BIT(4)
+#define OTPC_UHC1R_BCINVDIS     BIT(5)
+#define OTPC_UHC1R_BCLKDIS      BIT(6)
+#define OTPC_UHC1R_BCPGDIS      BIT(7)
+#define OTPC_UHC1R_SBCINVDIS    BIT(8)
+#define OTPC_UHC1R_SBCLKDIS     BIT(9)
+#define OTPC_UHC1R_SBCPGDIS     BIT(10)
+#define OTPC_UHC1R_CINVDIS      BIT(14)
+#define OTPC_UHC1R_CLKDIS       BIT(15)
+#define OTPC_UHC1R_CPGDIS       BIT(16)
 #define OTPC_UHC1R_URFDIS       BIT(17)
 #define OTPC_WPMR_MASK          0xffffff17
 #define OTPC_WPSR_MASK          0x8fffff0f
@@ -86,12 +102,17 @@
 #define OTPC_SR_EMUL            BIT(3)
 #define OTPC_SR_ONEF            BIT(9)
 
+#define OTPC_ISR_EOP            BIT(0)
+#define OTPC_ISR_EOL            BIT(1)
+#define OTPC_ISR_EOI            BIT(2)
+#define OTPC_ISR_EOKT           BIT(3)
 #define OTPC_ISR_PGERR          BIT(4)
 #define OTPC_ISR_LKERR          BIT(5)
 #define OTPC_ISR_IVERR          BIT(6)
 #define OTPC_ISR_WERR           BIT(7)
 #define OTPC_ISR_EOR            BIT(8)
 #define OTPC_ISR_EOF            BIT(9)
+#define OTPC_ISR_EOH            BIT(10)
 #define OTPC_ISR_EORF           BIT(11)
 #define OTPC_ISR_CKERR          BIT(12)
 #define OTPC_ISR_COERR          BIT(13)
@@ -226,6 +247,98 @@ static bool at91_otpc_source_read(AT91OTPCState *s, uint32_t address,
     return true;
 }
 
+static bool at91_otpc_source_is_hidden(AT91OTPCState *s, uint32_t address)
+{
+    if (s->emulation_active) {
+        return address < ARRAY_SIZE(s->hidden_emulation) &&
+               s->hidden_emulation[address];
+    }
+
+    return address < ARRAY_SIZE(s->hidden_otp) && s->hidden_otp[address];
+}
+
+static void at91_otpc_source_hide(AT91OTPCState *s, uint32_t address)
+{
+    if (s->emulation_active) {
+        if (address < ARRAY_SIZE(s->hidden_emulation)) {
+            s->hidden_emulation[address] = true;
+        }
+    } else if (address < ARRAY_SIZE(s->hidden_otp)) {
+        s->hidden_otp[address] = true;
+    }
+}
+
+static bool at91_otpc_source_programmable(AT91OTPCState *s)
+{
+    return s->emulation_active || !s->blk ||
+           (s->write_enable && !s->backend_fault);
+}
+
+static bool at91_otpc_source_write(AT91OTPCState *s, uint32_t address,
+                                   uint32_t value)
+{
+    uint32_t little_endian_value;
+
+    if (address >= at91_otpc_source_words(s)) {
+        return false;
+    }
+
+    if (s->emulation_active) {
+        little_endian_value = cpu_to_le32(value);
+        return address_space_write(&s->emulation_as,
+                                   (hwaddr)address * sizeof(uint32_t),
+                                   MEMTXATTRS_UNSPECIFIED,
+                                   &little_endian_value,
+                                   sizeof(little_endian_value)) == MEMTX_OK;
+    }
+
+    if (s->blk) {
+        if (!s->write_enable) {
+            return false;
+        }
+        little_endian_value = cpu_to_le32(value);
+        if (blk_pwrite(s->blk, (int64_t)address * sizeof(uint32_t),
+                       sizeof(little_endian_value), &little_endian_value,
+                       0) < 0) {
+            uint32_t media_value;
+
+            s->backend_fault = true;
+            error_report(TYPE_AT91_OTPC
+                         ": failed to update OTP backing word %u", address);
+            if (blk_pread(s->blk,
+                          (int64_t)address * sizeof(uint32_t),
+                          sizeof(media_value), &media_value, 0) >= 0) {
+                s->otp[address] |= le32_to_cpu(media_value);
+            }
+            return false;
+        }
+    }
+
+    s->otp[address] = value;
+    s->otp_ever_programmed |= value != 0;
+    return true;
+}
+
+static bool at91_otpc_source_can_program(AT91OTPCState *s,
+                                          uint32_t address,
+                                          uint32_t value)
+{
+    uint32_t old;
+
+    return at91_otpc_source_read(s, address, &old) && !(old & ~value);
+}
+
+static bool at91_otpc_source_finish_programming(AT91OTPCState *s)
+{
+    if (!s->emulation_active && s->blk && s->write_enable &&
+        blk_flush(s->blk) < 0) {
+        s->backend_fault = true;
+        error_report(TYPE_AT91_OTPC ": failed to flush OTP backing image");
+        return false;
+    }
+    return true;
+}
+
 static bool at91_otpc_otp_contains_one(AT91OTPCState *s)
 {
     size_t i;
@@ -267,6 +380,54 @@ static bool at91_otpc_header_valid(uint32_t header)
 
     return (header & OTPC_HR_ONE) && !(header & OTPC_HR_RESERVED) &&
            packet >= 1 && packet <= OTPC_HR_PACKET_CUSTOM;
+}
+
+static uint32_t at91_otpc_program_disable(uint32_t packet)
+{
+    switch (packet) {
+    case OTPC_HR_PACKET_BOOT:
+        return OTPC_UHC1R_BCPGDIS;
+    case OTPC_HR_PACKET_SECURE:
+        return OTPC_UHC1R_SBCPGDIS;
+    case OTPC_HR_PACKET_HARDWARE:
+        return OTPC_UHC1R_UHCPGDIS;
+    case OTPC_HR_PACKET_CUSTOM:
+        return OTPC_UHC1R_CPGDIS;
+    default:
+        return 0;
+    }
+}
+
+static uint32_t at91_otpc_invalidation_disable(uint32_t packet)
+{
+    switch (packet) {
+    case OTPC_HR_PACKET_BOOT:
+        return OTPC_UHC1R_BCINVDIS;
+    case OTPC_HR_PACKET_SECURE:
+        return OTPC_UHC1R_SBCINVDIS;
+    case OTPC_HR_PACKET_HARDWARE:
+        return OTPC_UHC1R_UHCINVDIS;
+    case OTPC_HR_PACKET_CUSTOM:
+        return OTPC_UHC1R_CINVDIS;
+    default:
+        return 0;
+    }
+}
+
+static uint32_t at91_otpc_lock_disable(uint32_t packet)
+{
+    switch (packet) {
+    case OTPC_HR_PACKET_BOOT:
+        return OTPC_UHC1R_BCLKDIS;
+    case OTPC_HR_PACKET_SECURE:
+        return OTPC_UHC1R_SBCLKDIS;
+    case OTPC_HR_PACKET_HARDWARE:
+        return OTPC_UHC1R_UHCLKDIS;
+    case OTPC_HR_PACKET_CUSTOM:
+        return OTPC_UHC1R_CLKDIS;
+    default:
+        return 0;
+    }
 }
 
 static bool at91_otpc_find_tail(AT91OTPCState *s,
@@ -446,6 +607,8 @@ static void at91_otpc_flush(AT91OTPCState *s)
     s->hr = 0;
     memset(s->temporary, 0, sizeof(s->temporary));
     s->temporary_words = 0;
+    s->temporary_address = 0;
+    s->temporary_valid = false;
     s->sr &= ~OTPC_SR_ONEF;
     at91_otpc_set_interrupts(s, OTPC_ISR_EOF);
 }
@@ -470,11 +633,13 @@ static void at91_otpc_read_packet(AT91OTPCState *s)
     AT91OTPCPacket packet;
     uint32_t selected = extract32(s->mr, OTPC_MR_ADDR_SHIFT, 16);
     uint32_t packet_type;
-    bool one_found;
+    bool hidden, one_found;
     size_t i;
 
     memset(s->temporary, 0, sizeof(s->temporary));
     s->temporary_words = 0;
+    s->temporary_address = 0;
+    s->temporary_valid = false;
     s->hr = 0;
     s->sr &= ~OTPC_SR_ONEF;
 
@@ -485,7 +650,11 @@ static void at91_otpc_read_packet(AT91OTPCState *s)
 
     s->hr = packet.header & OTPC_HR_MASK;
     s->temporary_words = packet.payload_words;
+    s->temporary_address = packet.address;
+    s->temporary_valid = true;
+    s->temporary_emulation = s->emulation_active;
     packet_type = packet.header & OTPC_HR_PACKET_MASK;
+    hidden = at91_otpc_source_is_hidden(s, packet.address);
     one_found = false;
 
     if (packet.header & OTPC_HR_LOCK) {
@@ -498,7 +667,7 @@ static void at91_otpc_read_packet(AT91OTPCState *s)
         if (!at91_otpc_source_read(s, packet.address + i + 1, &value)) {
             break;
         }
-        if (packet_type == OTPC_HR_PACKET_KEY) {
+        if (packet_type == OTPC_HR_PACKET_KEY || hidden) {
             value = 0;
         }
         s->temporary[i] = value;
@@ -509,6 +678,216 @@ static void at91_otpc_read_packet(AT91OTPCState *s)
         s->sr |= OTPC_SR_ONEF;
     }
     at91_otpc_set_interrupts(s, OTPC_ISR_EOR);
+}
+
+static bool at91_otpc_get_selected_packet(AT91OTPCState *s,
+                                           AT91OTPCPacket *packet,
+                                           bool allow_invalid)
+{
+    uint32_t selected = extract32(s->mr, OTPC_MR_ADDR_SHIFT, 16);
+    uint32_t invalid, packet_type, size;
+    uint64_t next;
+
+    if (!at91_otpc_find_packet(s, selected, packet) || !packet->header ||
+        !at91_otpc_header_valid(packet->header)) {
+        return false;
+    }
+
+    invalid = extract32(packet->header, OTPC_HR_INVLD_SHIFT, 2);
+    packet_type = packet->header & OTPC_HR_PACKET_MASK;
+    size = extract32(packet->header, OTPC_HR_SIZE_SHIFT, 8);
+    next = (uint64_t)packet->address + size + 2;
+    if ((!allow_invalid && invalid == 3) ||
+        (invalid != 3 && !at91_otpc_special_size_valid(packet_type, size)) ||
+        next > at91_otpc_source_words(s)) {
+        return false;
+    }
+
+    packet->payload_words = size + 1;
+    return true;
+}
+
+static bool at91_otpc_program_word(AT91OTPCState *s, uint32_t address,
+                                    uint32_t value)
+{
+    uint32_t old;
+
+    if (!at91_otpc_source_read(s, address, &old)) {
+        return false;
+    }
+    return old == value || at91_otpc_source_write(s, address, value);
+}
+
+static void at91_otpc_program_new_packet(AT91OTPCState *s)
+{
+    AT91OTPCPacket tail;
+    uint32_t header = s->hr & OTPC_HR_MASK;
+    uint32_t packet_type = header & OTPC_HR_PACKET_MASK;
+    uint32_t payload_words =
+        extract32(header, OTPC_HR_SIZE_SHIFT, 8) + 1;
+    uint64_t end;
+    size_t i;
+
+    if (!at91_otpc_header_valid(header) ||
+        !at91_otpc_special_size_valid(packet_type, payload_words - 1) ||
+        !at91_otpc_find_tail(s, &tail)) {
+        at91_otpc_set_interrupts(s, OTPC_ISR_WERR);
+        return;
+    }
+    if (s->uhc[1] & at91_otpc_program_disable(packet_type)) {
+        return;
+    }
+
+    end = (uint64_t)tail.address + payload_words + 1;
+    if (end > at91_otpc_source_words(s) ||
+        !at91_otpc_source_can_program(s, tail.address, header)) {
+        at91_otpc_set_interrupts(s, OTPC_ISR_WERR);
+        return;
+    }
+    for (i = 0; i < payload_words; i++) {
+        if (!at91_otpc_source_can_program(s, tail.address + i + 1,
+                                          s->temporary[i])) {
+            at91_otpc_set_interrupts(s, OTPC_ISR_WERR);
+            return;
+        }
+    }
+    if (!at91_otpc_source_programmable(s)) {
+        at91_otpc_set_interrupts(s, OTPC_ISR_PGERR);
+        return;
+    }
+
+    /*
+     * Program the header last so a host-I/O failure cannot expose a
+     * complete-looking packet with an incomplete payload.
+     */
+    for (i = 0; i < payload_words; i++) {
+        if (!at91_otpc_program_word(s, tail.address + i + 1,
+                                    s->temporary[i])) {
+            at91_otpc_set_interrupts(s, OTPC_ISR_PGERR);
+            return;
+        }
+    }
+    if (!at91_otpc_source_finish_programming(s)) {
+        at91_otpc_set_interrupts(s, OTPC_ISR_PGERR);
+        return;
+    }
+    if (!at91_otpc_program_word(s, tail.address, header) ||
+        !at91_otpc_source_finish_programming(s)) {
+        at91_otpc_set_interrupts(s, OTPC_ISR_PGERR);
+        return;
+    }
+
+    s->mr = (s->mr & ~OTPC_MR_ADDR_MASK) |
+            ((tail.address << OTPC_MR_ADDR_SHIFT) & OTPC_MR_ADDR_MASK);
+    at91_otpc_set_interrupts(s, OTPC_ISR_EOP);
+}
+
+static void at91_otpc_update_packet(AT91OTPCState *s)
+{
+    AT91OTPCPacket packet;
+    uint32_t invalid, packet_type;
+    size_t i;
+
+    if (!at91_otpc_get_selected_packet(s, &packet, true) ||
+        !s->temporary_valid ||
+        s->temporary_emulation != s->emulation_active ||
+        s->temporary_address != packet.address ||
+        s->temporary_words < packet.payload_words) {
+        at91_otpc_set_interrupts(s, OTPC_ISR_WERR);
+        return;
+    }
+
+    invalid = extract32(packet.header, OTPC_HR_INVLD_SHIFT, 2);
+    packet_type = packet.header & OTPC_HR_PACKET_MASK;
+    if ((packet.header & OTPC_HR_LOCK) && invalid != 3) {
+        at91_otpc_set_interrupts(s, OTPC_ISR_WERR);
+        return;
+    }
+    if (s->uhc[1] & at91_otpc_program_disable(packet_type)) {
+        return;
+    }
+
+    for (i = 0; i < packet.payload_words; i++) {
+        uint32_t old;
+
+        if (!at91_otpc_source_read(s, packet.address + i + 1, &old) ||
+            (old && old != s->temporary[i]) ||
+            !at91_otpc_source_can_program(s, packet.address + i + 1,
+                                          s->temporary[i])) {
+            at91_otpc_set_interrupts(s, OTPC_ISR_WERR);
+            return;
+        }
+    }
+    if (!at91_otpc_source_programmable(s)) {
+        at91_otpc_set_interrupts(s, OTPC_ISR_PGERR);
+        return;
+    }
+
+    for (i = 0; i < packet.payload_words; i++) {
+        if (!at91_otpc_program_word(s, packet.address + i + 1,
+                                    s->temporary[i])) {
+            at91_otpc_set_interrupts(s, OTPC_ISR_PGERR);
+            return;
+        }
+    }
+    if (!at91_otpc_source_finish_programming(s)) {
+        at91_otpc_set_interrupts(s, OTPC_ISR_PGERR);
+        return;
+    }
+
+    s->mr = (s->mr & ~OTPC_MR_ADDR_MASK) |
+            ((packet.address << OTPC_MR_ADDR_SHIFT) & OTPC_MR_ADDR_MASK);
+    at91_otpc_set_interrupts(s, OTPC_ISR_EOP);
+}
+
+static void at91_otpc_program_packet(AT91OTPCState *s)
+{
+    if (s->mr & OTPC_MR_NPCKT) {
+        at91_otpc_program_new_packet(s);
+    } else {
+        at91_otpc_update_packet(s);
+    }
+}
+
+static void at91_otpc_invalidate_packet(AT91OTPCState *s)
+{
+    AT91OTPCPacket packet;
+    uint32_t packet_type, value;
+
+    if (!at91_otpc_get_selected_packet(s, &packet, true)) {
+        at91_otpc_set_interrupts(s, OTPC_ISR_IVERR);
+        return;
+    }
+
+    packet_type = packet.header & OTPC_HR_PACKET_MASK;
+    if (s->uhc[1] & at91_otpc_invalidation_disable(packet_type)) {
+        return;
+    }
+    if (!at91_otpc_source_programmable(s)) {
+        at91_otpc_set_interrupts(s, OTPC_ISR_IVERR);
+        return;
+    }
+
+    value = packet.header | OTPC_HR_INVLD_MASK;
+    if (!at91_otpc_program_word(s, packet.address, value) ||
+        !at91_otpc_source_finish_programming(s)) {
+        at91_otpc_set_interrupts(s, OTPC_ISR_IVERR);
+        return;
+    }
+    at91_otpc_set_interrupts(s, OTPC_ISR_EOI);
+}
+
+static void at91_otpc_hide_packet(AT91OTPCState *s)
+{
+    AT91OTPCPacket packet;
+
+    if (!at91_otpc_get_selected_packet(s, &packet, false)) {
+        at91_otpc_set_interrupts(s, OTPC_ISR_HDERR);
+        return;
+    }
+
+    at91_otpc_source_hide(s, packet.address);
+    at91_otpc_set_interrupts(s, OTPC_ISR_EOH);
 }
 
 static void at91_otpc_refresh(AT91OTPCState *s)
@@ -524,13 +903,32 @@ static void at91_otpc_refresh(AT91OTPCState *s)
 
 static void at91_otpc_control_write(AT91OTPCState *s, uint32_t value)
 {
-    uint32_t commands = value & OTPC_CR_MASK;
+    uint32_t commands = value & OTPC_CR_MASK & UINT16_MAX;
     uint32_t key = value >> OTPC_CR_KEY_SHIFT;
-    uint32_t user_keyed = OTPC_CR_PGM | OTPC_CR_CKSGEN | OTPC_CR_INVLD |
-                          OTPC_CR_HIDE | OTPC_CR_KBSTART | OTPC_CR_KBSTOP |
-                          OTPC_CR_REFRESH;
+    uint32_t user_keyed = OTPC_CR_PGM | OTPC_CR_CKSGEN |
+                          OTPC_CR_INVLD | OTPC_CR_HIDE;
+    uint32_t unsupported;
 
     if (at91_otpc_write_is_protected(s, OTPC_CR, OTPC_WPMR_WPCTEN)) {
+        return;
+    }
+    if ((commands & user_keyed) && key != OTPC_CR_USER_KEY) {
+        at91_otpc_report_software_error(s, OTPC_SWE_KEY_ERROR, true);
+        return;
+    }
+    if ((commands & OTPC_CR_REPAIR) && key != OTPC_CR_REPAIR_KEY) {
+        at91_otpc_report_software_error(s, OTPC_SWE_KEY_ERROR, true);
+        return;
+    }
+
+    /*
+     * The hardware priority for simultaneous commands is undocumented.
+     * Never compose potentially irreversible operations until it is known.
+     */
+    if (commands && (commands & (commands - 1))) {
+        qemu_log_mask(LOG_UNIMP,
+                      TYPE_AT91_OTPC ": simultaneous commands 0x%08x "
+                      "not implemented\n", commands);
         return;
     }
 
@@ -540,12 +938,22 @@ static void at91_otpc_control_write(AT91OTPCState *s, uint32_t value)
     if (s->uhc[1] & OTPC_UHC1R_URDDIS) {
         commands &= ~OTPC_CR_READ;
     }
-    if (s->uhc[1] & OTPC_UHC1R_UPGDIS) {
+    if ((s->uhc[1] & OTPC_UHC1R_UPGDIS) ||
+        (s->mr & OTPC_MR_WRDIS)) {
         commands &= ~OTPC_CR_PGM;
     }
     if ((s->uhc[1] & OTPC_UHC1R_URFDIS) &&
         !(s->sr & OTPC_SR_EMUL)) {
         commands &= ~OTPC_CR_REFRESH;
+    }
+    if (commands & OTPC_CR_CKSGEN) {
+        AT91OTPCPacket packet;
+
+        if (at91_otpc_get_selected_packet(s, &packet, false) &&
+            (s->uhc[1] &
+             at91_otpc_lock_disable(packet.header & OTPC_HR_PACKET_MASK))) {
+            commands &= ~OTPC_CR_CKSGEN;
+        }
     }
 
     if (commands & OTPC_CR_FLUSH) {
@@ -555,45 +963,34 @@ static void at91_otpc_control_write(AT91OTPCState *s, uint32_t value)
         at91_otpc_read_packet(s);
     }
 
-    if ((commands & user_keyed) && key != OTPC_CR_USER_KEY) {
-        at91_otpc_report_software_error(s, OTPC_SWE_KEY_ERROR, true);
-    } else {
-        uint32_t unsupported = commands &
-                               (OTPC_CR_PGM | OTPC_CR_CKSGEN |
-                                OTPC_CR_INVLD | OTPC_CR_HIDE |
-                                OTPC_CR_KBSTART | OTPC_CR_KBSTOP);
-
-        if (unsupported) {
-            qemu_log_mask(LOG_UNIMP,
-                          TYPE_AT91_OTPC ": command(s) 0x%08x not "
-                          "implemented\n", unsupported);
-        }
-        if (commands & OTPC_CR_PGM) {
-            at91_otpc_set_interrupts(s, OTPC_ISR_PGERR);
-        }
-        if (commands & OTPC_CR_CKSGEN) {
-            at91_otpc_set_interrupts(s, OTPC_ISR_LKERR);
-        }
-        if (commands & OTPC_CR_INVLD) {
-            at91_otpc_set_interrupts(s, OTPC_ISR_IVERR);
-        }
-        if (commands & OTPC_CR_HIDE) {
-            at91_otpc_set_interrupts(s, OTPC_ISR_HDERR);
-        }
-        if (commands & (OTPC_CR_KBSTART | OTPC_CR_KBSTOP)) {
-            at91_otpc_set_interrupts(s, OTPC_ISR_KBERR);
-        }
-        if (commands & OTPC_CR_REFRESH) {
-            at91_otpc_refresh(s);
-        }
+    unsupported = commands &
+                  (OTPC_CR_CKSGEN | OTPC_CR_KBSTART | OTPC_CR_KBSTOP);
+    if (unsupported) {
+        qemu_log_mask(LOG_UNIMP,
+                      TYPE_AT91_OTPC ": command(s) 0x%08x not implemented\n",
+                      unsupported);
+    }
+    if (commands & OTPC_CR_PGM) {
+        at91_otpc_program_packet(s);
+    }
+    if (commands & OTPC_CR_CKSGEN) {
+        at91_otpc_set_interrupts(s, OTPC_ISR_LKERR);
+    }
+    if (commands & OTPC_CR_INVLD) {
+        at91_otpc_invalidate_packet(s);
+    }
+    if (commands & OTPC_CR_HIDE) {
+        at91_otpc_hide_packet(s);
+    }
+    if (commands & (OTPC_CR_KBSTART | OTPC_CR_KBSTOP)) {
+        at91_otpc_set_interrupts(s, OTPC_ISR_KBERR);
+    }
+    if (commands & OTPC_CR_REFRESH) {
+        at91_otpc_refresh(s);
     }
 
     if (commands & OTPC_CR_REPAIR) {
-        if (key != OTPC_CR_REPAIR_KEY) {
-            at91_otpc_report_software_error(s, OTPC_SWE_KEY_ERROR, true);
-        } else {
-            at91_otpc_set_interrupts(s, OTPC_ISR_WERR);
-        }
+        at91_otpc_set_interrupts(s, OTPC_ISR_WERR);
     }
 }
 
@@ -709,6 +1106,7 @@ static void at91_otpc_write(void *opaque, hwaddr offset, uint64_t value,
         if (s->mr & OTPC_MR_NPCKT) {
             s->hr = (value & (OTPC_HR_SIZE_MASK |
                               OTPC_HR_PACKET_MASK)) | OTPC_HR_ONE;
+            s->temporary_valid = false;
         }
         break;
     case OTPC_DR:
@@ -791,8 +1189,13 @@ static void at91_otpc_reset(DeviceState *dev)
     s->wpmr = 0;
     s->wpsr = 0;
     s->temporary_words = 0;
+    s->temporary_address = 0;
     s->emulation_active = false;
+    s->temporary_valid = false;
+    s->temporary_emulation = false;
     memset(s->temporary, 0, sizeof(s->temporary));
+    memset(s->hidden_otp, 0, sizeof(s->hidden_otp));
+    memset(s->hidden_emulation, 0, sizeof(s->hidden_emulation));
 
     at91_otpc_scan_area(s);
     at91_otpc_update_irq(s);
@@ -808,10 +1211,66 @@ static void at91_otpc_init(Object *obj)
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
 }
 
+static bool at91_otpc_load_backend(AT91OTPCState *s, Error **errp)
+{
+    uint64_t permissions = BLK_PERM_CONSISTENT_READ;
+    uint64_t shared_permissions = BLK_PERM_ALL;
+    int64_t length;
+    size_t i;
+
+    if (!s->blk) {
+        return true;
+    }
+
+    length = blk_getlength(s->blk);
+    if (length < 0) {
+        error_setg_errno(errp, -length,
+                         TYPE_AT91_OTPC
+                         ": cannot determine OTP backing image size");
+        return false;
+    }
+    if (length != AT91_OTPC_OTP_SIZE) {
+        error_setg(errp, TYPE_AT91_OTPC
+                   ": OTP backing image must be exactly %" PRIu64
+                   " bytes, got %" PRId64,
+                   (uint64_t)AT91_OTPC_OTP_SIZE, length);
+        return false;
+    }
+
+    if (s->write_enable) {
+        if (!blk_supports_write_perm(s->blk)) {
+            error_setg(errp, TYPE_AT91_OTPC
+                       ": write-enable requires a writable OTP drive");
+            return false;
+        }
+        permissions |= BLK_PERM_WRITE;
+        shared_permissions = BLK_PERM_CONSISTENT_READ |
+                             BLK_PERM_WRITE_UNCHANGED;
+    }
+    if (blk_set_perm(s->blk, permissions, shared_permissions, errp) < 0) {
+        return false;
+    }
+    if (blk_pread(s->blk, 0, sizeof(s->otp), s->otp, 0) < 0) {
+        error_setg(errp, TYPE_AT91_OTPC
+                   ": failed to read OTP backing image");
+        return false;
+    }
+    for (i = 0; i < ARRAY_SIZE(s->otp); i++) {
+        s->otp[i] = le32_to_cpu(s->otp[i]);
+    }
+    s->otp_ever_programmed = at91_otpc_otp_contains_one(s);
+    return true;
+}
+
 static void at91_otpc_realize(DeviceState *dev, Error **errp)
 {
     AT91OTPCState *s = AT91_OTPC(dev);
 
+    if (s->write_enable && !s->blk) {
+        error_setg(errp, TYPE_AT91_OTPC
+                   ": write-enable requires a physical OTP drive");
+        return;
+    }
     if (!s->emulation_memory) {
         error_setg(errp, TYPE_AT91_OTPC
                    ": emulation-memory link is not set");
@@ -822,6 +1281,17 @@ static void at91_otpc_realize(DeviceState *dev, Error **errp)
         error_setg(errp, TYPE_AT91_OTPC
                    ": emulation-memory must be exactly 4 KiB");
         return;
+    }
+    if (!at91_otpc_load_backend(s, errp)) {
+        return;
+    }
+    if (s->blk && s->write_enable) {
+        error_setg(&s->migration_blocker,
+                   TYPE_AT91_OTPC ": migration is disabled while a "
+                   "writable physical OTP backing image is attached");
+        if (migrate_add_blocker(&s->migration_blocker, errp) < 0) {
+            return;
+        }
     }
 
     /*
@@ -845,16 +1315,40 @@ static void at91_otpc_unrealize(DeviceState *dev)
 {
     AT91OTPCState *s = AT91_OTPC(dev);
 
+    if (s->migration_blocker) {
+        migrate_del_blocker(&s->migration_blocker);
+    }
     address_space_destroy(&s->emulation_as);
     memory_region_del_subregion(&s->emulation_root, &s->emulation_alias);
     object_unparent(OBJECT(&s->emulation_alias));
     object_unparent(OBJECT(&s->emulation_root));
 }
 
+static bool at91_otpc_pre_load(void *opaque, Error **errp)
+{
+    AT91OTPCState *s = opaque;
+
+    /* Incoming state must never replace an irreversible write-through image. */
+    if (s->blk && s->write_enable) {
+        error_setg(errp, TYPE_AT91_OTPC
+                   ": cannot load state while a writable physical OTP "
+                   "backing image is attached");
+        return false;
+    }
+    return true;
+}
+
 static int at91_otpc_post_load(void *opaque, int version_id)
 {
     AT91OTPCState *s = opaque;
 
+    if (version_id < 2) {
+        memset(s->hidden_otp, 0, sizeof(s->hidden_otp));
+        memset(s->hidden_emulation, 0, sizeof(s->hidden_emulation));
+        s->temporary_address = 0;
+        s->temporary_valid = false;
+        s->temporary_emulation = false;
+    }
     s->otp_ever_programmed |= at91_otpc_otp_contains_one(s);
     if (s->otp_ever_programmed) {
         s->emulation_active = false;
@@ -863,6 +1357,11 @@ static int at91_otpc_post_load(void *opaque, int version_id)
             (s->emulation_active ? OTPC_SR_EMUL : 0);
     s->temporary_words = MIN(s->temporary_words,
                              (uint32_t)AT91_OTPC_TEMP_WORDS);
+    if (s->temporary_address >= at91_otpc_source_words(s)) {
+        s->temporary_valid = false;
+    }
+    s->temporary_valid = !!s->temporary_valid;
+    s->temporary_emulation = !!s->temporary_emulation;
     s->mr &= OTPC_MR_MASK;
     s->ar &= OTPC_AR_MASK;
     s->sr &= OTPC_SR_MASK;
@@ -881,8 +1380,9 @@ static int at91_otpc_post_load(void *opaque, int version_id)
 
 static const VMStateDescription at91_otpc_vmstate = {
     .name = TYPE_AT91_OTPC,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .pre_load_errp = at91_otpc_pre_load,
     .post_load = at91_otpc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(otp, AT91OTPCState, AT91_OTPC_OTP_WORDS),
@@ -904,13 +1404,52 @@ static const VMStateDescription at91_otpc_vmstate = {
         VMSTATE_UINT32(temporary_words, AT91OTPCState),
         VMSTATE_BOOL(emulation_active, AT91OTPCState),
         VMSTATE_BOOL(otp_ever_programmed, AT91OTPCState),
+        VMSTATE_UINT8_ARRAY_V(hidden_otp, AT91OTPCState,
+                              AT91_OTPC_OTP_WORDS, 2),
+        VMSTATE_UINT8_ARRAY_V(hidden_emulation, AT91OTPCState,
+                              AT91_OTPC_EMULATION_WORDS, 2),
+        VMSTATE_UINT32_V(temporary_address, AT91OTPCState, 2),
+        VMSTATE_BOOL_V(temporary_valid, AT91OTPCState, 2),
+        VMSTATE_BOOL_V(temporary_emulation, AT91OTPCState, 2),
         VMSTATE_END_OF_LIST()
     },
+};
+
+static void at91_otpc_prop_set_drive(Object *obj, Visitor *v,
+                                      const char *name, void *opaque,
+                                      Error **errp)
+{
+    qdev_prop_drive.set(obj, v, name, opaque, errp);
+}
+
+static void at91_otpc_prop_get_drive(Object *obj, Visitor *v,
+                                      const char *name, void *opaque,
+                                      Error **errp)
+{
+    qdev_prop_drive.get(obj, v, name, opaque, errp);
+}
+
+static void at91_otpc_prop_release_drive(Object *obj, const char *name,
+                                          void *opaque)
+{
+    qdev_prop_drive.release(obj, name, opaque);
+}
+
+/* Unlike ordinary block devices, changing the OTP medium is not hot-plug. */
+static const PropertyInfo at91_otpc_prop_drive = {
+    .type = "str",
+    .description = "Node name or ID of the raw physical OTP backend",
+    .get = at91_otpc_prop_get_drive,
+    .set = at91_otpc_prop_set_drive,
+    .release = at91_otpc_prop_release_drive,
 };
 
 static const Property at91_otpc_properties[] = {
     DEFINE_PROP_LINK("emulation-memory", AT91OTPCState, emulation_memory,
                      TYPE_MEMORY_REGION, MemoryRegion *),
+    DEFINE_PROP("drive", AT91OTPCState, blk, at91_otpc_prop_drive,
+                BlockBackend *),
+    DEFINE_PROP_BOOL("write-enable", AT91OTPCState, write_enable, false),
     DEFINE_PROP_UINT32("uid0", AT91OTPCState, uid[0], 0),
     DEFINE_PROP_UINT32("uid1", AT91OTPCState, uid[1], 0),
     DEFINE_PROP_UINT32("uid2", AT91OTPCState, uid[2], 0),

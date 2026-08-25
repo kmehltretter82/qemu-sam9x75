@@ -617,6 +617,8 @@
 #define OTPC_AR_INCRT           BIT(16)
 #define OTPC_SR_ONEF            BIT(9)
 #define OTPC_SR_EMUL            BIT(3)
+#define OTPC_INT_EOP            BIT(0)
+#define OTPC_INT_EOI            BIT(2)
 #define OTPC_INT_PGERR          BIT(4)
 #define OTPC_INT_LKERR          BIT(5)
 #define OTPC_INT_IVERR          BIT(6)
@@ -637,6 +639,15 @@
 #define OTPC_PACKET_HARDWARE    5
 #define OTPC_PACKET_CUSTOM      6
 #define OTPC_HEADER(type, size) (BIT(7) | ((size) << 8) | (type))
+#define OTPC_UHC1_UPGDIS        BIT(1)
+#define OTPC_UHC1_UHCINVDIS     BIT(2)
+#define OTPC_UHC1_UHCPGDIS      BIT(4)
+#define OTPC_UHC1_BCINVDIS      BIT(5)
+#define OTPC_UHC1_BCPGDIS       BIT(7)
+#define OTPC_UHC1_SBCINVDIS     BIT(8)
+#define OTPC_UHC1_SBCPGDIS      BIT(10)
+#define OTPC_UHC1_CINVDIS       BIT(14)
+#define OTPC_UHC1_CPGDIS        BIT(16)
 #define OTPC_WPMR_WPCFEN        BIT(0)
 #define OTPC_WPMR_WPITEN        BIT(1)
 #define OTPC_WPMR_WPCTEN        BIT(2)
@@ -7745,16 +7756,638 @@ static void test_bsc_migration(void)
     qtest_quit(to);
 }
 
+static void otpc_enable_emulation(QTestState *qts)
+{
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_EMUL);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_REFRESH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EORF);
+    g_assert_true(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
+                  OTPC_SR_EMUL);
+}
+
+static void otpc_stage_new_packet(QTestState *qts, uint32_t header,
+                                  const uint32_t *payload,
+                                  size_t payload_words)
+{
+    uint32_t pending;
+    size_t i;
+
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_EMUL | OTPC_MR_NPCKT);
+    /* Entering NPCKT can automatically flush an earlier packet buffer. */
+    pending = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR);
+    g_assert_cmphex(pending & ~OTPC_INT_EOF, ==, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_HR, header);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, OTPC_AR_INCRT);
+    for (i = 0; i < payload_words; i++) {
+        qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, payload[i]);
+    }
+}
+
+static void otpc_seed_protection_chain(QTestState *qts, uint32_t uhc1)
+{
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 0 * 4,
+                 OTPC_HEADER(OTPC_PACKET_HARDWARE, 1));
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 2 * 4, uhc1);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 3 * 4,
+                 OTPC_HEADER(OTPC_PACKET_BOOT, 17));
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 22 * 4,
+                 OTPC_HEADER(OTPC_PACKET_SECURE_BOOT, 7));
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 31 * 4,
+                 OTPC_HEADER(OTPC_PACKET_CUSTOM, 0));
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 33 * 4,
+                 OTPC_HEADER(OTPC_PACKET_REGULAR, 0));
+    otpc_enable_emulation(qts);
+}
+
+typedef struct OTPCGateCase {
+    uint32_t gate;
+    uint32_t address;
+    uint32_t header;
+} OTPCGateCase;
+
+static void otpc_select_and_read(QTestState *qts, uint32_t address)
+{
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_EMUL | OTPC_MR_ADDR(address));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOR);
+}
+
+static void otpc_clear_protection(QTestState *qts)
+{
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 2 * 4, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EORF);
+}
+
+static void otpc_test_program_gate(const OTPCGateCase *test)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+
+    otpc_seed_protection_chain(qts, test->gate);
+    otpc_select_and_read(qts, test->address);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, OTPC_AR_INCRT);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, 1);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR);
+    g_assert_false(value & OTPC_INT_EOP);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_SRAM1_BASE +
+                                (test->address + 1) * 4), ==, 0);
+
+    otpc_clear_protection(qts);
+    otpc_select_and_read(qts, test->address);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, OTPC_AR_INCRT);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, 1);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOP);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_SRAM1_BASE +
+                                (test->address + 1) * 4), ==, 1);
+    qtest_quit(qts);
+}
+
+static void otpc_test_invalidation_gate(const OTPCGateCase *test)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+
+    otpc_seed_protection_chain(qts, test->gate);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_EMUL | OTPC_MR_ADDR(test->address));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_INVLD);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR);
+    g_assert_false(value & OTPC_INT_EOI);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_SRAM1_BASE + test->address * 4), ==,
+                    test->header);
+
+    otpc_clear_protection(qts);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_INVLD);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOI);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_SRAM1_BASE + test->address * 4), ==,
+                    test->header | (3U << 4));
+    qtest_quit(qts);
+}
+
+static void test_otpc_program_update_invalidate_and_hide(void)
+{
+    const uint32_t header = OTPC_HEADER(OTPC_PACKET_REGULAR, 1);
+    const uint32_t custom_header = OTPC_HEADER(OTPC_PACKET_CUSTOM, 0);
+    const uint32_t payload[] = { 0, 0x0000000f };
+    const uint32_t custom_payload[] = { 0xc0579750 };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+
+    otpc_enable_emulation(qts);
+
+    /* Append a two-word packet and return its controller-selected address. */
+    otpc_stage_new_packet(qts, header, payload, ARRAY_SIZE(payload));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_PGM | OTPC_CR_INVLD);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR);
+    g_assert_cmphex(value & (OTPC_WPSR_SWE |
+                             OTPC_WPSR_SWETYP(0xf) |
+                             OTPC_WPSR_ECLASS), ==,
+                    OTPC_WPSR_SWE |
+                    OTPC_WPSR_SWETYP(OTPC_WPSR_KEY_ERROR) |
+                    OTPC_WPSR_ECLASS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_SECE);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM | OTPC_CR_INVLD);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 0 * 4), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 1 * 4), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 2 * 4), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                    header);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOP);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_MR) &
+                    OTPC_MR_ADDR(UINT16_MAX), ==, OTPC_MR_ADDR(0));
+    g_assert_true(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_MR) &
+                  OTPC_MR_NPCKT);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 0 * 4), ==,
+                    header);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 1 * 4), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 2 * 4), ==,
+                    0x0000000f);
+
+    /* A read supplies the temporary buffer used for a whole-word update. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_EMUL | OTPC_MR_ADDR(0));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOR);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, OTPC_AR_INCRT);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, 0x55aa55aa);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, 0x0000000f);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOP);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 1 * 4), ==,
+                    0x55aa55aa);
+
+    /* Hiding is per packet, survives REFRESH, and changes no SRAM bits. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_HIDE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOH);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                    header);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==, 0);
+    g_assert_false(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
+                   OTPC_SR_ONEF);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOR);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EORF);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOR);
+
+    qtest_system_reset(qts);
+    otpc_enable_emulation(qts);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_EMUL | OTPC_MR_ADDR(0));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==,
+                    0x55aa55aa);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOR);
+
+    /* Invalidation sets only INVLD and does not reclaim packet space. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_INVLD);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOI);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 0 * 4), ==,
+                    header | (3U << 4));
+
+    otpc_stage_new_packet(qts, custom_header, custom_payload,
+                          ARRAY_SIZE(custom_payload));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOP);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_MR) &
+                    OTPC_MR_ADDR(UINT16_MAX), ==, OTPC_MR_ADDR(3));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 3 * 4), ==,
+                    custom_header);
+
+    qtest_quit(qts);
+}
+
+static void test_otpc_program_validation(void)
+{
+    const uint32_t bad_hardware = OTPC_HEADER(OTPC_PACKET_HARDWARE, 0);
+    const uint32_t regular = OTPC_HEADER(OTPC_PACKET_REGULAR, 0);
+    const uint32_t largest =
+        OTPC_HEADER(OTPC_PACKET_REGULAR, UINT8_MAX);
+    const uint32_t payload[] = { 1 };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    otpc_enable_emulation(qts);
+    otpc_stage_new_packet(qts, bad_hardware, payload,
+                          ARRAY_SIZE(payload));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_WERR);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE), ==, 0);
+
+    otpc_stage_new_packet(qts, regular, payload, ARRAY_SIZE(payload));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOP);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_EMUL | OTPC_MR_ADDR(0));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, OTPC_AR_INCRT);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_WERR);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 1 * 4), ==, 1);
+    qtest_quit(qts);
+
+    qts = qtest_init(SAM9X75_MACHINE);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 0 * 4, largest);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 257 * 4, largest);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 514 * 4, largest);
+    qtest_writel(qts, SAM9X7_SRAM1_BASE + 771 * 4,
+                 OTPC_HEADER(OTPC_PACKET_REGULAR, 250));
+    otpc_enable_emulation(qts);
+    otpc_stage_new_packet(qts, regular, payload, ARRAY_SIZE(payload));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_WERR);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 1023 * 4), ==, 0);
+    qtest_quit(qts);
+}
+
+static void test_otpc_uhc_program_invalidation_gates(void)
+{
+    static const OTPCGateCase program_gates[] = {
+        { OTPC_UHC1_UPGDIS, 33,
+          OTPC_HEADER(OTPC_PACKET_REGULAR, 0) },
+        { OTPC_UHC1_UHCPGDIS, 0,
+          OTPC_HEADER(OTPC_PACKET_HARDWARE, 1) },
+        { OTPC_UHC1_BCPGDIS, 3,
+          OTPC_HEADER(OTPC_PACKET_BOOT, 17) },
+        { OTPC_UHC1_SBCPGDIS, 22,
+          OTPC_HEADER(OTPC_PACKET_SECURE_BOOT, 7) },
+        { OTPC_UHC1_CPGDIS, 31,
+          OTPC_HEADER(OTPC_PACKET_CUSTOM, 0) },
+    };
+    static const OTPCGateCase invalidation_gates[] = {
+        { OTPC_UHC1_UHCINVDIS, 0,
+          OTPC_HEADER(OTPC_PACKET_HARDWARE, 1) },
+        { OTPC_UHC1_BCINVDIS, 3,
+          OTPC_HEADER(OTPC_PACKET_BOOT, 17) },
+        { OTPC_UHC1_SBCINVDIS, 22,
+          OTPC_HEADER(OTPC_PACKET_SECURE_BOOT, 7) },
+        { OTPC_UHC1_CINVDIS, 31,
+          OTPC_HEADER(OTPC_PACKET_CUSTOM, 0) },
+    };
+    const uint32_t payload[] = { 1 };
+    QTestState *qts;
+    uint32_t value;
+    size_t i;
+
+    for (i = 0; i < ARRAY_SIZE(program_gates); i++) {
+        otpc_test_program_gate(&program_gates[i]);
+    }
+    for (i = 0; i < ARRAY_SIZE(invalidation_gates); i++) {
+        otpc_test_invalidation_gate(&invalidation_gates[i]);
+    }
+    /* The special-packet program gate also covers new allocation. */
+    qts = qtest_init(SAM9X75_MACHINE);
+    otpc_seed_protection_chain(qts, OTPC_UHC1_CPGDIS);
+    otpc_stage_new_packet(qts, OTPC_HEADER(OTPC_PACKET_CUSTOM, 0),
+                          payload, ARRAY_SIZE(payload));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR);
+    g_assert_false(value & OTPC_INT_EOP);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 35 * 4), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 36 * 4), ==, 0);
+    otpc_clear_protection(qts);
+    otpc_stage_new_packet(qts, OTPC_HEADER(OTPC_PACKET_CUSTOM, 0),
+                          payload, ARRAY_SIZE(payload));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOP);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 35 * 4), ==,
+                    OTPC_HEADER(OTPC_PACKET_CUSTOM, 0));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE + 36 * 4), ==, 1);
+    qtest_quit(qts);
+}
+
+static void test_otpc_physical_backend_persistence(void)
+{
+    const uint32_t header = OTPC_HEADER(OTPC_PACKET_REGULAR, 1);
+    const uint32_t invalid_header = header | (3U << 4);
+    const uint32_t payload = 0x12349750;
+    g_autofree char *contents = NULL;
+    g_autofree char *otp_path = NULL;
+    GError *error = NULL;
+    QDict *response;
+    QTestState *qts;
+    gsize length;
+    int fd;
+
+    fd = g_file_open_tmp("sam9x75-otp-XXXXXX", &otp_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, 10 * 1024), ==, 0);
+    close(fd);
+
+    qts = qtest_initf(
+        "-machine sam9x75-curiosity,otpc-drive=otp0,"
+        "otpc-write-enable=on "
+        "-drive if=none,id=otp0,format=raw,file=%s",
+        otp_path);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_NPCKT);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_HR, header);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, OTPC_AR_INCRT);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, payload);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOP);
+    qtest_system_reset(qts);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_ADDR(0));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                    header);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_DR), ==,
+                    payload);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOR);
+
+    response = qtest_qmp_assert_failure_ref(qts,
+        "{ 'execute': 'migrate', "
+        "  'arguments': { 'uri': 'file:/dev/null' } }");
+    g_assert_nonnull(g_strstr_len(qdict_get_str(response, "desc"), -1,
+                                 "migration is disabled while a writable "
+                                 "physical OTP backing image is attached"));
+    qobject_unref(response);
+
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_INVLD);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOI);
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(otp_path, &contents, &length, &error));
+    g_assert_no_error(error);
+    g_assert_cmpuint(length, ==, 10 * 1024);
+    g_assert_cmphex(ldl_le_p(contents), ==, invalid_header);
+    g_assert_cmphex(ldl_le_p(contents + sizeof(uint32_t)), ==, payload);
+    g_clear_pointer(&contents, g_free);
+
+    /* Reopen as an immutable factory image: reads work, writes fail safely. */
+    qts = qtest_initf(
+        "-machine sam9x75-curiosity,otpc-drive=otpnode "
+        "-blockdev driver=file,node-name=otpfile,filename=%s "
+        "-blockdev driver=raw,node-name=otpnode,file=otpfile",
+        otp_path);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_ADDR(0));
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                    invalid_header);
+    qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, OTPC_AR_INCRT);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, payload);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, 0x5a5a9750);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_PGERR);
+
+    /* Once any physical bit is set, REFRESH cannot activate emulation. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_EMUL);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    g_assert_false(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
+                   OTPC_SR_EMUL);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EORF);
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(otp_path, &contents, &length, &error));
+    g_assert_no_error(error);
+    g_assert_cmphex(ldl_le_p(contents), ==, invalid_header);
+    g_assert_cmphex(ldl_le_p(contents + sizeof(uint32_t)), ==, payload);
+    g_assert_cmphex(ldl_le_p(contents + 2 * sizeof(uint32_t)), ==, 0);
+
+    /* Incoming migration must not replace irreversible write-through state. */
+    {
+        QTestState *from = qtest_init(SAM9X75_MACHINE);
+        QTestState *to = qtest_initf(
+            "-machine sam9x75-curiosity,otpc-drive=otp0,"
+            "otpc-write-enable=on "
+            "-drive if=none,id=otp0,format=raw,file=%s "
+            "-incoming defer",
+            otp_path);
+
+        migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+        migrate_qmp(from, to, NULL, NULL, "{}");
+        migration_event_wait(to, "failed");
+        response = migrate_query(to);
+        g_assert_cmpstr(qdict_get_str(response, "status"), ==, "failed");
+        g_assert_nonnull(g_strstr_len(
+            qdict_get_str(response, "error-desc"), -1,
+            "cannot load state while a writable physical OTP backing image "
+            "is attached"));
+        qobject_unref(response);
+
+        qtest_writel(to, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_ADDR(0));
+        qtest_writel(to, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+        g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                        invalid_header);
+        qtest_writel(to, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+        g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_DR), ==,
+                        payload);
+        qtest_quit(from);
+        qtest_quit(to);
+    }
+
+    g_clear_pointer(&contents, g_free);
+    g_assert_true(g_file_get_contents(otp_path, &contents, &length, &error));
+    g_assert_no_error(error);
+    g_assert_cmphex(ldl_le_p(contents), ==, invalid_header);
+    g_assert_cmphex(ldl_le_p(contents + sizeof(uint32_t)), ==, payload);
+    g_assert_cmphex(ldl_le_p(contents + 2 * sizeof(uint32_t)), ==, 0);
+    unlink(otp_path);
+}
+
+static void test_otpc_physical_backend_fault_latch(void)
+{
+    const uint32_t header = OTPC_HEADER(OTPC_PACKET_REGULAR, 1);
+    g_autofree char *contents = NULL;
+    g_autofree char *otp_path = NULL;
+    GError *error = NULL;
+    QTestState *qts;
+    gsize length;
+    int fd;
+
+    fd = g_file_open_tmp("sam9x75-otp-fault-XXXXXX", &otp_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, 10 * 1024), ==, 0);
+    close(fd);
+
+    qts = qtest_initf(
+        "-machine sam9x75-curiosity,otpc-drive=otpraw,"
+        "otpc-write-enable=on "
+        "-blockdev driver=file,node-name=otpfile,filename=%s "
+        "-blockdev driver=blkdebug,node-name=otpdebug,image=otpfile,"
+        "inject-error.0.event=write_aio,inject-error.0.errno=5,"
+        "inject-error.0.immediately=on,inject-error.0.once=on "
+        "-blockdev driver=raw,node-name=otpraw,file=otpdebug",
+        otp_path);
+
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_NPCKT);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_HR, header);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, OTPC_AR_INCRT);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, 1);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_PGERR);
+
+    /*
+     * The injected error is one-shot, but the device must remain fail-closed.
+     */
+    qtest_system_reset(qts);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_NPCKT);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_HR, header);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_AR, OTPC_AR_INCRT);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, 3);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_DR, 0);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_PGERR);
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(otp_path, &contents, &length, &error));
+    g_assert_no_error(error);
+    g_assert_cmpuint(length, ==, 10 * 1024);
+    g_assert_cmphex(ldl_le_p(contents), ==, 0);
+    g_assert_cmphex(ldl_le_p(contents + sizeof(uint32_t)), ==, 0);
+    unlink(otp_path);
+}
+
+static void assert_otpc_backend_rejected(off_t image_size,
+                                         bool write_enable,
+                                         bool readonly,
+                                         const char *message)
+{
+    g_autofree char *drive_arg = NULL;
+    g_autofree char *machine_arg = NULL;
+    g_autofree char *otp_path = NULL;
+    g_autofree char *stderr_text = NULL;
+    const char *qemu = qtest_qemu_binary(NULL);
+    GError *error = NULL;
+    gchar *argv[] = {
+        (gchar *)qemu,
+        (gchar *)"-machine", machine_arg,
+        (gchar *)"-drive", drive_arg,
+        (gchar *)"-display", (gchar *)"none",
+        (gchar *)"-serial", (gchar *)"none",
+        (gchar *)"-monitor", (gchar *)"none",
+        (gchar *)"-nic", (gchar *)"none",
+        (gchar *)"-run-with", (gchar *)"exit-with-parent=on",
+        NULL,
+    };
+    int wait_status;
+    int fd;
+
+    fd = g_file_open_tmp("sam9x75-otp-invalid-XXXXXX", &otp_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, image_size), ==, 0);
+    close(fd);
+
+    machine_arg = g_strdup_printf(
+        "sam9x75-curiosity,otpc-drive=otp0%s",
+        write_enable ? ",otpc-write-enable=on" : "");
+    drive_arg = g_strdup_printf(
+        "if=none,id=otp0,file=%s,format=raw%s", otp_path,
+        readonly ? ",readonly=on" : "");
+    argv[2] = machine_arg;
+    argv[4] = drive_arg;
+    g_assert_true(g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
+                               NULL, NULL, NULL, &stderr_text,
+                               &wait_status, &error));
+    g_assert_no_error(error);
+    g_assert_true(WIFEXITED(wait_status));
+    g_assert_cmpint(WEXITSTATUS(wait_status), !=, 0);
+    g_assert_nonnull(g_strstr_len(stderr_text, -1, message));
+    unlink(otp_path);
+}
+
+static void test_otpc_backend_validation(void)
+{
+    if (!g_test_subprocess()) {
+        g_test_trap_subprocess(NULL, 10 * G_USEC_PER_SEC, 0);
+        g_test_trap_assert_passed();
+        return;
+    }
+
+    assert_otpc_backend_rejected(10 * 1024 - 512, false, true,
+        "OTP backing image must be exactly 10240 bytes");
+    assert_otpc_backend_rejected(10 * 1024 + 1, false, true,
+        "OTP backing image must be exactly 10240 bytes");
+    assert_otpc_backend_rejected(10 * 1024, true, true,
+        "write-enable requires a writable OTP drive");
+}
+
 static void test_otpc_registers_protection_and_irq(void)
 {
     const uint32_t protection = OTPC_WPMR_WPCFEN |
                                 OTPC_WPMR_WPITEN |
                                 OTPC_WPMR_WPCTEN;
-    const uint32_t unsupported_errors = OTPC_INT_PGERR |
-                                        OTPC_INT_LKERR |
-                                        OTPC_INT_IVERR |
-                                        OTPC_INT_HDERR |
-                                        OTPC_INT_KBERR;
+    const uint32_t command_errors = OTPC_INT_WERR |
+                                    OTPC_INT_LKERR |
+                                    OTPC_INT_IVERR |
+                                    OTPC_INT_HDERR |
+                                    OTPC_INT_KBERR;
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
     uint32_t value;
 
@@ -7859,8 +8492,8 @@ static void test_otpc_registers_protection_and_irq(void)
                     OTPC_INT_SECE);
     g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
 
-    /* Unsupported permanent operations report their modeled failure bits. */
-    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_IER, unsupported_errors);
+    /* Invalid command setups report their command-specific failure bits. */
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_IER, command_errors);
     qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
                  OTPC_CR_KEY | OTPC_CR_PGM);
     qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
@@ -7869,11 +8502,10 @@ static void test_otpc_registers_protection_and_irq(void)
                  OTPC_CR_KEY | OTPC_CR_INVLD);
     qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
                  OTPC_CR_KEY | OTPC_CR_HIDE);
-    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
-                 OTPC_CR_KEY | OTPC_CR_KBSTART);
+    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_KBSTART);
     g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
     g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
-                    unsupported_errors);
+                    command_errors);
     g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(14));
 
     /* FIRSTE also selects the first software error in an error series. */
@@ -8040,24 +8672,11 @@ static void test_otpc_emulation_scan_and_read(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
                     OTPC_SR_EMUL, ==, 0);
 
+    /* REFRESH is not one of the four CR commands that require KEY. */
     qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_REFRESH);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
-                    OTPC_SR_EMUL, ==, 0);
-    value = qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR);
-    g_assert_cmphex(value & (OTPC_WPSR_SWE |
-                             OTPC_WPSR_SWETYP(0xf) |
-                             OTPC_WPSR_ECLASS), ==,
-                    OTPC_WPSR_SWE |
-                    OTPC_WPSR_SWETYP(OTPC_WPSR_KEY_ERROR) |
-                    OTPC_WPSR_ECLASS);
-    g_assert_false(qtest_get_irq(qts, 0));
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
-                    OTPC_INT_SECE);
-
-    qtest_writel(qts, SAM9X7_OTPC_BASE + OTPC_CR,
-                 OTPC_CR_KEY | OTPC_CR_REFRESH);
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_SR) &
                     OTPC_SR_EMUL, ==, OTPC_SR_EMUL);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_WPSR), ==, 0);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_BAR), ==,
                     (45U << 16) | 26);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_OTPC_BASE + OTPC_CAR), ==, 19);
@@ -8402,6 +9021,112 @@ static void test_otpc_migration(void)
     g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_ISR), ==, 0);
     g_assert_cmphex(qtest_readl(to, SAM9X7_SRAM1_BASE + 4 * 4), ==,
                     0x778899aa);
+
+    qtest_quit(from);
+    qtest_quit(to);
+}
+
+static void test_otpc_migration_v2_state(void)
+{
+    const uint32_t header = OTPC_HEADER(OTPC_PACKET_REGULAR, 0);
+    const uint32_t physical_payload = 0xa5a59750;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+
+    qtest_writel(from, SAM9X7_SRAM1_BASE + 0 * 4, header);
+    qtest_writel(from, SAM9X7_SRAM1_BASE + 1 * 4, 0x11112222);
+    qtest_writel(from, SAM9X7_SRAM1_BASE + 2 * 4, header);
+    qtest_writel(from, SAM9X7_SRAM1_BASE + 3 * 4, 0);
+    otpc_enable_emulation(from);
+
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_MR,
+                 OTPC_MR_EMUL | OTPC_MR_ADDR(0));
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_HIDE);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOH);
+
+    /* Migrate an update staged by a READ, including its source and address. */
+    otpc_select_and_read(from, 2);
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_AR, OTPC_AR_INCRT);
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_DR, 0x33445566);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    qtest_writel(to, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOP);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_SRAM1_BASE + 3 * 4), ==,
+                    0x33445566);
+
+    otpc_select_and_read(to, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                    header);
+    qtest_writel(to, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_DR), ==, 0);
+    g_assert_false(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_SR) &
+                   OTPC_SR_ONEF);
+
+    qtest_writel(to, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_REFRESH);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EORF);
+    otpc_select_and_read(to, 0);
+    qtest_writel(to, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_DR), ==, 0);
+
+    qtest_system_reset(to);
+    otpc_enable_emulation(to);
+    otpc_select_and_read(to, 0);
+    qtest_writel(to, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_DR), ==,
+                    0x11112222);
+
+    qtest_quit(from);
+    qtest_quit(to);
+
+    /* VM-local physical contents and their separate hide state also migrate. */
+    from = qtest_init(SAM9X75_MACHINE);
+    to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_NPCKT);
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_HR, header);
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_AR, OTPC_AR_INCRT);
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_DR, physical_payload);
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_PGM);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOP);
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_ADDR(0));
+    qtest_writel(from, SAM9X7_OTPC_BASE + OTPC_CR,
+                 OTPC_CR_KEY | OTPC_CR_HIDE);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOH);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    qtest_writel(to, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_HR), ==,
+                    header);
+    qtest_writel(to, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_DR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOR);
+
+    qtest_system_reset(to);
+    qtest_writel(to, SAM9X7_OTPC_BASE + OTPC_MR, OTPC_MR_ADDR(0));
+    qtest_writel(to, SAM9X7_OTPC_BASE + OTPC_CR, OTPC_CR_READ);
+    qtest_writel(to, SAM9X7_OTPC_BASE + OTPC_AR, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_DR), ==,
+                    physical_payload);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_OTPC_BASE + OTPC_ISR), ==,
+                    OTPC_INT_EOR);
 
     qtest_quit(from);
     qtest_quit(to);
@@ -9623,11 +10348,25 @@ int main(int argc, char **argv)
     qtest_add_func("sam9x75/bsc/migration", test_bsc_migration);
     qtest_add_func("sam9x75/otpc/registers-protection-and-irq",
                    test_otpc_registers_protection_and_irq);
+    qtest_add_func("sam9x75/otpc/program-update-invalidate-and-hide",
+                   test_otpc_program_update_invalidate_and_hide);
+    qtest_add_func("sam9x75/otpc/program-validation",
+                   test_otpc_program_validation);
+    qtest_add_func("sam9x75/otpc/uhc-program-invalidation-gates",
+                   test_otpc_uhc_program_invalidation_gates);
+    qtest_add_func("sam9x75/otpc/physical-backend-persistence",
+                   test_otpc_physical_backend_persistence);
+    qtest_add_func("sam9x75/otpc/physical-backend-fault-latch",
+                   test_otpc_physical_backend_fault_latch);
+    qtest_add_func("sam9x75/otpc/backend-validation",
+                   test_otpc_backend_validation);
     qtest_add_func("sam9x75/otpc/emulation-scan-and-read",
                    test_otpc_emulation_scan_and_read);
     qtest_add_func("sam9x75/otpc/corruption-bounds-and-reset",
                    test_otpc_corruption_bounds_and_reset);
     qtest_add_func("sam9x75/otpc/migration", test_otpc_migration);
+    qtest_add_func("sam9x75/otpc/migration-v2-state",
+                   test_otpc_migration_v2_state);
     qtest_add_func("sam9x75/gpbr/protection-and-retention",
                    test_gpbr_protection_and_retention);
     qtest_add_func("sam9x75/gpbr/tamper-clear",
