@@ -337,9 +337,14 @@ Support matrix
        PMECC/PMERRLOC control/status behavior.  The current upstream Linux
        ``sam9x7.dtsi`` describes only ``0x300`` bytes for that first resource
        and needs a separate correction before software can map the upper
-       banks.  The unmodified NAND AT91Bootstrap path was validated before
-       exact EBI decode was introduced and is pending a repeat to confirm its
-       CS2 and dedicated-data-path setup.
+       banks.  At QEMU commit ``94321686d9df``, the unmodified AT91Bootstrap
+       4.0.13 ``sam9x75_curiositynf_uboot_defconfig`` path was repeated through
+       the exact EBI decode.  It detected the ONFI device, selected timing mode
+       3, initialized 8-bit/512-byte PMECC, copied the configured 1 MiB image
+       from NAND offset ``0x40000`` into DDR and reached the unmodified U-Boot
+       prompt.  The ``-d unimp,guest_errors`` log was empty.  The seeded image
+       contained error-free data and erased OOB, so this validates the setup
+       and transfer path rather than BCH correction.
        Ready/busy timing and pin signaling, the additional redundant parameter
        pages, real PMECC generation/correction, complete bad-block/OOB behavior,
        unique-ID, Read Status Enhanced, cache, copyback, interleaved, two-plane,
