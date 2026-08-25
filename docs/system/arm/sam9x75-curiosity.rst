@@ -409,12 +409,18 @@ Support matrix
        maps and stalls tokens.  Direct-buffer and three-word linked-descriptor
        DMA implement IN prefetch/refill, OUT drain, 64 KiB counts, ZLP and
        short-packet completion, read-to-clear status, chaining, memory errors
-       and active migration.  DMA execution is synchronous, ``BURST_LCK`` has
-       no timing effect and ``INTDIS_DMA`` request suppression is not yet
-       modeled.  ``NB_TRANS`` high-bandwidth microframe behavior and
-       isochronous DATAX/MDATA termination, SOF/suspend/resume timing, a
-       host-facing USB cable backend and SAM-BA
-       remain.  ``UDPHS_CTRL.EN_UDPHS`` disconnects and blocks UHPHS
+       and active migration.  ``INTDIS_DMA`` suppresses DMA requests from
+       enabled local endpoint causes and resumes them when firmware clears or
+       disables the cause, changes FIFO state or resets the endpoint.  Endpoint
+       disable resets protocol metadata without erasing DPRAM.  Isochronous
+       endpoints ignore ``FORCESTALL``; an empty ordinary IN transaction has no
+       wire response, a negotiated high-speed ``NB_TRANS > 1`` IN transaction
+       supplies the documented default ZLP, and a full OUT queue consumes and
+       drops the transaction while recording ``ERR_FL_ISO``.  DMA execution is
+       synchronous and ``BURST_LCK`` has no timing effect.  Full ``NB_TRANS``
+       multi-transaction microframe scheduling, isochronous DATAX/MDATA
+       termination, SOF/suspend/resume timing, a host-facing USB cable backend
+       and SAM-BA remain.  ``UDPHS_CTRL.EN_UDPHS`` disconnects and blocks UHPHS
        high-speed Port A while UDPHS owns the shared UTMI transceiver,
        matching the hardware mux.  Gadget-bridge cable presence drives the
        board's active-high VBUS sense on PC8.  The controller, shared-port mux,

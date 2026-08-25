@@ -91,6 +91,7 @@ struct AT91UDPHSState {
 
     AT91UDPHSEndpoint endpoint[AT91_UDPHS_NUM_ENDPOINTS];
     AT91UDPHSDMAChannel dma[AT91_UDPHS_NUM_DMA_CHANNELS];
+    uint8_t dma_servicing;
 };
 
 struct AT91UDPHSGadgetState {

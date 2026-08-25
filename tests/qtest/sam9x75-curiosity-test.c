@@ -281,18 +281,22 @@
 #define UDPHS_EPTCFG_MAPPED     BIT(31)
 #define UDPHS_EPTCTL_ENABLE     BIT(0)
 #define UDPHS_EPTCTL_AUTO_VALID BIT(1)
+#define UDPHS_EPTCTL_INTDIS_DMA BIT(3)
 #define UDPHS_EPTCTL_DATAX_RX   BIT(6)
 #define UDPHS_EPTCTL_MDATA_RX   BIT(7)
 #define UDPHS_EPTCTL_RXRDY_IE   BIT(9)
 #define UDPHS_EPTCTL_TXCOMPLT_IE BIT(10)
 #define UDPHS_EPTCTL_TXRDY_IE   BIT(11)
 #define UDPHS_EPTCTL_RX_SETUP_IE BIT(12)
+#define UDPHS_EPTCTL_NAK_IN_IE  BIT(14)
 #define UDPHS_EPTCTL_BUSY_IE    BIT(18)
 #define UDPHS_EPTCTL_SHORT_IE   BIT(31)
+#define UDPHS_EPTSTA_FORCESTALL BIT(5)
 #define UDPHS_EPTSTA_RXRDY      BIT(9)
 #define UDPHS_EPTSTA_TXCOMPLT   BIT(10)
 #define UDPHS_EPTSTA_TXRDY      BIT(11)
 #define UDPHS_EPTSTA_RX_SETUP   BIT(12)
+#define UDPHS_EPTSTA_ERR_FL_ISO BIT(12)
 #define UDPHS_EPTSTA_NAK_IN     BIT(14)
 #define UDPHS_EPTSTA_NAK_OUT    BIT(15)
 #define UDPHS_EPTSTA_TOGGLE_MASK (3U << 6)
@@ -15023,6 +15027,23 @@ static void udphs_configure_endpoint(QTestState *qts, unsigned int ep,
                     UDPHS_EPTCTL_ENABLE | interrupts);
 }
 
+static void udphs_start_test_link(QTestState *qts, uint32_t hcca)
+{
+    pmc_configure_usb_host(qts);
+    pmc_write_pcr(qts, 23, PMC_PCR_EN);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_TST, 3);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_PULLD_DIS);
+    qtest_clock_step(qts, 1000000);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                              UHPFS_HC_RH_PORT(1)) & UHPFS_PORT_CCS);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_RH_PORT(1),
+                 UHPFS_PORT_PRS);
+    qtest_clock_step(qts, 2 * 1000000LL);
+    qtest_memset(qts, hcca, 0, 0x100);
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_HCCA, hcca);
+}
+
 static void test_udphs_registers_endpoints_clocks_and_irq(void)
 {
     static const uint8_t endpoint_banks[] = { 1, 2, 2, 3, 3, 3, 3 };
@@ -15346,10 +15367,12 @@ static void test_udphs_shared_port_a_mux(void)
     qtest_quit(qts);
 }
 
-static void udphs_ohci_control_token(QTestState *qts, uint32_t ed,
-                                     uint32_t td, uint32_t tail,
-                                     uint32_t buffer, unsigned int ep,
-                                     uint32_t td_flags, size_t length)
+static void udphs_ohci_start_control_token(QTestState *qts, uint32_t ed,
+                                           uint32_t td, uint32_t tail,
+                                           uint32_t buffer,
+                                           unsigned int ep,
+                                           uint32_t td_flags,
+                                           size_t length)
 {
     qtest_writel(qts, ed, (64U << 16) | (ep << 7));
     qtest_writel(qts, ed + 4, tail);
@@ -15365,13 +15388,334 @@ static void udphs_ohci_control_token(QTestState *qts, uint32_t ed,
                  UHPFS_CONTROL_OPERATIONAL | UHPFS_CONTROL_CLE);
     qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_COMMAND_STATUS,
                  UHPFS_COMMAND_CLF);
+}
+
+static void udphs_ohci_control_token(QTestState *qts, uint32_t ed,
+                                     uint32_t td, uint32_t tail,
+                                     uint32_t buffer, unsigned int ep,
+                                     uint32_t td_flags, size_t length)
+{
+    udphs_ohci_start_control_token(qts, ed, td, tail, buffer, ep,
+                                   td_flags, length);
     ohci_wait_for_ed(qts, ed, tail);
 }
+
+static void udphs_ohci_start_bulk_transfer(QTestState *qts, uint32_t ed,
+                                           uint32_t td, uint32_t tail,
+                                           uint32_t buffer,
+                                           unsigned int ep, bool in,
+                                           uint32_t td_flags,
+                                           size_t length);
+
+static void udphs_ohci_bulk_transfer_flags(QTestState *qts, uint32_t ed,
+                                           uint32_t td, uint32_t tail,
+                                           uint32_t buffer,
+                                           unsigned int ep, bool in,
+                                           uint32_t td_flags,
+                                           size_t length);
 
 static void udphs_ohci_bulk_transfer(QTestState *qts, uint32_t ed,
                                      uint32_t td, uint32_t tail,
                                      uint32_t buffer, unsigned int ep,
                                      bool in, size_t length);
+
+static void test_udphs_control_setup_interlock(void)
+{
+    const uint32_t hcca = SAM9X7_SRAM0_BASE;
+    const uint32_t ed = SAM9X7_SRAM0_BASE + 0x100;
+    const uint32_t td = SAM9X7_SRAM0_BASE + 0x120;
+    const uint32_t tail = SAM9X7_SRAM0_BASE + 0x130;
+    const uint32_t setup_buffer = SAM9X7_SRAM0_BASE + 0x180;
+    const uint32_t host_buffer = SAM9X7_SRAM0_BASE + 0x200;
+    const uint8_t first_setup[] = {
+        0xc0, 0x75, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
+    };
+    const uint8_t replacement_setup[] = {
+        0x40, 0x76, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
+    };
+    const uint8_t out_data[] = { 0x91, 0x75, 0xc0, 0xde };
+    const uint8_t untouched[] = { 0xa5, 0xa5, 0xa5, 0xa5 };
+    uint8_t observed[sizeof(first_setup)];
+    uint32_t status;
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-control-gadget,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+
+    udphs_start_test_link(qts, hcca);
+    udphs_configure_endpoint(qts, 1,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_BANKS(1), 0);
+
+    qtest_memwrite(qts, setup_buffer, first_setup, sizeof(first_setup));
+    udphs_ohci_control_token(qts, ed, td, tail, setup_buffer, 1,
+                             0xf2000000, sizeof(first_setup));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(1));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_RX_SETUP |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RX_SETUP |
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(first_setup)));
+
+    /* IN must NAK without consuming or replacing the pending SETUP. */
+    qtest_memset(qts, host_buffer, 0xa5, sizeof(untouched));
+    udphs_ohci_start_control_token(qts, ed, td, tail, host_buffer, 1,
+                                   0xf3100000, sizeof(untouched));
+    qtest_clock_step(qts, 3 * 1000000LL);
+    g_assert_cmphex(qtest_readl(qts, ed + 8) & ~3U, ==, td);
+    g_assert_cmphex(qtest_readl(qts, td) >> 28, ==, 0xf);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(1));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_RX_SETUP |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RX_SETUP |
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(first_setup)));
+    g_assert_true(status & UDPHS_EPTSTA_NAK_IN);
+    g_assert_false(status & (UDPHS_EPTSTA_TXCOMPLT |
+                             UDPHS_EPTSTA_RXRDY));
+    qtest_memread(qts, host_buffer, observed, sizeof(untouched));
+    g_assert_cmpmem(observed, sizeof(untouched), untouched,
+                    sizeof(untouched));
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE + (1U << 16),
+                  observed, sizeof(first_setup));
+    g_assert_cmpmem(observed, sizeof(first_setup), first_setup,
+                    sizeof(first_setup));
+
+    /* A new SETUP is accepted and atomically replaces the pending one. */
+    qtest_memwrite(qts, setup_buffer, replacement_setup,
+                   sizeof(replacement_setup));
+    udphs_ohci_control_token(qts, ed, td, tail, setup_buffer, 1,
+                             0xf2000000, sizeof(replacement_setup));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(1));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_RX_SETUP |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RX_SETUP |
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(replacement_setup)));
+    g_assert_false(status & (UDPHS_EPTSTA_NAK_IN |
+                             UDPHS_EPTSTA_NAK_OUT));
+
+    /* OUT remains pending until firmware clears RX_SETUP, then retries. */
+    qtest_memwrite(qts, host_buffer, out_data, sizeof(out_data));
+    udphs_ohci_start_control_token(qts, ed, td, tail, host_buffer, 1,
+                                   0xf3080000, sizeof(out_data));
+    qtest_clock_step(qts, 3 * 1000000LL);
+    g_assert_cmphex(qtest_readl(qts, ed + 8) & ~3U, ==, td);
+    g_assert_cmphex(qtest_readl(qts, td) >> 28, ==, 0xf);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(1));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_RX_SETUP |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RX_SETUP |
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(replacement_setup)));
+    g_assert_true(status & UDPHS_EPTSTA_NAK_OUT);
+    g_assert_false(status & UDPHS_EPTSTA_RXRDY);
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE + (1U << 16),
+                  observed, sizeof(replacement_setup));
+    g_assert_cmpmem(observed, sizeof(replacement_setup),
+                    replacement_setup, sizeof(replacement_setup));
+
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(1),
+                 UDPHS_EPTSTA_RX_SETUP);
+    ohci_wait_for_ed(qts, ed, tail);
+    g_assert_cmphex(qtest_readl(qts, td) >> 28, ==, 0);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(1));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_RX_SETUP |
+                              UDPHS_EPTSTA_RXRDY |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RXRDY |
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(out_data)));
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE + (1U << 16),
+                  observed, sizeof(out_data));
+    g_assert_cmpmem(observed, sizeof(out_data), out_data,
+                    sizeof(out_data));
+
+    qtest_quit(qts);
+}
+
+static void test_udphs_iso_error_paths(void)
+{
+    const uint32_t hcca = SAM9X7_SRAM0_BASE;
+    const uint32_t ed = SAM9X7_SRAM0_BASE + 0x100;
+    const uint32_t td = SAM9X7_SRAM0_BASE + 0x120;
+    const uint32_t tail = SAM9X7_SRAM0_BASE + 0x130;
+    const uint32_t host_buffer = SAM9X7_SRAM0_BASE + 0x200;
+    const uint8_t first_out[] = { 0x31, 0x32, 0x33, 0x34 };
+    const uint8_t second_out[] = { 0x41, 0x42, 0x43, 0x44 };
+    const uint8_t dropped_out[] = { 0xd1, 0xd2, 0xd3, 0xd4 };
+    const uint8_t untouched[] = { 0xa5, 0xa5, 0xa5, 0xa5 };
+    uint8_t observed[sizeof(first_out)];
+    uint32_t status;
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-iso-gadget,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+
+    udphs_start_test_link(qts, hcca);
+
+    /* EP1 maps the DPRAM allocation, but cannot run high-bandwidth ISO. */
+    udphs_configure_endpoint(qts, 1,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(1) |
+                             UDPHS_EPTCFG_BANKS(2) |
+                             UDPHS_EPTCFG_NB_TRANS(2), 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                              UDPHS_EPTCFG(1)) & UDPHS_EPTCFG_MAPPED);
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 1, true, 1);
+    g_assert_cmphex(qtest_readl(qts, td) >> 28, ==, 4);
+
+    /* A full ISO OUT queue consumes and drops instead of returning NAK. */
+    udphs_configure_endpoint(qts, 3,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_TYPE(1) |
+                             UDPHS_EPTCFG_BANKS(2) |
+                             UDPHS_EPTCFG_NB_TRANS(1), 0);
+    qtest_memwrite(qts, host_buffer, first_out, sizeof(first_out));
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 3, false,
+                             sizeof(first_out));
+    qtest_memwrite(qts, host_buffer, second_out, sizeof(second_out));
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 3, false,
+                             sizeof(second_out));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(3));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_RXRDY |
+                              UDPHS_EPTSTA_BUSY(3) |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RXRDY | UDPHS_EPTSTA_BUSY(2) |
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(first_out)));
+    g_assert_false(status & UDPHS_EPTSTA_ERR_FL_ISO);
+
+    qtest_memwrite(qts, host_buffer, dropped_out, sizeof(dropped_out));
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 3, false,
+                             sizeof(dropped_out));
+    g_assert_cmphex(qtest_readl(qts, td) >> 28, ==, 0);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(3));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_RXRDY |
+                              UDPHS_EPTSTA_BUSY(3) |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RXRDY | UDPHS_EPTSTA_BUSY(2) |
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(first_out)));
+    g_assert_true(status & UDPHS_EPTSTA_ERR_FL_ISO);
+    g_assert_false(status & UDPHS_EPTSTA_NAK_OUT);
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE + (3U << 16),
+                  observed, sizeof(first_out));
+    g_assert_cmpmem(observed, sizeof(first_out), first_out,
+                    sizeof(first_out));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(3),
+                 UDPHS_EPTSTA_RXRDY);
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE + (3U << 16),
+                  observed, sizeof(second_out));
+    g_assert_cmpmem(observed, sizeof(second_out), second_out,
+                    sizeof(second_out));
+
+    /* Ordinary full-speed ISO IN has no wire response and records error. */
+    udphs_configure_endpoint(qts, 4,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(1) |
+                             UDPHS_EPTCFG_BANKS(2) |
+                             UDPHS_EPTCFG_NB_TRANS(1), 0);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(4),
+                 UDPHS_EPTSTA_FORCESTALL);
+    g_assert_false(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                               UDPHS_EPTSTA(4)) &
+                   UDPHS_EPTSTA_FORCESTALL);
+    qtest_memset(qts, host_buffer, 0xa5, sizeof(observed));
+    udphs_ohci_bulk_transfer_flags(qts, ed, td, tail, host_buffer, 4,
+                                   true, 0xf2040000,
+                                   sizeof(observed));
+    g_assert_cmphex(qtest_readl(qts, td) >> 28, ==, 5);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(4));
+    g_assert_true(status & UDPHS_EPTSTA_ERR_FL_ISO);
+    g_assert_false(status & (UDPHS_EPTSTA_NAK_IN |
+                             UDPHS_EPTSTA_TXCOMPLT |
+                             UDPHS_EPTSTA_TXRDY));
+    qtest_memread(qts, host_buffer, observed, sizeof(observed));
+    g_assert_cmpmem(observed, sizeof(observed), untouched,
+                    sizeof(untouched));
+
+    qtest_quit(qts);
+}
+
+static void test_udphs_high_bandwidth_iso_zlp(void)
+{
+    const uint32_t qh = SAM9X7_SRAM0_BASE + 0x100;
+    const uint32_t qtd = SAM9X7_SRAM0_BASE + 0x180;
+    const uint32_t host_buffer = SAM9X7_SRAM0_BASE + 0x300;
+    const uint8_t untouched[] = { 0xa5, 0xa5, 0xa5, 0xa5 };
+    uint8_t observed[sizeof(untouched)];
+    uint32_t token;
+    unsigned int i;
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-hb-gadget,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+
+    pmc_configure_usb_host(qts);
+    pmc_write_pcr(qts, 23, PMC_PCR_EN);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_TST, 2);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_PULLD_DIS);
+    qtest_clock_step(qts, 1000000);
+
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_CONFIGFLAG, 1);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE +
+                              UHPHS_PORTSC(1)) & UHPHS_PORTSC_CONNECT);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_PORTSC(1),
+                 UHPHS_PORTSC_PRESET);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_PORTSC(1), 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE +
+                              UHPHS_PORTSC(1)) & UHPHS_PORTSC_PED);
+    g_assert_true(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                  UDPHS_INT_SPEED);
+
+    /* EP3 is the first endpoint that supports high-bandwidth ISO. */
+    udphs_configure_endpoint(qts, 3,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(1) |
+                             UDPHS_EPTCFG_BANKS(2) |
+                             UDPHS_EPTCFG_NB_TRANS(2), 0);
+
+    /* An empty high-bandwidth ISO IN transaction defaults to a DATA0 ZLP. */
+    qtest_memset(qts, qh, 0, 0x200);
+    qtest_memset(qts, host_buffer, 0xa5, sizeof(untouched));
+    qtest_writel(qts, qh, qh | BIT(1));
+    qtest_writel(qts, qh + 4,
+                 (64U << 16) | BIT(15) | BIT(14) |
+                 (2U << 12) | (3U << 8));
+    qtest_writel(qts, qh + 8, BIT(30));
+    qtest_writel(qts, qh + 16, qtd);
+    qtest_writel(qts, qh + 20, BIT(0));
+    qtest_writel(qts, qtd, BIT(0));
+    qtest_writel(qts, qtd + 4, BIT(0));
+    qtest_writel(qts, qtd + 8,
+                 (sizeof(untouched) << 16) | (3U << 10) |
+                 (1U << 8) | BIT(7));
+    qtest_writel(qts, qtd + 12, host_buffer);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_ASYNCLISTADDR, qh);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_USBCMD,
+                 UHPHS_USBCMD_RUN | UHPHS_USBCMD_ASE);
+
+    for (i = 0; i < 100; i++) {
+        token = qtest_readl(qts, qtd + 8);
+        if (!(token & BIT(7))) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+    token = qtest_readl(qts, qtd + 8);
+    g_assert_cmphex(token & 0xff, ==, 0);
+    g_assert_cmphex((token >> 16) & 0x7fff, ==, sizeof(untouched));
+    qtest_memread(qts, host_buffer, observed, sizeof(observed));
+    g_assert_cmpmem(observed, sizeof(observed), untouched,
+                    sizeof(untouched));
+    token = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(3));
+    g_assert_true(token & UDPHS_EPTSTA_ERR_FL_ISO);
+    g_assert_false(token & (UDPHS_EPTSTA_NAK_IN |
+                            UDPHS_EPTSTA_TXCOMPLT |
+                            UDPHS_EPTSTA_TXRDY));
+
+    qtest_quit(qts);
+}
 
 static void test_udphs_raw_ep0_and_pio_data_tokens(void)
 {
@@ -15879,10 +16223,12 @@ static void test_udphs_raw_ep0_and_pio_data_tokens(void)
     qtest_quit(qts);
 }
 
-static void udphs_ohci_bulk_transfer(QTestState *qts, uint32_t ed,
-                                     uint32_t td, uint32_t tail,
-                                     uint32_t buffer, unsigned int ep,
-                                     bool in, size_t length)
+static void udphs_ohci_start_bulk_transfer(QTestState *qts, uint32_t ed,
+                                           uint32_t td, uint32_t tail,
+                                           uint32_t buffer,
+                                           unsigned int ep, bool in,
+                                           uint32_t td_flags,
+                                           size_t length)
 {
     uint32_t direction = in ? 2 : 1;
 
@@ -15891,7 +16237,7 @@ static void udphs_ohci_bulk_transfer(QTestState *qts, uint32_t ed,
     qtest_writel(qts, ed + 4, tail);
     qtest_writel(qts, ed + 8, td);
     qtest_writel(qts, ed + 12, 0);
-    qtest_writel(qts, td, 0xf2000000);
+    qtest_writel(qts, td, td_flags);
     qtest_writel(qts, td + 4, length ? buffer : 0);
     qtest_writel(qts, td + 8, tail);
     qtest_writel(qts, td + 12, length ? buffer + length - 1 : 0);
@@ -15900,7 +16246,302 @@ static void udphs_ohci_bulk_transfer(QTestState *qts, uint32_t ed,
                  UHPFS_CONTROL_OPERATIONAL | UHPFS_CONTROL_BLE);
     qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_COMMAND_STATUS,
                  UHPFS_COMMAND_BLF);
+}
+
+static void udphs_ohci_bulk_transfer_flags(QTestState *qts, uint32_t ed,
+                                           uint32_t td, uint32_t tail,
+                                           uint32_t buffer,
+                                           unsigned int ep, bool in,
+                                           uint32_t td_flags,
+                                           size_t length)
+{
+    udphs_ohci_start_bulk_transfer(qts, ed, td, tail, buffer, ep, in,
+                                   td_flags, length);
     ohci_wait_for_ed(qts, ed, tail);
+}
+
+static void udphs_ohci_bulk_transfer(QTestState *qts, uint32_t ed,
+                                     uint32_t td, uint32_t tail,
+                                     uint32_t buffer, unsigned int ep,
+                                     bool in, size_t length)
+{
+    udphs_ohci_bulk_transfer_flags(qts, ed, td, tail, buffer, ep, in,
+                                   0xf2000000, length);
+}
+
+static void test_udphs_intdis_dma_gating(void)
+{
+    const uint32_t hcca = SAM9X7_SRAM0_BASE;
+    const uint32_t ed = SAM9X7_SRAM0_BASE + 0x100;
+    const uint32_t td = SAM9X7_SRAM0_BASE + 0x120;
+    const uint32_t tail = SAM9X7_SRAM0_BASE + 0x130;
+    const uint32_t host_buffer = SAM9X7_SRAM0_BASE + 0x200;
+    const uint32_t clear_source_buffer = SAM9X7_SRAM0_BASE + 0x800;
+    const uint32_t disable_ie_buffer = SAM9X7_SRAM0_BASE + 0x900;
+    const uint32_t clear_intdis_buffer = SAM9X7_SRAM0_BASE + 0xa00;
+    const uint32_t busy_buffer = SAM9X7_SRAM0_BASE + 0xb00;
+    const uint32_t reset_source_buffer = SAM9X7_SRAM0_BASE + 0xc00;
+    const uint32_t iso_out_buffer = SAM9X7_SRAM0_BASE + 0xd00;
+    const uint8_t clear_source_data[] = { 0xc1, 0xea, 0x12, 0x01 };
+    const uint8_t disable_ie_data[] = { 0xd1, 0x5a, 0xb1, 0xed };
+    const uint8_t clear_intdis_data[] = { 0x1d, 0x15, 0xab, 0x1e };
+    const uint8_t busy_first[] = { 0xb0, 0x00, 0x00, 0x01 };
+    const uint8_t busy_second[] = { 0xb0, 0x00, 0x00, 0x02 };
+    const uint8_t reset_source_data[] = { 0xe9, 0x70, 0x00, 0x06 };
+    const uint8_t iso_out_data[] = { 0x15, 0x00, 0x00, 0x04 };
+    uint8_t observed[sizeof(clear_source_data)];
+    uint32_t status;
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-intdis-gadget,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+
+    udphs_start_test_link(qts, hcca);
+
+    /* Clearing an enabled NAK source starts a previously blocked IN DMA. */
+    udphs_configure_endpoint(qts, 2,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2),
+                             UDPHS_EPTCTL_AUTO_VALID |
+                             UDPHS_EPTCTL_INTDIS_DMA |
+                             UDPHS_EPTCTL_NAK_IN_IE);
+    qtest_memset(qts, host_buffer, 0, sizeof(clear_source_data));
+    udphs_ohci_start_bulk_transfer(qts, ed, td, tail, host_buffer, 2,
+                                   true, 0xf2040000,
+                                   sizeof(clear_source_data));
+    qtest_clock_step(qts, 3 * 1000000LL);
+    g_assert_cmphex(qtest_readl(qts, ed + 8) & ~3U, ==, td);
+    g_assert_true(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                              UDPHS_EPTSTA(2)) & UDPHS_EPTSTA_NAK_IN);
+    qtest_memwrite(qts, clear_source_buffer, clear_source_data,
+                   sizeof(clear_source_data));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(2),
+                 clear_source_buffer);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(2),
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_BF_EN |
+                 UDPHS_DMA_END_BF_IE |
+                 UDPHS_DMA_BUFF_LENGTH(sizeof(clear_source_data)));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(2)), ==,
+                    clear_source_buffer);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_DMASTATUS(2));
+    g_assert_cmphex(status, ==,
+                    UDPHS_DMA_CHANN_ENB |
+                    UDPHS_DMA_BUFF_COUNT(sizeof(clear_source_data)));
+    g_assert_false(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                   UDPHS_INT_EPT(2));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(2),
+                 UDPHS_EPTSTA_NAK_IN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(2)), ==,
+                    clear_source_buffer + sizeof(clear_source_data));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMASTATUS(2)), ==,
+                    UDPHS_DMA_END_BF_ST);
+    ohci_wait_for_ed(qts, ed, tail);
+    qtest_memread(qts, host_buffer, observed, sizeof(clear_source_data));
+    g_assert_cmpmem(observed, sizeof(clear_source_data),
+                    clear_source_data, sizeof(clear_source_data));
+
+    /* Disabling the local cause also resumes DMA; global EPT IEN is clear. */
+    udphs_configure_endpoint(qts, 3,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2),
+                             UDPHS_EPTCTL_AUTO_VALID |
+                             UDPHS_EPTCTL_INTDIS_DMA |
+                             UDPHS_EPTCTL_TXRDY_IE);
+    qtest_memwrite(qts, disable_ie_buffer, disable_ie_data,
+                   sizeof(disable_ie_data));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(3),
+                 disable_ie_buffer);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(3),
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_BF_EN |
+                 UDPHS_DMA_END_BF_IE |
+                 UDPHS_DMA_BUFF_LENGTH(sizeof(disable_ie_data)));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(3)), ==,
+                    disable_ie_buffer);
+    g_assert_false(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                   UDPHS_INT_EPT(3));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCTLDIS(3),
+                 UDPHS_EPTCTL_TXRDY_IE);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(3)), ==,
+                    disable_ie_buffer + sizeof(disable_ie_data));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMASTATUS(3)), ==,
+                    UDPHS_DMA_END_BF_ST);
+    qtest_memset(qts, host_buffer, 0, sizeof(disable_ie_data));
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 3, true,
+                             sizeof(disable_ie_data));
+    qtest_memread(qts, host_buffer, observed, sizeof(disable_ie_data));
+    g_assert_cmpmem(observed, sizeof(disable_ie_data), disable_ie_data,
+                    sizeof(disable_ie_data));
+
+    /* Clearing INTDIS itself lets a pending OUT bank reach DMA. */
+    udphs_configure_endpoint(qts, 1,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2),
+                             UDPHS_EPTCTL_AUTO_VALID |
+                             UDPHS_EPTCTL_INTDIS_DMA |
+                             UDPHS_EPTCTL_RXRDY_IE);
+    qtest_memset(qts, clear_intdis_buffer, 0,
+                 sizeof(clear_intdis_data));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(1),
+                 clear_intdis_buffer);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(1),
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_BF_EN |
+                 UDPHS_DMA_END_BF_IE |
+                 UDPHS_DMA_BUFF_LENGTH(sizeof(clear_intdis_data)));
+    qtest_memwrite(qts, host_buffer, clear_intdis_data,
+                   sizeof(clear_intdis_data));
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 1, false,
+                             sizeof(clear_intdis_data));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(1)), ==,
+                    clear_intdis_buffer);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(1));
+    g_assert_cmphex(status & (UDPHS_EPTSTA_RXRDY |
+                              UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==,
+                    UDPHS_EPTSTA_RXRDY |
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(clear_intdis_data)));
+    g_assert_false(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                   UDPHS_INT_EPT(1));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCTLDIS(1),
+                 UDPHS_EPTCTL_INTDIS_DMA);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(1)), ==,
+                    clear_intdis_buffer + sizeof(clear_intdis_data));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMASTATUS(1)), ==,
+                    UDPHS_DMA_END_BF_ST);
+    qtest_memread(qts, clear_intdis_buffer, observed,
+                  sizeof(clear_intdis_data));
+    g_assert_cmpmem(observed, sizeof(clear_intdis_data),
+                    clear_intdis_data, sizeof(clear_intdis_data));
+
+    /* PIO AUTO_VALID deasserts BUSY and services the remaining OUT bank. */
+    udphs_configure_endpoint(qts, 5,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2),
+                             UDPHS_EPTCTL_AUTO_VALID |
+                             UDPHS_EPTCTL_INTDIS_DMA |
+                             UDPHS_EPTCTL_BUSY_IE);
+    qtest_memwrite(qts, host_buffer, busy_first, sizeof(busy_first));
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 5, false,
+                             sizeof(busy_first));
+    qtest_memwrite(qts, host_buffer, busy_second, sizeof(busy_second));
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 5, false,
+                             sizeof(busy_second));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(5));
+    g_assert_cmphex(status & UDPHS_EPTSTA_BUSY(3), ==,
+                    UDPHS_EPTSTA_BUSY(2));
+    qtest_memset(qts, busy_buffer, 0, sizeof(busy_second));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(5),
+                 busy_buffer);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(5),
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_BF_EN |
+                 UDPHS_DMA_END_BF_IE |
+                 UDPHS_DMA_BUFF_LENGTH(sizeof(busy_second)));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(5)), ==, busy_buffer);
+    g_assert_false(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                   UDPHS_INT_EPT(5));
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE + (5U << 16),
+                  observed, sizeof(busy_first));
+    g_assert_cmpmem(observed, sizeof(busy_first), busy_first,
+                    sizeof(busy_first));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(5)), ==,
+                    busy_buffer + sizeof(busy_second));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMASTATUS(5)), ==,
+                    UDPHS_DMA_END_BF_ST);
+    qtest_memread(qts, busy_buffer, observed, sizeof(busy_second));
+    g_assert_cmpmem(observed, sizeof(busy_second), busy_second,
+                    sizeof(busy_second));
+
+    /* ISO OUT bit 11 is a positive error source, not active-low TXRDY. */
+    udphs_configure_endpoint(qts, 4,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_TYPE(1) |
+                             UDPHS_EPTCFG_BANKS(2) |
+                             UDPHS_EPTCFG_NB_TRANS(1),
+                             UDPHS_EPTCTL_AUTO_VALID |
+                             UDPHS_EPTCTL_INTDIS_DMA |
+                             UDPHS_EPTCTL_TXRDY_IE);
+    qtest_memset(qts, iso_out_buffer, 0, sizeof(iso_out_data));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(4),
+                 iso_out_buffer);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(4),
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_BF_EN |
+                 UDPHS_DMA_END_BF_IE |
+                 UDPHS_DMA_BUFF_LENGTH(sizeof(iso_out_data)));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(4)), ==,
+                    iso_out_buffer);
+    qtest_memwrite(qts, host_buffer, iso_out_data, sizeof(iso_out_data));
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 4, false,
+                             sizeof(iso_out_data));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(4)), ==,
+                    iso_out_buffer + sizeof(iso_out_data));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMASTATUS(4)), ==,
+                    UDPHS_DMA_END_BF_ST);
+    g_assert_false(qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
+                   UDPHS_INT_EPT(4));
+    qtest_memread(qts, iso_out_buffer, observed, sizeof(iso_out_data));
+    g_assert_cmpmem(observed, sizeof(iso_out_data), iso_out_data,
+                    sizeof(iso_out_data));
+
+    /* EPTRST clears the blocking NAK and immediately reschedules IN DMA. */
+    udphs_configure_endpoint(qts, 6,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2),
+                             UDPHS_EPTCTL_AUTO_VALID |
+                             UDPHS_EPTCTL_INTDIS_DMA |
+                             UDPHS_EPTCTL_NAK_IN_IE);
+    qtest_memset(qts, host_buffer, 0, sizeof(reset_source_data));
+    udphs_ohci_start_bulk_transfer(qts, ed, td, tail, host_buffer, 6,
+                                   true, 0xf2040000,
+                                   sizeof(reset_source_data));
+    qtest_clock_step(qts, 3 * 1000000LL);
+    g_assert_cmphex(qtest_readl(qts, ed + 8) & ~3U, ==, td);
+    g_assert_true(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                              UDPHS_EPTSTA(6)) & UDPHS_EPTSTA_NAK_IN);
+    qtest_memwrite(qts, reset_source_buffer, reset_source_data,
+                   sizeof(reset_source_data));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(6),
+                 reset_source_buffer);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(6),
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_BF_EN |
+                 UDPHS_DMA_END_BF_IE |
+                 UDPHS_DMA_BUFF_LENGTH(sizeof(reset_source_data)));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(6)), ==,
+                    reset_source_buffer);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTRST, BIT(6));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(6)), ==,
+                    reset_source_buffer + sizeof(reset_source_data));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMASTATUS(6)), ==,
+                    UDPHS_DMA_END_BF_ST);
+    ohci_wait_for_ed(qts, ed, tail);
+    qtest_memread(qts, host_buffer, observed, sizeof(reset_source_data));
+    g_assert_cmpmem(observed, sizeof(reset_source_data), reset_source_data,
+                    sizeof(reset_source_data));
+
+    qtest_quit(qts);
 }
 
 static void test_udphs_dma_data_tokens(void)
@@ -16180,6 +16821,9 @@ static void test_udphs_migration(void)
     const uint8_t fifo_data[] = {
         0x6d, 0x69, 0x67, 0x72, 0x61, 0x74, 0x65,
     };
+    const uint8_t disabled_fifo_data[] = {
+        0xd1, 0x5a, 0xb1, 0xed, 0x75,
+    };
     uint8_t observed[sizeof(fifo_data)];
     const uint32_t endpoint_config = UDPHS_EPTCFG_SIZE(3) |
                                      UDPHS_EPTCFG_DIR_IN |
@@ -16242,6 +16886,34 @@ static void test_udphs_migration(void)
     qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(1),
                  UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_TR_EN |
                  UDPHS_DMA_END_TR_IE | UDPHS_DMA_BUFF_LENGTH(64));
+
+    /* Endpoint disable resets protocol metadata without erasing DPRAM. */
+    udphs_configure_endpoint(from, 5,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(2), 0);
+    qtest_memwrite(from, SAM9X7_UDPHS_FIFO_BASE + (5U << 16),
+                   disabled_fifo_data, sizeof(disabled_fifo_data));
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_EPTCTLDIS(5),
+                 UDPHS_EPTCTL_ENABLE);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTCTL(5)), ==, 0);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(5)), ==,
+                    UDPHS_EPTSTA_RESET);
+    qtest_memread(from, SAM9X7_UDPHS_FIFO_BASE + (5U << 16),
+                  observed, sizeof(disabled_fifo_data));
+    g_assert_cmpmem(observed, sizeof(disabled_fifo_data),
+                    disabled_fifo_data, sizeof(disabled_fifo_data));
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_EPTCTLENB(5),
+                 UDPHS_EPTCTL_ENABLE);
+    qtest_memread(from, SAM9X7_UDPHS_FIFO_BASE + (5U << 16),
+                  observed, sizeof(disabled_fifo_data));
+    g_assert_cmpmem(observed, sizeof(disabled_fifo_data),
+                    disabled_fifo_data, sizeof(disabled_fifo_data));
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_EPTCTLDIS(5),
+                 UDPHS_EPTCTL_ENABLE);
 
     /* Migrate a locally and globally enabled, unread DMA completion. */
     udphs_configure_endpoint(from, 6,
@@ -16306,6 +16978,21 @@ static void test_udphs_migration(void)
     g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE +
                                 UDPHS_DMASTATUS(1)), ==,
                     UDPHS_DMA_CHANN_ENB | UDPHS_DMA_BUFF_COUNT(64));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTCTL(5)), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(5)), ==,
+                    UDPHS_EPTSTA_RESET);
+    qtest_memread(to, SAM9X7_UDPHS_FIFO_BASE + (5U << 16),
+                  observed, sizeof(disabled_fifo_data));
+    g_assert_cmpmem(observed, sizeof(disabled_fifo_data),
+                    disabled_fifo_data, sizeof(disabled_fifo_data));
+    qtest_writel(to, SAM9X7_UDPHS_BASE + UDPHS_EPTCTLENB(5),
+                 UDPHS_EPTCTL_ENABLE);
+    qtest_memread(to, SAM9X7_UDPHS_FIFO_BASE + (5U << 16),
+                  observed, sizeof(disabled_fifo_data));
+    g_assert_cmpmem(observed, sizeof(disabled_fifo_data),
+                    disabled_fifo_data, sizeof(disabled_fifo_data));
     g_assert_true(qtest_readl(to, SAM9X7_UDPHS_BASE + UDPHS_INTSTA) &
                   UDPHS_INT_DMA(6));
     g_assert_true(qtest_readl(to, SAM9X7_PIOC_BASE + PIO_PDSR) & BIT(8));
@@ -17453,8 +18140,16 @@ int main(int argc, char **argv)
                    test_udphs_registers_endpoints_clocks_and_irq);
     qtest_add_func("sam9x75/udphs/shared-port-a-mux",
                    test_udphs_shared_port_a_mux);
+    qtest_add_func("sam9x75/udphs/control-setup-interlock",
+                   test_udphs_control_setup_interlock);
+    qtest_add_func("sam9x75/udphs/iso-error-paths",
+                   test_udphs_iso_error_paths);
+    qtest_add_func("sam9x75/udphs/high-bandwidth-iso-zlp",
+                   test_udphs_high_bandwidth_iso_zlp);
     qtest_add_func("sam9x75/udphs/raw-ep0-and-pio-data-tokens",
                    test_udphs_raw_ep0_and_pio_data_tokens);
+    qtest_add_func("sam9x75/udphs/intdis-dma-gating",
+                   test_udphs_intdis_dma_gating);
     qtest_add_func("sam9x75/udphs/dma-data-tokens",
                    test_udphs_dma_data_tokens);
     qtest_add_func("sam9x75/udphs/migration", test_udphs_migration);
