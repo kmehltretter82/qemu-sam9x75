@@ -1240,10 +1240,16 @@
 #define XDMAC_INT_RBEIS         BIT(4)
 #define XDMAC_INT_WBEIS         BIT(5)
 #define XDMAC_INT_ROIS          BIT(6)
+#define XDMAC_INT_MASK          (XDMAC_INT_BIS | XDMAC_INT_LIS | \
+                                 XDMAC_INT_DIS | XDMAC_INT_FIS | \
+                                 XDMAC_INT_RBEIS | XDMAC_INT_WBEIS | \
+                                 XDMAC_INT_ROIS)
 #define XDMAC_CNDC_NDE          BIT(0)
 #define XDMAC_CNDC_NDSUP        BIT(1)
 #define XDMAC_CNDC_NDDUP        BIT(2)
+#define XDMAC_CNDC_NDVIEW1      (1U << 3)
 #define XDMAC_CNDC_NDVIEW2      (2U << 3)
+#define XDMAC_CNDC_NDVIEW3      (3U << 3)
 #define XDMAC_MBR_UBC_NDE       BIT(24)
 #define XDMAC_MBR_UBC_NSEN      BIT(25)
 #define XDMAC_MBR_UBC_NDEN      BIT(26)
@@ -7522,7 +7528,9 @@ static void test_xdmac_p2m_flush_nonblocking_disable_order(void)
         cpu_to_le32(PMC_PCR_CMD | 20),
         cpu_to_le32(PMC_PCR_CMD | PMC_PCR_EN | 20),
     };
-    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    QTestState *qts = from;
     uint32_t value;
     unsigned int i;
 
@@ -7583,6 +7591,35 @@ static void test_xdmac_p2m_flush_nonblocking_disable_order(void)
      * read word and completes disable with DIS.
      */
     qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, channel_mask);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                  channel_mask);
+    g_assert_false(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GWS) &
+                   channel_mask);
+    value = qtest_readl(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC);
+    g_assert_true(value & XDMAC_CC_WRIP);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+    qts = to;
+
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                  channel_mask);
+    g_assert_false(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GWS) &
+                   channel_mask);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source + sizeof(commands));
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 2);
+    value = qtest_readl(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC);
+    g_assert_true(value & XDMAC_CC_WRIP);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CIS),
+                    ==, 0);
+
     pmc_write_pcr(qts, 20, PMC_PCR_EN);
     g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) &
                   channel_mask);
@@ -7590,10 +7627,7 @@ static void test_xdmac_p2m_flush_nonblocking_disable_order(void)
                                 SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
                     ==, 1);
     value = qtest_readl(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
-    g_assert_cmphex(value & (XDMAC_INT_BIS | XDMAC_INT_DIS |
-                             XDMAC_INT_FIS | XDMAC_INT_RBEIS |
-                             XDMAC_INT_WBEIS | XDMAC_INT_ROIS),
-                    ==, XDMAC_INT_FIS);
+    g_assert_cmphex(value & XDMAC_INT_MASK, ==, XDMAC_INT_FIS);
 
     /* The final, post-snapshot word drains only after FIS and then sets DIS. */
     pmc_write_pcr(qts, 20, PMC_PCR_EN);
@@ -7602,19 +7636,20 @@ static void test_xdmac_p2m_flush_nonblocking_disable_order(void)
                                 SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
                     ==, 0);
     value = qtest_readl(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
-    g_assert_cmphex(value & (XDMAC_INT_BIS | XDMAC_INT_DIS |
-                             XDMAC_INT_FIS | XDMAC_INT_RBEIS |
-                             XDMAC_INT_WBEIS | XDMAC_INT_ROIS),
-                    ==, XDMAC_INT_DIS);
+    g_assert_cmphex(value & XDMAC_INT_MASK, ==, XDMAC_INT_DIS);
 
-    qtest_quit(qts);
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
-static void test_xdmac_p2m_fifo_migration(void)
+static void test_xdmac_p2m_fifo_legacy_migration(void)
 {
     static const uint8_t payload[] = {
         0x81, 0x72, 0x63, 0x54, 0x45, 0x36, 0x27, 0x18,
     };
+    const char *source_env = g_getenv("QTEST_QEMU_BINARY_OLD") ?
+                             "QTEST_QEMU_BINARY_OLD" :
+                             "QTEST_QEMU_BINARY";
     const uint32_t source = SAM9X7_DDR_BASE + 0x12100;
     const uint32_t target = SAM9X7_DDR_BASE + 0x12200;
     const unsigned int index = 4;
@@ -7624,9 +7659,11 @@ static void test_xdmac_p2m_fifo_migration(void)
                             XDMAC_CC_MBSIZE_SIXTEEN |
                             XDMAC_CC_SWREQ | XDMAC_CC_SAM_INC |
                             XDMAC_CC_DAM_INC;
-    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *from = qtest_init_ext(source_env, SAM9X75_MACHINE,
+                                      NULL, true);
     QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
     uint8_t result[sizeof(payload)];
+    uint32_t value;
     unsigned int i;
 
     ebi_enable_ddr(from);
@@ -7645,6 +7682,7 @@ static void test_xdmac_p2m_fifo_migration(void)
         xdmac_waitl(from, XDMAC_GSWS, channel_mask, 0);
     }
 
+    /* An old binary supplies the version-2 FIFO stream when requested. */
     migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
     migrate_qmp(from, to, NULL, NULL, "{}");
     wait_for_migration_complete(from);
@@ -7655,16 +7693,27 @@ static void test_xdmac_p2m_fifo_migration(void)
     g_assert_true(qtest_readl(to, SAM9X7_XDMAC_BASE + XDMAC_GWS) &
                   channel_mask);
     g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source + 3);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CDA),
+                    ==, target);
+    g_assert_cmphex(qtest_readl(to,
                                 SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
                     ==, sizeof(payload));
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CC),
+                    ==, config | XDMAC_CC_INITD);
     qtest_memread(to, target, result, sizeof(result));
     for (i = 0; i < sizeof(result); i++) {
         g_assert_cmphex(result[i], ==, 0);
     }
 
     qtest_writel(to, SAM9X7_XDMAC_BASE + XDMAC_GSWF, channel_mask);
-    xdmac_waitl(to, channel + XDMAC_CIS,
-                XDMAC_INT_FIS, XDMAC_INT_FIS);
+    xdmac_waitl(to, channel + XDMAC_CDA, UINT32_MAX, target + 3);
+    value = qtest_readl(to,
+                        SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_cmphex(value & XDMAC_INT_MASK, ==, XDMAC_INT_FIS);
     g_assert_cmphex(qtest_readl(to,
                                 SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
                     ==, sizeof(payload) - 3);
@@ -7677,11 +7726,575 @@ static void test_xdmac_p2m_fifo_migration(void)
         xdmac_waitl(to, XDMAC_GSWS, channel_mask, 0);
     }
     xdmac_waitl(to, XDMAC_GS, channel_mask, 0);
+    value = qtest_readl(to,
+                        SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_cmphex(value & XDMAC_INT_MASK, ==, XDMAC_INT_BIS);
     qtest_memread(to, target, result, sizeof(result));
     g_assert_cmpmem(result, sizeof(result), payload, sizeof(payload));
 
     qtest_quit(to);
     qtest_quit(from);
+}
+
+static void test_xdmac_p2m_cbc_legacy_migration(void)
+{
+    static const uint8_t payload[] = { 0x93, 0x64, 0x35, 0x06 };
+    const char *source_env = g_getenv("QTEST_QEMU_BINARY_OLD") ?
+                             "QTEST_QEMU_BINARY_OLD" :
+                             "QTEST_QEMU_BINARY";
+    const uint32_t source = SAM9X7_DDR_BASE + 0x12300;
+    const uint32_t target = SAM9X7_DDR_BASE + 0x12400;
+    const unsigned int index = 5;
+    const uint32_t channel_mask = BIT(index);
+    const uint64_t channel = XDMAC_CHANNEL(index);
+    const uint32_t config = XDMAC_CC_TYPE_PER | XDMAC_CC_SWREQ |
+                            XDMAC_CC_SAM_INC | XDMAC_CC_DAM_INC;
+    QTestState *from = qtest_init_ext(source_env, SAM9X75_MACHINE,
+                                      NULL, true);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    uint8_t result[sizeof(payload)];
+    uint32_t value;
+    unsigned int i;
+
+    ebi_enable_ddr(from);
+    pmc_write_pcr(from, 20, PMC_PCR_EN);
+    qtest_memwrite(from, source, payload, sizeof(payload));
+    qtest_memset(from, target, 0, sizeof(payload));
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CSA, source);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CDA, target);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC, 2);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CBC, 1);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CC, config);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + XDMAC_GE, channel_mask);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+    xdmac_waitl(from, XDMAC_GSWS, channel_mask, 0);
+
+    g_assert_cmphex(qtest_readl(from,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source + 1);
+    g_assert_cmphex(qtest_readl(from,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CDA),
+                    ==, target + 1);
+    g_assert_cmphex(qtest_readl(from,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 1);
+    g_assert_cmphex(qtest_readl(from,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CBC),
+                    ==, 1);
+
+    /* A version-2 source supplies its unused FIFO shadow when requested. */
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_true(qtest_readl(to, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                  channel_mask);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source + 1);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CDA),
+                    ==, target + 1);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 1);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CBC),
+                    ==, 1);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CC),
+                    ==, config | XDMAC_CC_INITD);
+    qtest_memread(to, target, result, sizeof(result));
+    g_assert_cmphex(result[0], ==, payload[0]);
+    for (i = 1; i < sizeof(result); i++) {
+        g_assert_cmphex(result[i], ==, 0);
+    }
+
+    for (i = 1; i < sizeof(payload); i++) {
+        qtest_writel(to, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+        xdmac_waitl(to, XDMAC_GSWS, channel_mask, 0);
+    }
+    xdmac_waitl(to, XDMAC_GS, channel_mask, 0);
+    value = qtest_readl(to,
+                        SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_cmphex(value & XDMAC_INT_MASK, ==, XDMAC_INT_BIS);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CBC),
+                    ==, 0);
+    qtest_memread(to, target, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), payload, sizeof(payload));
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
+static void test_xdmac_p2m_descriptor_cbc_fifo_migration(void)
+{
+    static const uint8_t payload[] = { 0x81, 0x72, 0x63, 0x54 };
+    const uint32_t source = SAM9X7_DDR_BASE + 0x12100;
+    const uint32_t target = SAM9X7_DDR_BASE + 0x12200;
+    const uint32_t descriptor_address = SAM9X7_DDR_BASE + 0x12500;
+    const unsigned int index = 4;
+    const uint32_t channel_mask = BIT(index);
+    const uint64_t channel = XDMAC_CHANNEL(index);
+    const uint32_t config = XDMAC_CC_TYPE_PER |
+                            XDMAC_CC_MBSIZE_SIXTEEN |
+                            XDMAC_CC_SWREQ | XDMAC_CC_SAM_INC |
+                            XDMAC_CC_DAM_INC;
+    const uint32_t descriptor_control = XDMAC_CNDC_NDSUP |
+                                        XDMAC_CNDC_NDDUP |
+                                        XDMAC_CNDC_NDVIEW3;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    uint32_t descriptor[9] = { 0 };
+    uint8_t result[sizeof(payload)];
+    uint32_t value;
+    unsigned int i;
+
+    ebi_enable_ddr(from);
+    pmc_write_pcr(from, 20, PMC_PCR_EN);
+    qtest_memwrite(from, source, payload, sizeof(payload));
+    qtest_memset(from, target, 0, sizeof(payload));
+
+    descriptor[1] = cpu_to_le32(XDMAC_MBR_UBC_NSEN |
+                                XDMAC_MBR_UBC_NDEN |
+                                XDMAC_MBR_UBC_NDV3 | 2);
+    descriptor[2] = cpu_to_le32(source);
+    descriptor[3] = cpu_to_le32(target);
+    descriptor[4] = cpu_to_le32(config);
+    /* CBC.BLEN=1 makes this block contain two microblocks. */
+    descriptor[5] = cpu_to_le32(1);
+    qtest_memwrite(from, descriptor_address, descriptor, sizeof(descriptor));
+
+    /* Linux writes CC before enabling the first descriptor fetch. */
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CC, config);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CNDA,
+                 descriptor_address);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CNDC,
+                 XDMAC_CNDC_NDE | descriptor_control);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + XDMAC_GE, channel_mask);
+    xdmac_waitl(from, channel + XDMAC_CC,
+                XDMAC_CC_INITD, XDMAC_CC_INITD);
+
+    qtest_writel(from, SAM9X7_XDMAC_BASE + XDMAC_GWS, channel_mask);
+    for (i = 0; i < 2; i++) {
+        qtest_writel(from, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+        xdmac_waitl(from, XDMAC_GSWS, channel_mask, 0);
+    }
+
+    g_assert_true(qtest_readl(from, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                  channel_mask);
+    g_assert_true(qtest_readl(from, SAM9X7_XDMAC_BASE + XDMAC_GWS) &
+                  channel_mask);
+    g_assert_cmphex(qtest_readl(from,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source + 2);
+    g_assert_cmphex(qtest_readl(from,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CDA),
+                    ==, target);
+    g_assert_cmphex(qtest_readl(from,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 2);
+    g_assert_cmphex(qtest_readl(from,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CBC),
+                    ==, 1);
+    g_assert_cmphex(qtest_readl(from,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CNDA),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(from,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CNDC),
+                    ==, descriptor_control);
+    g_assert_cmphex(qtest_readl(from,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CC),
+                    ==, config | XDMAC_CC_INITD);
+    qtest_memread(from, target, result, sizeof(result));
+    for (i = 0; i < sizeof(result); i++) {
+        g_assert_cmphex(result[i], ==, 0);
+    }
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_true(qtest_readl(to, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                  channel_mask);
+    g_assert_true(qtest_readl(to, SAM9X7_XDMAC_BASE + XDMAC_GWS) &
+                  channel_mask);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source + 2);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CDA),
+                    ==, target);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 2);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CBC),
+                    ==, 1);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CNDA),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CNDC),
+                    ==, descriptor_control);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CC),
+                    ==, config | XDMAC_CC_INITD);
+    qtest_memread(to, target, result, sizeof(result));
+    for (i = 0; i < sizeof(result); i++) {
+        g_assert_cmphex(result[i], ==, 0);
+    }
+
+    /* Flushing the first microblock reloads CUBC without ending the block. */
+    qtest_writel(to, SAM9X7_XDMAC_BASE + XDMAC_GSWF, channel_mask);
+    xdmac_waitl(to, channel + XDMAC_CDA, UINT32_MAX, target + 2);
+    value = qtest_readl(to,
+                        SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_cmphex(value & XDMAC_INT_MASK, ==, XDMAC_INT_FIS);
+    g_assert_true(qtest_readl(to, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                  channel_mask);
+    g_assert_true(qtest_readl(to, SAM9X7_XDMAC_BASE + XDMAC_GWS) &
+                  channel_mask);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 2);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CBC),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CDA),
+                    ==, target + 2);
+    qtest_memread(to, target, result, sizeof(result));
+    g_assert_cmpmem(result, 2, payload, 2);
+    g_assert_cmphex(result[2], ==, 0);
+    g_assert_cmphex(result[3], ==, 0);
+
+    for (i = 2; i < sizeof(payload); i++) {
+        qtest_writel(to, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+        xdmac_waitl(to, XDMAC_GSWS, channel_mask, 0);
+    }
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source + sizeof(payload));
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 2);
+    g_assert_true(qtest_readl(to, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                  channel_mask);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CDA),
+                    ==, target + 2);
+    value = qtest_readl(to,
+                        SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_cmphex(value & XDMAC_INT_MASK, ==, 0);
+
+    /* Final FIS, BIS and LIS are sampled once because CIS is clear-on-read. */
+    qtest_writel(to, SAM9X7_XDMAC_BASE + XDMAC_GSWF, channel_mask);
+    xdmac_waitl(to, XDMAC_GS, channel_mask, 0);
+    value = qtest_readl(to,
+                        SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_cmphex(value & XDMAC_INT_MASK, ==,
+                    XDMAC_INT_FIS | XDMAC_INT_BIS | XDMAC_INT_LIS);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CBC),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(to,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CDA),
+                    ==, target + sizeof(payload));
+    qtest_memread(to, target, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), payload, sizeof(payload));
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
+static void test_xdmac_p2m_fifo_cyclic_ring_and_disable(void)
+{
+    static const uint8_t period0[] = { 0x12, 0x34 };
+    static const uint8_t period1[] = { 0x56, 0x78 };
+    const uint8_t replacement = 0xa5;
+    const uint32_t descriptor0_address = SAM9X7_DDR_BASE + 0x12600;
+    const uint32_t descriptor1_address = SAM9X7_DDR_BASE + 0x12620;
+    const uint32_t source0 = SAM9X7_DDR_BASE + 0x12700;
+    const uint32_t source1 = SAM9X7_DDR_BASE + 0x12710;
+    const uint32_t target0 = SAM9X7_DDR_BASE + 0x12800;
+    const uint32_t target1 = SAM9X7_DDR_BASE + 0x12810;
+    const unsigned int index = 6;
+    const uint32_t channel_mask = BIT(index);
+    const uint64_t channel = XDMAC_CHANNEL(index);
+    const uint32_t config = XDMAC_CC_TYPE_PER |
+                            XDMAC_CC_MBSIZE_SIXTEEN |
+                            XDMAC_CC_SWREQ | XDMAC_CC_SAM_INC |
+                            XDMAC_CC_DAM_INC;
+    const uint32_t descriptor_control = XDMAC_CNDC_NDE |
+                                        XDMAC_CNDC_NDSUP |
+                                        XDMAC_CNDC_NDDUP |
+                                        XDMAC_CNDC_NDVIEW1;
+    const uint32_t microblock_control = XDMAC_MBR_UBC_NDE |
+                                        XDMAC_MBR_UBC_NSEN |
+                                        XDMAC_MBR_UBC_NDEN |
+                                        XDMAC_MBR_UBC_NDV1 | 2;
+    uint32_t descriptor[4];
+    uint8_t result[2];
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+    unsigned int i;
+
+    ebi_enable_ddr(qts);
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    qtest_memwrite(qts, source0, period0, sizeof(period0));
+    qtest_memwrite(qts, source1, period1, sizeof(period1));
+    qtest_memset(qts, target0, 0, sizeof(result));
+    qtest_memset(qts, target1, 0, sizeof(result));
+
+    descriptor[0] = cpu_to_le32(descriptor1_address);
+    descriptor[1] = cpu_to_le32(microblock_control);
+    descriptor[2] = cpu_to_le32(source0);
+    descriptor[3] = cpu_to_le32(target0);
+    qtest_memwrite(qts, descriptor0_address, descriptor, sizeof(descriptor));
+
+    descriptor[0] = cpu_to_le32(descriptor0_address);
+    descriptor[1] = cpu_to_le32(microblock_control);
+    descriptor[2] = cpu_to_le32(source1);
+    descriptor[3] = cpu_to_le32(target1);
+    qtest_memwrite(qts, descriptor1_address, descriptor, sizeof(descriptor));
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC, config);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CNDA,
+                 descriptor0_address);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CNDC,
+                 descriptor_control);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, channel_mask);
+    xdmac_waitl(qts, channel + XDMAC_CC,
+                XDMAC_CC_INITD, XDMAC_CC_INITD);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CNDA),
+                    ==, descriptor1_address);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 2);
+
+    /* One request remains staged until an explicit partial-period flush. */
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GWS, channel_mask);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+    xdmac_waitl(qts, XDMAC_GSWS, channel_mask, 0);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source0 + 1);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CDA),
+                    ==, target0);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 2);
+    qtest_memread(qts, target0, result, sizeof(result));
+    g_assert_cmphex(result[0], ==, 0);
+    g_assert_cmphex(result[1], ==, 0);
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWF, channel_mask);
+    xdmac_waitl(qts, channel + XDMAC_CDA, UINT32_MAX, target0 + 1);
+    value = qtest_readl(qts,
+                        SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_cmphex(value & XDMAC_INT_MASK, ==, XDMAC_INT_FIS);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                  channel_mask);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 1);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CDA),
+                    ==, target0 + 1);
+    qtest_memread(qts, target0, result, sizeof(result));
+    g_assert_cmphex(result[0], ==, period0[0]);
+    g_assert_cmphex(result[1], ==, 0);
+
+    /* The second request ends period 0 and fetches period 1. */
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GRWR, channel_mask);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+    xdmac_waitl(qts, XDMAC_GSWS, channel_mask, 0);
+    xdmac_waitl(qts, channel + XDMAC_CNDA, UINT32_MAX,
+                descriptor0_address);
+    value = qtest_readl(qts,
+                        SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_cmphex(value & XDMAC_INT_MASK, ==, XDMAC_INT_BIS);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                  channel_mask);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source1);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CDA),
+                    ==, target1);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 2);
+    g_assert_true(qtest_readl(qts,
+                              SAM9X7_XDMAC_BASE + channel + XDMAC_CC) &
+                  XDMAC_CC_INITD);
+    qtest_memread(qts, target0, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), period0, sizeof(period0));
+
+    /* Two more requests complete period 1 and return to descriptor 0. */
+    for (i = 0; i < 2; i++) {
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+        xdmac_waitl(qts, XDMAC_GSWS, channel_mask, 0);
+    }
+    xdmac_waitl(qts, channel + XDMAC_CNDA, UINT32_MAX,
+                descriptor1_address);
+    value = qtest_readl(qts,
+                        SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_cmphex(value & XDMAC_INT_MASK, ==, XDMAC_INT_BIS);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                  channel_mask);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source0);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CDA),
+                    ==, target0);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 2);
+    qtest_memread(qts, target1, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), period1, sizeof(period1));
+
+    /* An idle cyclic ring does not advance without another source request. */
+    qtest_clock_step(qts, 100);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CNDA),
+                    ==, descriptor1_address);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source0);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CDA),
+                    ==, target0);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 2);
+
+    /* GD drains a staged byte, but does not complete the cyclic period. */
+    qtest_writeb(qts, source0, replacement);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GWS, channel_mask);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GSWR, channel_mask);
+    xdmac_waitl(qts, XDMAC_GSWS, channel_mask, 0);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source0 + 1);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CDA),
+                    ==, target0);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 2);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, channel_mask);
+    xdmac_waitl(qts, XDMAC_GS, channel_mask, 0);
+    g_assert_false(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GWS) &
+                   channel_mask);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CSA),
+                    ==, source0 + 1);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CDA),
+                    ==, target0 + 1);
+    g_assert_cmphex(qtest_readl(qts,
+                                SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                    ==, 1);
+    qtest_memread(qts, target0, result, sizeof(result));
+    g_assert_cmphex(result[0], ==, replacement);
+    g_assert_cmphex(result[1], ==, period0[1]);
+    value = qtest_readl(qts,
+                        SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_cmphex(value & XDMAC_INT_MASK, ==, XDMAC_INT_DIS);
+
+    qtest_quit(qts);
+}
+
+static void test_xdmac_p2m_fifo_held_request_ring_liveness(void)
+{
+    const uint32_t descriptor_address = SAM9X7_DDR_BASE + 0x12900;
+    const uint32_t source = SAM9X7_DDR_BASE + 0x12a00;
+    const uint32_t target = SAM9X7_DDR_BASE + 0x12b00;
+    const uint32_t transfer_beats = 8192;
+    const unsigned int index = 7;
+    const uint32_t channel_mask = BIT(index);
+    const uint64_t channel = XDMAC_CHANNEL(index);
+    const uint32_t config = XDMAC_CC_TYPE_PER | XDMAC_CC_PERID(7);
+    const uint32_t descriptor_control = XDMAC_CNDC_NDE |
+                                        XDMAC_CNDC_NDSUP |
+                                        XDMAC_CNDC_NDDUP |
+                                        XDMAC_CNDC_NDVIEW2;
+    uint32_t descriptor[5] = { 0 };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+
+    ebi_enable_ddr(qts);
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    qtest_writeb(qts, source, 0x5a);
+    qtest_writeb(qts, target, 0);
+
+    descriptor[0] = cpu_to_le32(descriptor_address);
+    descriptor[1] = cpu_to_le32(XDMAC_MBR_UBC_NDE |
+                                XDMAC_MBR_UBC_NSEN |
+                                XDMAC_MBR_UBC_NDEN |
+                                XDMAC_MBR_UBC_NDV2 | transfer_beats);
+    descriptor[2] = cpu_to_le32(source);
+    descriptor[3] = cpu_to_le32(target);
+    descriptor[4] = cpu_to_le32(config);
+    qtest_memwrite(qts, descriptor_address, descriptor, sizeof(descriptor));
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CNDA,
+                 descriptor_address);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CNDC,
+                 descriptor_control);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CIE,
+                 XDMAC_INT_BIS);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GIE, channel_mask);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, channel_mask);
+    xdmac_waitl(qts, channel + XDMAC_CC,
+                XDMAC_CC_INITD, XDMAC_CC_INITD);
+
+    /*
+     * One block needs more work than a BH invocation can perform.  A held
+     * hardware request must yield to MMIO and then make progress through idle
+     * retries instead of resetting descriptor-cycle detection at the global
+     * work limit.  GIS is not clear-on-read and can be polled safely; reaching
+     * BIS proves that more than one BH invocation ran.
+     */
+    qtest_set_irq_in(qts, "/machine/soc/xdmac", "request", 7, 1);
+    xdmac_waitl(qts, XDMAC_GIS, channel_mask, channel_mask);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                  channel_mask);
+    g_assert_cmphex(qtest_readb(qts, target), ==, 0x5a);
+
+    /*
+     * An ordinary external wake must stop and disable the yielded ring.
+     * The idle retries may have completed whole periods before the request
+     * was lowered, so discard their BIS before checking GD itself.
+     */
+    qtest_set_irq_in(qts, "/machine/soc/xdmac", "request", 7, 0);
+    value = qtest_readl(qts,
+                        SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_cmphex(value & XDMAC_INT_MASK, ==, XDMAC_INT_BIS);
+    g_assert_cmpuint(qtest_readl(qts,
+                                 SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC),
+                     >, 0);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, channel_mask);
+    xdmac_waitl(qts, XDMAC_GS, channel_mask, 0);
+    value = qtest_readl(qts,
+                        SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_cmphex(value & XDMAC_INT_MASK, ==, XDMAC_INT_DIS);
+
+    qtest_quit(qts);
 }
 
 static void aes_write_bytes(QTestState *qts, uint64_t offset,
@@ -18481,8 +19094,16 @@ int main(int argc, char **argv)
                    test_xdmac_p2m_fifo_suspend_flush_and_disable);
     qtest_add_func("sam9x75/xdmac/p2m-flush-nonblocking-disable-order",
                    test_xdmac_p2m_flush_nonblocking_disable_order);
-    qtest_add_func("sam9x75/xdmac/p2m-fifo-migration",
-                   test_xdmac_p2m_fifo_migration);
+    qtest_add_func("sam9x75/xdmac/p2m-fifo-legacy-migration",
+                   test_xdmac_p2m_fifo_legacy_migration);
+    qtest_add_func("sam9x75/xdmac/p2m-cbc-legacy-migration",
+                   test_xdmac_p2m_cbc_legacy_migration);
+    qtest_add_func("sam9x75/xdmac/p2m-descriptor-cbc-fifo-migration",
+                   test_xdmac_p2m_descriptor_cbc_fifo_migration);
+    qtest_add_func("sam9x75/xdmac/p2m-fifo-cyclic-ring-and-disable",
+                   test_xdmac_p2m_fifo_cyclic_ring_and_disable);
+    qtest_add_func("sam9x75/xdmac/p2m-fifo-held-request-ring-liveness",
+                   test_xdmac_p2m_fifo_held_request_ring_liveness);
     qtest_add_func("sam9x75/xdmac/flexcom-live-migration",
                    test_xdmac_flexcom_live_migration);
     qtest_add_func("sam9x75/aes/registers-ecb-irq-and-protection",

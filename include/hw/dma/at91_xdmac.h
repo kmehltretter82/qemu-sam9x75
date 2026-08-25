@@ -57,7 +57,7 @@ typedef struct AT91XDMACChannel {
     bool disable_pending;
 } AT91XDMACChannel;
 
-/* Version 2 migration shadow; version 1 keeps the channel layout unchanged. */
+/* Version 2 and later shadow; version 1 keeps the channel layout unchanged. */
 typedef struct AT91XDMACFifoMigrationState {
     uint32_t read_ubc;
     uint16_t fifo_head;
@@ -79,6 +79,7 @@ struct AT91XDMACState {
     qemu_irq irq;
     Clock *pclk;
     QEMUBH *bh;
+    QEMUBH *idle_bh;
 
     uint32_t gcfg;
     uint32_t gwac;

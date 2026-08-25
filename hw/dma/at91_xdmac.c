@@ -122,6 +122,18 @@
 /* Bound work so a continuously runnable channel cannot starve the others. */
 #define XDMAC_CHANNEL_WORK_QUANTUM 16
 
+typedef struct AT91XDMACCycleDetector {
+    uint32_t anchor;
+    uint32_t power;
+    uint32_t distance;
+    bool seen;
+} AT91XDMACCycleDetector;
+
+typedef struct AT91XDMACBHRunState {
+    AT91XDMACCycleDetector cycle[AT91_XDMAC_NUM_CHANNELS];
+    uint32_t yielded;
+} AT91XDMACBHRunState;
+
 static uint32_t at91_xdmac_global_status(AT91XDMACState *s)
 {
     uint32_t status = 0;
@@ -172,14 +184,7 @@ static bool at91_xdmac_is_source_peripheral(const AT91XDMACChannel *ch)
 
 static bool at91_xdmac_uses_p2m_fifo(const AT91XDMACChannel *ch)
 {
-    /*
-     * Start with the maintenance-critical, non-descriptor peripheral RX
-     * case.  Descriptor and multi-microblock transfers retain the original
-     * atomic data path until their descriptor-boundary FIFO state can be
-     * represented without changing existing behaviour.
-     */
     return ch->enabled && at91_xdmac_is_source_peripheral(ch) &&
-           !ch->descriptor_mode && !ch->cbc &&
            !(ch->cc & XDMAC_CC_MEMSET);
 }
 
@@ -320,6 +325,10 @@ static bool at91_xdmac_channel_runnable(AT91XDMACState *s,
         if (ch->disable_pending) {
             return true;
         }
+        /* Descriptor fetch and boundary state must honor an earlier pause. */
+        if (ch->needs_fetch) {
+            return !((s->grs | s->gws) & BIT(index));
+        }
         if (!ch->cubc) {
             return !((s->grs | s->gws) & BIT(index));
         }
@@ -383,6 +392,14 @@ static bool at91_xdmac_fetch_descriptor(AT91XDMACState *s,
     unsigned int count;
     unsigned int i;
     MemTxResult result;
+
+    /* Descriptor-controlled parameters may change only at an empty boundary. */
+    g_assert(!ch->fifo_count);
+    g_assert(!ch->write_burst_remaining);
+    g_assert(!ch->flush_remaining);
+    g_assert(!ch->flush_pending);
+    g_assert(!ch->disable_pending);
+    g_assert(!ch->request_remaining);
 
     switch (view) {
     case 0:
@@ -464,6 +481,28 @@ static void at91_xdmac_complete_block(AT91XDMACState *s,
         ch->enabled = false;
     }
     at91_xdmac_update_irq(s);
+}
+
+static void at91_xdmac_fifo_finish_microblock(AT91XDMACState *s,
+                                              AT91XDMACChannel *ch,
+                                              unsigned int index)
+{
+    g_assert(!ch->cubc);
+    g_assert(!ch->read_ubc);
+    g_assert(!ch->fifo_count);
+    g_assert(!ch->write_burst_remaining);
+    g_assert(!ch->flush_remaining);
+    g_assert(!ch->flush_pending);
+    g_assert(!ch->disable_pending);
+    g_assert(!ch->request_remaining);
+
+    if (ch->cbc) {
+        ch->cbc--;
+        ch->cubc = ch->initial_ublen;
+        ch->read_ubc = ch->initial_ublen;
+    } else {
+        at91_xdmac_complete_block(s, ch, index);
+    }
 }
 
 static void at91_xdmac_finish_disable(AT91XDMACState *s,
@@ -620,8 +659,7 @@ static bool at91_xdmac_fifo_write_one(AT91XDMACState *s,
     }
 
     if (microblock_end && !ch->disable_pending) {
-        g_assert(!ch->read_ubc && !ch->fifo_count);
-        at91_xdmac_complete_block(s, ch, index);
+        at91_xdmac_fifo_finish_microblock(s, ch, index);
     }
     return true;
 }
@@ -693,18 +731,55 @@ static bool at91_xdmac_transfer_one(AT91XDMACState *s,
     return true;
 }
 
+/*
+ * Detect a repeated address in a descriptor stream with Brent's algorithm.
+ * The detector is local to one BH invocation; it is a liveness fence, not
+ * guest-visible XDMAC state.
+ */
+static bool at91_xdmac_cycle_observe(AT91XDMACCycleDetector *cycle,
+                                     uint32_t address)
+{
+    if (!cycle->seen) {
+        cycle->anchor = address;
+        cycle->power = 1;
+        cycle->distance = 0;
+        cycle->seen = true;
+        return false;
+    }
+
+    cycle->distance++;
+    if (address == cycle->anchor) {
+        return true;
+    }
+    if (cycle->distance == cycle->power) {
+        cycle->anchor = address;
+        cycle->power <<= 1;
+        cycle->distance = 0;
+    }
+    return false;
+}
+
 static unsigned int at91_xdmac_run_channel(AT91XDMACState *s,
                                            unsigned int index,
-                                           unsigned int budget)
+                                           unsigned int budget,
+                                           AT91XDMACBHRunState *run_state)
 {
     AT91XDMACChannel *ch = &s->channel[index];
     unsigned int used = 0;
 
     while (budget && at91_xdmac_channel_runnable(s, index)) {
         if (ch->needs_fetch) {
-            at91_xdmac_fetch_descriptor(s, ch, index);
+            uint32_t descriptor = ch->cnda & ~3U;
+            bool repeated = at91_xdmac_cycle_observe(
+                &run_state->cycle[index], descriptor);
+            bool fetched = at91_xdmac_fetch_descriptor(s, ch, index);
+
             used++;
             budget--;
+            if (fetched && repeated && (ch->cndc & XDMAC_CNDC_NDE)) {
+                run_state->yielded |= BIT(index);
+                break;
+            }
             continue;
         }
 
@@ -724,7 +799,7 @@ static unsigned int at91_xdmac_run_channel(AT91XDMACState *s,
                 continue;
             }
             if (!ch->cubc) {
-                at91_xdmac_complete_block(s, ch, index);
+                at91_xdmac_fifo_finish_microblock(s, ch, index);
                 used++;
                 budget--;
                 continue;
@@ -800,9 +875,40 @@ static unsigned int at91_xdmac_run_channel(AT91XDMACState *s,
     return used;
 }
 
+static void at91_xdmac_reschedule_after_bh(AT91XDMACState *s,
+                                           uint32_t yielded, bool exhausted)
+{
+    bool idle_work = false;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(s->channel); i++) {
+        if (!at91_xdmac_channel_runnable(s, i)) {
+            continue;
+        }
+        if (!exhausted && !(yielded & BIT(i))) {
+            qemu_bh_schedule(s->bh);
+            return;
+        }
+        idle_work = true;
+    }
+
+    if (idle_work) {
+        /*
+         * A request-driven descriptor ring may be permanently runnable.  Do
+         * not enqueue the regular BH at zero virtual time after a ring was
+         * observed or the global work budget was exhausted.  A distinct idle
+         * BH avoids mixing BH_IDLE into the normal work BH, which could not
+         * then be promoted by an event.  Any regular wake independently queued
+         * during this callback is retained.
+         */
+        qemu_bh_schedule_idle(s->idle_bh);
+    }
+}
+
 static void at91_xdmac_bh(void *opaque)
 {
     AT91XDMACState *s = opaque;
+    AT91XDMACBHRunState run_state = { };
     unsigned int budget = XDMAC_BH_WORK_LIMIT;
     unsigned int i;
 
@@ -812,8 +918,13 @@ static void at91_xdmac_bh(void *opaque)
         for (i = 0; i < ARRAY_SIZE(s->channel) && budget; i++) {
             unsigned int channel_budget = MIN(budget,
                                                XDMAC_CHANNEL_WORK_QUANTUM);
-            unsigned int used = at91_xdmac_run_channel(s, i,
-                                                        channel_budget);
+            unsigned int used;
+
+            if (run_state.yielded & BIT(i)) {
+                continue;
+            }
+            used = at91_xdmac_run_channel(s, i, channel_budget,
+                                          &run_state);
 
             budget -= used;
             progress |= used != 0;
@@ -822,6 +933,13 @@ static void at91_xdmac_bh(void *opaque)
             break;
         }
     }
+    at91_xdmac_reschedule_after_bh(s, run_state.yielded, !budget);
+}
+
+static void at91_xdmac_idle_bh(void *opaque)
+{
+    AT91XDMACState *s = opaque;
+
     at91_xdmac_schedule(s);
 }
 
@@ -1220,6 +1338,9 @@ static void at91_xdmac_reset(DeviceState *dev)
     if (s->bh) {
         qemu_bh_cancel(s->bh);
     }
+    if (s->idle_bh) {
+        qemu_bh_cancel(s->idle_bh);
+    }
     s->gcfg = 0;
     s->gwac = 0;
     s->gim = 0;
@@ -1263,12 +1384,16 @@ static void at91_xdmac_realize(DeviceState *dev, Error **errp)
     address_space_init(&s->dma_as, s->dma_mr, TYPE_AT91_XDMAC "-dma");
     s->bh = qemu_bh_new_guarded(at91_xdmac_bh, s,
                                 &dev->mem_reentrancy_guard);
+    s->idle_bh = qemu_bh_new_guarded(at91_xdmac_idle_bh, s,
+                                     &dev->mem_reentrancy_guard);
 }
 
 static void at91_xdmac_unrealize(DeviceState *dev)
 {
     AT91XDMACState *s = AT91_XDMAC(dev);
 
+    qemu_bh_delete(s->idle_bh);
+    s->idle_bh = NULL;
     qemu_bh_delete(s->bh);
     s->bh = NULL;
     address_space_destroy(&s->dma_as);
@@ -1300,15 +1425,17 @@ static int at91_xdmac_pre_save(void *opaque)
     return 0;
 }
 
-static int at91_xdmac_restore_fifo(AT91XDMACState *s, unsigned int index)
+static int at91_xdmac_restore_fifo(AT91XDMACState *s, unsigned int index,
+                                   int version_id)
 {
     AT91XDMACChannel *ch = &s->channel[index];
     AT91XDMACFifoMigrationState *fifo = &s->fifo_migration[index];
     uint32_t chunk;
     unsigned int width;
 
-    if (!at91_xdmac_uses_p2m_fifo(ch)) {
-        /* Added FIFO state is not consumed by the legacy atomic path. */
+    if (!at91_xdmac_uses_p2m_fifo(ch) ||
+        (version_id == 2 && (ch->descriptor_mode || ch->cbc))) {
+        /* Version 2 used the legacy atomic path for descriptors and CBC. */
         ch->read_ubc = ch->cubc;
         at91_xdmac_fifo_reset(ch);
         return 0;
@@ -1319,6 +1446,7 @@ static int at91_xdmac_restore_fifo(AT91XDMACState *s, unsigned int index)
         fifo->fifo_count > AT91_XDMAC_FIFO_BYTES_PER_CHANNEL ||
         fifo->write_burst_remaining > fifo->fifo_count ||
         fifo->flush_remaining > fifo->fifo_count ||
+        ch->cubc > ch->initial_ublen ||
         fifo->read_ubc > ch->cubc ||
         (fifo->fifo_head + fifo->fifo_count) %
             AT91_XDMAC_FIFO_BYTES_PER_CHANNEL != fifo->fifo_tail ||
@@ -1330,7 +1458,11 @@ static int at91_xdmac_restore_fifo(AT91XDMACState *s, unsigned int index)
             fifo->write_burst_remaining < fifo->flush_remaining)) ||
           (s->gws & BIT(index)))) ||
         (ch->error_stalled &&
-         (fifo->write_burst_remaining || ch->request_remaining))) {
+         (fifo->write_burst_remaining || ch->request_remaining)) ||
+        (ch->needs_fetch &&
+         (fifo->fifo_count || fifo->write_burst_remaining ||
+          fifo->flush_remaining || fifo->flush_pending ||
+          fifo->disable_pending))) {
         return -EINVAL;
     }
 
@@ -1383,12 +1515,18 @@ static int at91_xdmac_post_load(void *opaque, int version_id)
     s->request_level &= XDMAC_REQUEST_MASK;
 
     for (i = 0; i < ARRAY_SIZE(s->channel); i++) {
+        AT91XDMACChannel *ch = &s->channel[i];
+
+        if (ch->needs_fetch &&
+            (!ch->descriptor_mode || ch->request_remaining)) {
+            return -EINVAL;
+        }
         if (version_id < 2) {
-            s->channel[i].read_ubc = s->channel[i].cubc;
-            at91_xdmac_fifo_reset(&s->channel[i]);
+            ch->read_ubc = ch->cubc;
+            at91_xdmac_fifo_reset(ch);
             continue;
         }
-        ret = at91_xdmac_restore_fifo(s, i);
+        ret = at91_xdmac_restore_fifo(s, i, version_id);
         if (ret) {
             return ret;
         }
@@ -1448,7 +1586,7 @@ static const VMStateDescription vmstate_at91_xdmac_fifo = {
 
 static const VMStateDescription vmstate_at91_xdmac = {
     .name = TYPE_AT91_XDMAC,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .pre_save = at91_xdmac_pre_save,
     .post_load = at91_xdmac_post_load,

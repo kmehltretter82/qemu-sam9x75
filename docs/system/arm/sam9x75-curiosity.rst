@@ -53,9 +53,11 @@ No QEMU-only device tree is used to conceal missing hardware.  Supported
 firmware and operating systems must consume the same DTB as the board.
 
 The machine has not been released or assigned a versioned migration ABI.
-Migration tests therefore cover same-build operation; development snapshots
-and migration streams are not guaranteed to load across commits.  Freeze or
-version the machine topology before making that compatibility promise.
+Migration tests primarily cover same-build operation.  Selected tests accept
+``QTEST_QEMU_BINARY_OLD`` for targeted compatibility checks, but development
+snapshots and migration streams are not generally guaranteed to load across
+commits.  Freeze or version the machine topology before making that
+compatibility promise.
 
 Support matrix
 --------------
@@ -225,24 +227,31 @@ Support matrix
        and memset, byte/halfword/word widths, address modes and 2D strides,
        software and external-request pacing, linked-list descriptor views and
        completion/error interrupts.  Register-level suspend, resume and disable
-       are present.  Simple non-descriptor, single-microblock
-       peripheral-to-memory channels use the GTYPE-reported 256-byte
-       per-channel FIFO.  MBSIZE staging, byte/halfword/word residue,
+       are present.  Peripheral-to-memory channels, including linked
+       descriptors, cyclic rings and blocks containing multiple microblocks,
+       use the GTYPE-reported 256-byte per-channel FIFO.  The next microblock
+       or descriptor is not started until the preceding microblock's staged
+       data has reached memory.  MBSIZE staging, byte/halfword/word residue,
        independent GRS/GWS read/write suspension, GSWF snapshot drain and FIS,
        graceful GD/DIS ordering, RDIP/WRIP state, write errors and live FIFO
        migration are covered.  Waiting source reads can proceed while a finite
        flush snapshot drains; GD preserves an already scheduled final flush
        write so FIS precedes DIS.  CUBC and the destination address advance
        only after a successful destination write.  Bounded per-channel work
-       prevents a continuously runnable channel from starving its peers.
-       Migration also exercises an enabled receive descriptor awaiting
-       FLEXCOM0 USART data and an enabled, suspended USART transmit channel
-       that resumes and completes after migration.  DBGU, all thirteen
-       FLEXCOM USART and TWI personalities, the six FLEXCOM0--5 SPI
+       and an idle reschedule fence prevent continuously requested cyclic
+       rings from starving QEMU's event loop or their peer channels.
+       Targeted ``QTEST_QEMU_BINARY_OLD`` runs exercise version-2 simple-FIFO
+       and mid-CBC state.  Same-build migration covers staged data in a view-3
+       receive descriptor with two microblocks, a scheduled flush followed by
+       graceful disable, an enabled receive descriptor awaiting FLEXCOM0 USART
+       data and an enabled, suspended USART transmit channel that resumes and
+       completes after migration.  Request-paced view-1 cyclic periods,
+       mid-period flush and disable, and a held-request ring longer than one
+       work budget are also covered.  DBGU, all thirteen FLEXCOM USART and TWI
+       personalities, the
+       six FLEXCOM0--5 SPI
        personalities, I2SMCC, Class-D, AES, SHA and TDES request lines are
-       wired.  Descriptor and multi-microblock channels still use the older
-       atomic path, so Linux cyclic receive does not yet have FIFO-aware
-       residue.  GWAC pool weighting and CNDC/descriptor QOS effects, the
+       wired.  GWAC pool weighting and CNDC/descriptor QOS effects, the
        remaining peripheral request lines, security policy, bus/burst and
        arbitration timing, and coherency effects remain missing.  DMA memory
        accesses are synchronous in QEMU, so positive RDIP/WRIP intervals can
@@ -665,8 +674,7 @@ phase green merely by avoiding it in the device tree.
    and protocol-specific USART behavior and enforce the documented
    per-instance USART feature matrix once unsupported-register readback has
    been measured; complete TWI
-   client/SMBus/PEC and high-speed/arbitration behavior; extend the XDMAC FIFO
-   path to descriptors, cyclic and multi-microblock transfers and complete
+   client/SMBus/PEC and high-speed/arbitration behavior; complete XDMAC
    GWAC/CNDC.QOS behavior;
    and wire every remaining documented XDMAC request.  Complete SSC, the
    remaining TCB modes and external timer pins, PWM and ADC so expansion-board
@@ -923,6 +931,21 @@ after ``GD``, and with enabled memory-to-peripheral and read/write-suspended
 memory-to-memory channels.  Read ``CIS`` to clear it between cases.  These cases
 distinguish an accepted empty flush from the documented ignored scopes and
 capture disable/flush ordering.
+
+Repeat the receive test with a terminal view-3 descriptor containing two
+two-byte microblocks (``UBC.UBLEN=2`` and ``CBC.BLEN=1``).  Pulse the peripheral
+request once per byte and hold writes suspended so each microblock can be
+observed in the FIFO.  Flush the first microblock, then record ``CSA``, ``CDA``,
+``CUBC``, ``CBC``, ``CNDA``, ``CNDC``, ``CC``, ``GS``, ``GWS`` and ``CIS``:
+``CUBC`` should reload only after both bytes reach SRAM, ``CBC`` should fall to
+zero, while ``BIS`` and ``LIS`` must remain clear.  Flush the second microblock
+and confirm that ``FIS``, ``BIS`` and ``LIS`` are reported only after its final
+destination write.  Finally, run a two-descriptor view-1 ring
+with two-byte periods, pulse requests through both periods, then issue ``GD``
+with one byte staged in the next period.  The staged byte should drain before
+``DIS`` without a spurious ``BIS`` or descriptor fetch.  These are benign SRAM
+and USART-loopback tests; keep caches disabled for the DMA buffers and read
+``CIS`` only once at each checkpoint because it is clear-on-read.
 
 For scheduler characterization, run equal long descriptor chains with ``QOS``
 values 0--3, vary ``GWAC.PW0`` through ``PW3``, and record completion order and
