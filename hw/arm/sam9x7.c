@@ -39,6 +39,13 @@ static const uint8_t sam9x7_flexcom_spi_num_cs[SAM9X7_NUM_FLEXCOM_SPI] = {
     2, 2, 2, 2, 4, 4,
 };
 
+enum {
+    SAM9X7_EBI_ASSIGN_DDR,
+    SAM9X7_EBI_ASSIGN_NAND_CS2,
+    SAM9X7_EBI_ASSIGN_NAND_D16,
+    SAM9X7_NUM_EBI_ASSIGNMENTS,
+};
+
 bool sam9x7_core_reset_requested(const SAM9X7State *s)
 {
     return s && s->core_reset_requested;
@@ -78,6 +85,34 @@ static void sam9x7_set_boot_remap(void *opaque, int n, int level)
     memory_region_set_enabled(&s->boot_sram_alias, level);
 }
 
+static void sam9x7_update_nand_assignment(SAM9X7State *s)
+{
+    memory_region_set_enabled(&s->nand_window,
+                              s->nand_cs2_assigned &&
+                              s->nand_d16_assigned);
+}
+
+static void sam9x7_set_ebi_assignment(void *opaque, int n, int level)
+{
+    SAM9X7State *s = SAM9X7(opaque);
+
+    switch (n) {
+    case SAM9X7_EBI_ASSIGN_DDR:
+        memory_region_set_enabled(&s->ddr_window, level);
+        break;
+    case SAM9X7_EBI_ASSIGN_NAND_CS2:
+        s->nand_cs2_assigned = level;
+        sam9x7_update_nand_assignment(s);
+        break;
+    case SAM9X7_EBI_ASSIGN_NAND_D16:
+        s->nand_d16_assigned = level;
+        sam9x7_update_nand_assignment(s);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
 static void sam9x7_realize(DeviceState *dev, Error **errp)
 {
     SAM9X7State *s = SAM9X7(dev);
@@ -108,6 +143,26 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
         error_setg(errp, TYPE_SAM9X7 " property 'memory' was not set");
         return;
     }
+    if (!s->ddr_memory) {
+        error_setg(errp, TYPE_SAM9X7 " property 'ddr-memory' was not set");
+        return;
+    }
+    if (memory_region_size(s->ddr_memory) != SAM9X7_DDR_SIZE) {
+        error_setg(errp, TYPE_SAM9X7
+                   " property 'ddr-memory' must be 256 MiB");
+        return;
+    }
+
+    /*
+     * Leave the decode window enabled until the first reset so direct-boot
+     * image loading can populate RAM.  SFR reset then drives the hardware or
+     * direct-Linux assignment state.
+     */
+    memory_region_init_alias(&s->ddr_window, OBJECT(s),
+                             "sam9x7.ddr-window", s->ddr_memory, 0,
+                             SAM9X7_DDR_SIZE);
+    memory_region_add_subregion(s->memory, SAM9X7_DDR_BASE,
+                                &s->ddr_window);
 
     if (!qdev_realize(DEVICE(&s->cpu), NULL, errp)) {
         return;
@@ -348,7 +403,25 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
         return;
     }
     mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->nand), 0);
-    memory_region_add_subregion(s->memory, SAM9X7_NAND_BASE, mr);
+    g_assert(memory_region_size(mr) == SAM9X7_NAND_SIZE);
+    memory_region_init_alias(&s->nand_window, OBJECT(s),
+                             "sam9x7.nand-window", mr, 0,
+                             SAM9X7_NAND_SIZE);
+    memory_region_set_enabled(&s->nand_window, false);
+    memory_region_add_subregion(s->memory, SAM9X7_NAND_BASE,
+                                &s->nand_window);
+    qdev_connect_gpio_out_named(DEVICE(&s->sfr), AT91_SFR_GPIO_EBI_CS,
+        AT91_SFR_EBI_CS1,
+        qdev_get_gpio_in_named(DEVICE(s), "ebi-assignment",
+                               SAM9X7_EBI_ASSIGN_DDR));
+    qdev_connect_gpio_out_named(DEVICE(&s->sfr), AT91_SFR_GPIO_EBI_CS,
+        AT91_SFR_EBI_CS2,
+        qdev_get_gpio_in_named(DEVICE(s), "ebi-assignment",
+                               SAM9X7_EBI_ASSIGN_NAND_CS2));
+    qdev_connect_gpio_out_named(DEVICE(&s->sfr),
+        AT91_SFR_GPIO_NFD0_ON_D16, 0,
+        qdev_get_gpio_in_named(DEVICE(s), "ebi-assignment",
+                               SAM9X7_EBI_ASSIGN_NAND_D16));
 
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->qspi), errp)) {
         return;
@@ -583,6 +656,9 @@ static void sam9x7_init(Object *obj)
                             SAM9X7_GPIO_RESET, 2);
     qdev_init_gpio_in_named(DEVICE(s), sam9x7_set_boot_remap,
                             "boot-remap", 1);
+    qdev_init_gpio_in_named(DEVICE(s), sam9x7_set_ebi_assignment,
+                            "ebi-assignment",
+                            SAM9X7_NUM_EBI_ASSIGNMENTS);
 
     object_initialize_child(obj, "cpu", &s->cpu,
                             ARM_CPU_TYPE_NAME("arm926"));
@@ -824,6 +900,8 @@ static void sam9x7_init(Object *obj)
 static const Property sam9x7_properties[] = {
     DEFINE_PROP_LINK("memory", SAM9X7State, memory, TYPE_MEMORY_REGION,
                      MemoryRegion *),
+    DEFINE_PROP_LINK("ddr-memory", SAM9X7State, ddr_memory,
+                     TYPE_MEMORY_REGION, MemoryRegion *),
 };
 
 static void sam9x7_class_init(ObjectClass *klass, const void *data)

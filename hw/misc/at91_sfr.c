@@ -6,6 +6,7 @@
 
 #include "qemu/osdep.h"
 
+#include "hw/arm/linux-boot-if.h"
 #include "hw/misc/at91_sfr.h"
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
@@ -38,6 +39,9 @@
 #define SFR_WPMR_KEY_MASK         0xffffff00
 #define SFR_WPMR_KEY              0x53465200
 
+#define SFR_CCFG_EBI_CS1A         BIT(1)
+#define SFR_CCFG_EBI_CS2A         BIT(2)
+#define SFR_CCFG_NFD0_ON_D16      BIT(24)
 #define SFR_CCFG_EBICSA_MASK      0x03100306
 #define SFR_OHCIICR_MASK          0x00000717
 #define SFR_OHCIICR_ARIE          BIT(4)
@@ -58,6 +62,23 @@ static bool at91_sfr_write_protected(AT91SFRState *s)
 static void at91_sfr_update_irq(AT91SFRState *s)
 {
     qemu_set_irq(s->irq, (s->ohciicr & SFR_OHCIICR_ARIE) && s->ohciisr);
+}
+
+static void at91_sfr_update_ebi_assignments(AT91SFRState *s)
+{
+    qemu_set_irq(s->ebi_cs[AT91_SFR_EBI_CS1],
+                 !!(s->ccfg_ebicsa & SFR_CCFG_EBI_CS1A));
+    qemu_set_irq(s->ebi_cs[AT91_SFR_EBI_CS2],
+                 !!(s->ccfg_ebicsa & SFR_CCFG_EBI_CS2A));
+    qemu_set_irq(s->nfd0_on_d16,
+                 !!(s->ccfg_ebicsa & SFR_CCFG_NFD0_ON_D16));
+}
+
+static void at91_sfr_linux_init(ARMLinuxBootIf *obj, bool secure_boot)
+{
+    AT91SFRState *s = AT91_SFR(obj);
+
+    s->direct_linux_boot = true;
 }
 
 static void at91_sfr_resume(void *opaque, int n, int level)
@@ -146,6 +167,7 @@ static void at91_sfr_write(void *opaque, hwaddr offset, uint64_t value,
     switch (offset) {
     case SFR_CCFG_EBICSA:
         s->ccfg_ebicsa = val & SFR_CCFG_EBICSA_MASK;
+        at91_sfr_update_ebi_assignments(s);
         break;
     case SFR_OHCIICR:
         s->ohciicr = val & SFR_OHCIICR_MASK;
@@ -228,6 +250,10 @@ static void at91_sfr_reset(DeviceState *dev)
     AT91SFRState *s = AT91_SFR(dev);
 
     s->ccfg_ebicsa = 0x00000300;
+    if (s->direct_linux_boot) {
+        /* Direct boot stands in for firmware which initialized the DDR. */
+        s->ccfg_ebicsa |= SFR_CCFG_EBI_CS1A;
+    }
     s->ohciicr = 0;
     s->ohciisr = 0;
     s->utmihstrim = 0x00044433;
@@ -245,6 +271,7 @@ static void at91_sfr_reset(DeviceState *dev)
     s->tsu_cfg = 0x00000043;
     s->remap_mp_ddr = 0;
     at91_sfr_update_irq(s);
+    at91_sfr_update_ebi_assignments(s);
 }
 
 static void at91_sfr_init(Object *obj)
@@ -257,6 +284,11 @@ static void at91_sfr_init(Object *obj)
     sysbus_init_mmio(sbd, &s->mmio);
     sysbus_init_irq(sbd, &s->irq);
     qdev_init_gpio_in_named(DEVICE(obj), at91_sfr_resume, "resume", 3);
+    qdev_init_gpio_out_named(DEVICE(obj), s->ebi_cs,
+                             AT91_SFR_GPIO_EBI_CS,
+                             AT91_SFR_NUM_EBI_CS);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->nfd0_on_d16,
+                             AT91_SFR_GPIO_NFD0_ON_D16, 1);
 }
 
 static int at91_sfr_post_load(void *opaque, int version_id)
@@ -264,6 +296,7 @@ static int at91_sfr_post_load(void *opaque, int version_id)
     AT91SFRState *s = AT91_SFR(opaque);
 
     at91_sfr_update_irq(s);
+    at91_sfr_update_ebi_assignments(s);
     return 0;
 }
 
@@ -297,10 +330,12 @@ static const VMStateDescription at91_sfr_vmstate = {
 static void at91_sfr_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ARMLinuxBootIfClass *albifc = ARM_LINUX_BOOT_IF_CLASS(klass);
 
     dc->desc = "Microchip SAM9X7 special function registers";
     dc->vmsd = &at91_sfr_vmstate;
     device_class_set_legacy_reset(dc, at91_sfr_reset);
+    albifc->arm_linux_init = at91_sfr_linux_init;
 }
 
 static const TypeInfo at91_sfr_info = {
@@ -309,6 +344,10 @@ static const TypeInfo at91_sfr_info = {
     .instance_size = sizeof(AT91SFRState),
     .instance_init = at91_sfr_init,
     .class_init = at91_sfr_class_init,
+    .interfaces = (const InterfaceInfo[]) {
+        { TYPE_ARM_LINUX_BOOT_IF },
+        { },
+    },
 };
 
 static void at91_sfr_register_types(void)

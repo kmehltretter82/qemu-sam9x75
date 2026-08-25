@@ -21,7 +21,7 @@
 #include "qemu/module.h"
 #include "system/block-backend.h"
 
-#define AT91_NAND_MMIO_SIZE     0x00800000
+#define AT91_NAND_MMIO_SIZE     0x10000000
 #define AT91_NAND_ALE           BIT(21)
 #define AT91_NAND_CLE           BIT(22)
 

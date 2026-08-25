@@ -6,6 +6,7 @@
 
 #include "qemu/osdep.h"
 
+#include "elf.h"
 #include "libqtest.h"
 #include "migration/migration-qmp.h"
 #include "qemu/bswap.h"
@@ -22,6 +23,8 @@
 #define SAM9X7_SRAM1_BASE       0x00400000
 #define SAM9X7_DDR_BASE         0x20000000
 #define SAM9X7_NAND_BASE        0x30000000
+#define SAM9X7_NAND_SIZE        0x10000000
+#define SAM9X7_NAND_SLICE_SIZE  0x00800000
 #define SAM9X7_QSPI_MEM_BASE    0x60000000
 #define SAM9X7_SDMMC0_BASE      0x80000000
 #define SAM9X7_SDMMC1_BASE      0x90000000
@@ -807,8 +810,13 @@
 #define SFR_CAL1                0x0b4
 #define SFR_WPMR                0x0e4
 #define SFR_PUFWORUCR0          0x214
+#define SFR_REMAP_MP_DDR        0x260
 
 #define SFR_OHCIICR_ARIE        BIT(4)
+#define SFR_CCFG_EBI_CS1A       BIT(1)
+#define SFR_CCFG_EBI_CS2A       BIT(2)
+#define SFR_CCFG_NFD0_ON_D16    BIT(24)
+#define SFR_CCFG_DDR_MP_EN      BIT(25)
 #define SFR_WPMR_WPEN           BIT(0)
 #define SFR_WPMR_KEY            0x53465200
 
@@ -1426,6 +1434,39 @@ static uint32_t dbgu_wait_status(QTestState *qts, uint32_t mask)
             mask, status);
 }
 
+static uint32_t ebi_read_assignments(QTestState *qts)
+{
+    return qtest_readl(qts, SAM9X7_SFR_BASE + SFR_CCFG_EBICSA);
+}
+
+static void ebi_update_assignments(QTestState *qts, uint32_t clear,
+                                   uint32_t set)
+{
+    uint32_t value = ebi_read_assignments(qts);
+
+    value &= ~clear;
+    value |= set;
+    qtest_writel(qts, SAM9X7_SFR_BASE + SFR_CCFG_EBICSA, value);
+}
+
+static void ebi_enable_ddr(QTestState *qts)
+{
+    ebi_update_assignments(qts, 0, SFR_CCFG_EBI_CS1A);
+}
+
+static void ebi_enable_nand(QTestState *qts)
+{
+    ebi_update_assignments(qts, 0,
+                           SFR_CCFG_EBI_CS2A | SFR_CCFG_NFD0_ON_D16);
+}
+
+static void ebi_enable_ddr_and_nand(QTestState *qts)
+{
+    ebi_update_assignments(qts, 0,
+                           SFR_CCFG_EBI_CS1A | SFR_CCFG_EBI_CS2A |
+                           SFR_CCFG_NFD0_ON_D16);
+}
+
 static void test_memory_and_identification(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -1441,6 +1482,7 @@ static void test_memory_and_identification(void)
     qtest_writel(qts, SAM9X7_SRAM1_BASE, 0x0f0e0d0c);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM1_BASE), ==, 0x0f0e0d0c);
 
+    ebi_enable_ddr(qts);
     qtest_writel(qts, SAM9X7_DDR_BASE, 0xc001d00d);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_DDR_BASE), ==, 0xc001d00d);
 
@@ -1720,6 +1762,158 @@ static void test_rom_cpu_entry(void)
     g_assert_cmpint(WEXITSTATUS(wait_status), ==, 0);
 
     unlink(rom_path);
+}
+
+static void test_direct_linux_ddr_assignment(void)
+{
+    static const uint8_t check_ccfg_and_exit[] = {
+        0x1c, 0x00, 0x9f, 0xe5, /* ldr r0, [pc, #28] */
+        0x00, 0x00, 0x90, 0xe5, /* ldr r0, [r0] */
+        0x18, 0x10, 0x9f, 0xe5, /* ldr r1, [pc, #24] */
+        0x01, 0x00, 0x50, 0xe1, /* cmp r0, r1 */
+        0xfe, 0xff, 0xff, 0x1a, /* bne . */
+        0x18, 0x00, 0xa0, 0xe3, /* mov r0, #SYS_EXIT */
+        0x0c, 0x10, 0x9f, 0xe5, /* ldr r1, [pc, #12] */
+        0x56, 0x34, 0x12, 0xef, /* svc 0x123456 */
+        0xfe, 0xff, 0xff, 0xea, /* b . */
+        0x04, 0x00, 0x05, 0xf8, /* SFR_CCFG_EBICSA */
+        0x02, 0x03, 0x00, 0x00, /* reset value plus CS1A */
+        0x26, 0x00, 0x02, 0x00, /* ADP_Stopped_ApplicationExit */
+    };
+    g_autofree char *kernel_path = NULL;
+    const char *qemu = qtest_qemu_binary(NULL);
+    GError *error = NULL;
+    gchar *argv[] = {
+        (gchar *)qemu,
+        (gchar *)"-machine", (gchar *)"sam9x75-curiosity",
+        (gchar *)"-kernel", kernel_path,
+        (gchar *)"-display", (gchar *)"none",
+        (gchar *)"-serial", (gchar *)"none",
+        (gchar *)"-monitor", (gchar *)"none",
+        (gchar *)"-nic", (gchar *)"none",
+        (gchar *)"-run-with", (gchar *)"exit-with-parent=on",
+        (gchar *)"-semihosting-config",
+        (gchar *)"enable=on,target=native",
+        NULL,
+    };
+    int wait_status;
+    int fd;
+    int ret;
+
+    if (!g_test_subprocess()) {
+        g_test_trap_subprocess(NULL, 5 * G_USEC_PER_SEC, 0);
+        g_test_trap_assert_passed();
+        return;
+    }
+
+    fd = g_file_open_tmp("sam9x75-linux-entry-XXXXXX", &kernel_path,
+                         &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = pwrite(fd, check_ccfg_and_exit, sizeof(check_ccfg_and_exit), 0);
+    g_assert_cmpint(ret, ==, sizeof(check_ccfg_and_exit));
+    close(fd);
+
+    argv[4] = kernel_path;
+    g_assert_true(g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
+                               NULL, NULL, NULL, NULL, &wait_status,
+                               &error));
+    g_assert_no_error(error);
+    g_assert_true(WIFEXITED(wait_status));
+    g_assert_cmpint(WEXITSTATUS(wait_status), ==, 0);
+
+    unlink(kernel_path);
+}
+
+static void test_firmware_elf_true_reset_assignment(void)
+{
+    static const uint8_t check_ccfg_and_exit[] = {
+        0x1c, 0x00, 0x9f, 0xe5, /* ldr r0, [pc, #28] */
+        0x00, 0x00, 0x90, 0xe5, /* ldr r0, [r0] */
+        0x18, 0x10, 0x9f, 0xe5, /* ldr r1, [pc, #24] */
+        0x01, 0x00, 0x50, 0xe1, /* cmp r0, r1 */
+        0xfe, 0xff, 0xff, 0x1a, /* bne . */
+        0x18, 0x00, 0xa0, 0xe3, /* mov r0, #SYS_EXIT */
+        0x0c, 0x10, 0x9f, 0xe5, /* ldr r1, [pc, #12] */
+        0x56, 0x34, 0x12, 0xef, /* svc 0x123456 */
+        0xfe, 0xff, 0xff, 0xea, /* b . */
+        0x04, 0x00, 0x05, 0xf8, /* SFR_CCFG_EBICSA */
+        0x00, 0x03, 0x00, 0x00, /* true hardware reset value */
+        0x26, 0x00, 0x02, 0x00, /* ADP_Stopped_ApplicationExit */
+    };
+    const off_t payload_offset = 0x100;
+    g_autofree char *firmware_path = NULL;
+    const char *qemu = qtest_qemu_binary(NULL);
+    Elf32_Ehdr ehdr = { 0 };
+    Elf32_Phdr phdr = { 0 };
+    GError *error = NULL;
+    gchar *argv[] = {
+        (gchar *)qemu,
+        (gchar *)"-machine", (gchar *)"sam9x75-curiosity",
+        (gchar *)"-kernel", firmware_path,
+        (gchar *)"-display", (gchar *)"none",
+        (gchar *)"-serial", (gchar *)"none",
+        (gchar *)"-monitor", (gchar *)"none",
+        (gchar *)"-nic", (gchar *)"none",
+        (gchar *)"-run-with", (gchar *)"exit-with-parent=on",
+        (gchar *)"-semihosting-config",
+        (gchar *)"enable=on,target=native",
+        NULL,
+    };
+    int wait_status;
+    int fd;
+    int ret;
+
+    if (!g_test_subprocess()) {
+        g_test_trap_subprocess(NULL, 5 * G_USEC_PER_SEC, 0);
+        g_test_trap_assert_passed();
+        return;
+    }
+
+    memcpy(ehdr.e_ident, ELFMAG, SELFMAG);
+    ehdr.e_ident[EI_CLASS] = ELFCLASS32;
+    ehdr.e_ident[EI_DATA] = ELFDATA2LSB;
+    ehdr.e_ident[EI_VERSION] = EV_CURRENT;
+    ehdr.e_type = cpu_to_le16(ET_EXEC);
+    ehdr.e_machine = cpu_to_le16(EM_ARM);
+    ehdr.e_version = cpu_to_le32(EV_CURRENT);
+    ehdr.e_entry = cpu_to_le32(SAM9X7_SRAM0_BASE);
+    ehdr.e_phoff = cpu_to_le32(sizeof(ehdr));
+    ehdr.e_ehsize = cpu_to_le16(sizeof(ehdr));
+    ehdr.e_phentsize = cpu_to_le16(sizeof(phdr));
+    ehdr.e_phnum = cpu_to_le16(1);
+
+    phdr.p_type = cpu_to_le32(PT_LOAD);
+    phdr.p_offset = cpu_to_le32(payload_offset);
+    phdr.p_vaddr = cpu_to_le32(SAM9X7_SRAM0_BASE);
+    phdr.p_paddr = cpu_to_le32(SAM9X7_SRAM0_BASE);
+    phdr.p_filesz = cpu_to_le32(sizeof(check_ccfg_and_exit));
+    phdr.p_memsz = cpu_to_le32(sizeof(check_ccfg_and_exit));
+    phdr.p_flags = cpu_to_le32(PF_R | PF_X);
+    phdr.p_align = cpu_to_le32(4);
+
+    fd = g_file_open_tmp("sam9x75-firmware-entry-XXXXXX", &firmware_path,
+                         &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = pwrite(fd, &ehdr, sizeof(ehdr), 0);
+    g_assert_cmpint(ret, ==, sizeof(ehdr));
+    ret = pwrite(fd, &phdr, sizeof(phdr), sizeof(ehdr));
+    g_assert_cmpint(ret, ==, sizeof(phdr));
+    ret = pwrite(fd, check_ccfg_and_exit, sizeof(check_ccfg_and_exit),
+                 payload_offset);
+    g_assert_cmpint(ret, ==, sizeof(check_ccfg_and_exit));
+    close(fd);
+
+    argv[4] = firmware_path;
+    g_assert_true(g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
+                               NULL, NULL, NULL, NULL, &wait_status,
+                               &error));
+    g_assert_no_error(error);
+    g_assert_true(WIFEXITED(wait_status));
+    g_assert_cmpint(WEXITSTATUS(wait_status), ==, 0);
+
+    unlink(firmware_path);
 }
 
 static void assert_rom_image_size_rejected(off_t size)
@@ -3286,6 +3480,7 @@ static void test_flexcom_spi_instance_capabilities(void)
     QDict *response;
     unsigned int i;
 
+    ebi_enable_ddr(qts);
     for (i = 0; i < ARRAY_SIZE(num_cs); i++) {
         g_autofree char *path = g_strdup_printf("/machine/soc/spi[%u]", i);
         unsigned int cs;
@@ -4041,6 +4236,7 @@ static void test_gem_registers_mdio_dma_and_irqs(void)
         SAM9X75_MACHINE " -nic user,mac=02:00:00:09:75:01");
     unsigned int q;
 
+    ebi_enable_ddr(qts);
     g_assert_true(qtest_qom_get_bool(qts, "/machine", "ethernet-25mhz"));
     g_assert_true(qtest_qom_get_bool(qts, "/machine/soc/gmac",
                                      "phy-clocked"));
@@ -4129,6 +4325,7 @@ static void test_board_ethernet_clock_jumper(void)
                      " -nic user,mac=02:00:00:09:75:01");
 #endif
 
+    ebi_enable_ddr(qts);
     g_assert_false(qtest_qom_get_bool(qts, "/machine",
                                       "ethernet-25mhz"));
     g_assert_false(qtest_qom_get_bool(qts, "/machine/soc/gmac",
@@ -4775,6 +4972,7 @@ static void test_flexcom_twi_xdmac_requests_and_mode_gating(void)
     uint8_t rx_values[sizeof(tx_values)] = { 0 };
     unsigned int i;
 
+    ebi_enable_ddr(qts);
     pmc_write_pcr(qts, 20, PMC_PCR_EN);
     pmc_write_pcr(qts, 9, PMC_PCR_EN);
     qtest_writeb(qts, flex_base + FLEX_MR, FLEX_MODE_TWI);
@@ -4939,6 +5137,7 @@ static void test_dbgu_xdmac_requests(void)
     uint8_t value;
 
     qts = qtest_init_with_serial(SAM9X75_MACHINE, &sock_fd);
+    ebi_enable_ddr(qts);
     pmc_write_pcr(qts, 20, PMC_PCR_EN);
     pmc_write_pcr(qts, 47, PMC_PCR_EN);
     qtest_writel(qts, SAM9X7_DBGU_BASE + DBGU_BRGR, 217);
@@ -4994,6 +5193,7 @@ static void test_flexcom_usart_xdmac_requests_and_mode_gating(void)
     uint64_t character_ns;
     uint8_t value;
 
+    ebi_enable_ddr(qts);
     pmc_write_pcr(qts, 20, PMC_PCR_EN);
     pmc_write_pcr(qts, 5, PMC_PCR_EN);
     qtest_writel(qts, SAM9X7_USART0_BASE + US_MR, US_MR_NORMAL_LOCAL);
@@ -5081,6 +5281,7 @@ static void test_xdmac_flexcom_live_migration(void)
     uint32_t value;
     unsigned int i;
 
+    ebi_enable_ddr(from);
     pmc_write_pcr(from, 20, PMC_PCR_EN);
     pmc_write_pcr(from, 5, PMC_PCR_EN);
     aic_configure(from, 20, AIC_SMR_LEVEL_HIGH | 3, 0x20202020);
@@ -5236,6 +5437,7 @@ static void test_flexcom_spi_xdmac_requests_and_mode_gating(void)
     uint64_t second_transfer_ns;
     uint16_t value;
 
+    ebi_enable_ddr(qts);
     pmc_write_pcr(qts, 20, PMC_PCR_EN);
     pmc_write_pcr(qts, 5, PMC_PCR_EN);
     qtest_writeb(qts, SAM9X7_FLEXCOM0_BASE + FLEX_MR, FLEX_MODE_SPI);
@@ -5417,6 +5619,7 @@ static void test_i2smcc_loopback_timing_and_xdmac(void)
     uint64_t word_period;
     uint32_t status;
 
+    ebi_enable_ddr(qts);
     pmc_write_pcr(qts, 20, PMC_PCR_EN);
     pmc_write_pcr(qts, 34, PMC_PCR_EN);
     qtest_writel(qts, SAM9X7_I2SMCC_BASE + I2SMCC_MRA,
@@ -5779,6 +5982,7 @@ static void test_classd_timing_irq_and_xdmac(void)
     const uint64_t sample_period = DIV_ROUND_UP(1000000000ULL, 48000);
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
 
+    ebi_enable_ddr(qts);
     pmc_configure_audio_pll(qts);
     pmc_write_pcr(qts, 20, PMC_PCR_EN);
     pmc_write_pcr(qts, 42, PMC_PCR_EN | (6U << 8) | PMC_PCR_GCKEN);
@@ -5865,6 +6069,7 @@ static void test_xdmac_registers_memcpy_and_descriptors(void)
     uint32_t value;
     unsigned int i;
 
+    ebi_enable_ddr(qts);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GTYPE),
                     ==, 0x0032200f);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GCFG),
@@ -6024,6 +6229,7 @@ static void test_xdmac_pacing_striding_and_errors(void)
     uint32_t value;
     unsigned int i;
 
+    ebi_enable_ddr(qts);
     memset(result, 0xa5, sizeof(result));
     memcpy(expected, result, sizeof(expected));
     memset(&expected[0], 0x5a, 4);
@@ -6175,6 +6381,7 @@ static void test_xdmac_fair_scheduling_and_flush_scope(void)
     uint32_t descriptor[5] = { 0 };
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
 
+    ebi_enable_ddr(qts);
     pmc_write_pcr(qts, 20, PMC_PCR_EN);
 
     qtest_writel(qts, ring_src, 0x11223344);
@@ -6560,6 +6767,7 @@ static void test_aes_chaining_gcm_and_xdmac(void)
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
     unsigned int i;
 
+    ebi_enable_ddr(qts);
     pmc_write_pcr(qts, 39, PMC_PCR_EN);
     aes_configure(qts, AES_MR_SMOD_AUTO | AES_MR_OPMODE_CBC |
                        AES_MR_CIPHER, key, sizeof(key), iv);
@@ -7247,6 +7455,7 @@ static void test_tdes_xdmac_and_last_output(void)
     uint8_t result[16] = { 0 };
     uint64_t duration;
 
+    ebi_enable_ddr(qts);
     pmc_write_pcr(qts, 20, PMC_PCR_EN);
     pmc_write_pcr(qts, 40, PMC_PCR_EN);
     duration = tdes_duration(qts, 50);
@@ -7614,6 +7823,7 @@ static void test_sha_xdmac_auto_padding(void)
     uint64_t duration;
     unsigned int i;
 
+    ebi_enable_ddr(qts);
     for (i = 0; i < sizeof(source); i++) {
         source[i] = i;
     }
@@ -10155,6 +10365,7 @@ static void test_sdhci_adma2_linux_nop_terminator(void)
                       " -drive file=%s,if=sd,format=raw,auto-read-only=off",
                       sd_path);
 
+    ebi_enable_ddr(qts);
     qtest_writeb(qts, SAM9X7_SDMMC0_BASE + SDHCI_SWRST,
                  SDHCI_RESET_ALL);
     qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_CLKCON,
@@ -10500,6 +10711,251 @@ static void nand_migrate(QTestState *from, QTestState *to)
     wait_for_migration_complete(to);
 }
 
+static void test_ebi_chip_select_assignments(void)
+{
+    const uint32_t reset_assignments = 0x00000300;
+    const uint32_t ddr_marker = 0x9750cafe;
+    const uint32_t assignments = SFR_CCFG_EBI_CS1A |
+                                 SFR_CCFG_EBI_CS2A |
+                                 SFR_CCFG_NFD0_ON_D16;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t assigned;
+
+    g_assert_cmphex(ebi_read_assignments(qts), ==, reset_assignments);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DDR_BASE), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0);
+
+    qtest_writel(qts, SAM9X7_DDR_BASE, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_SFR_BASE + SFR_REMAP_MP_DDR, 0x3fff);
+    ebi_update_assignments(qts, SFR_CCFG_EBI_CS1A,
+                           SFR_CCFG_DDR_MP_EN);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_SFR_BASE + SFR_REMAP_MP_DDR), ==,
+                    0x3fff);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DDR_BASE), ==, 0);
+
+    /* CS1A alone controls decode, irrespective of the multi-port route. */
+    ebi_update_assignments(qts, 0, SFR_CCFG_EBI_CS1A);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DDR_BASE), ==, 0);
+    qtest_writel(qts, SAM9X7_DDR_BASE, ddr_marker);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DDR_BASE), ==, ddr_marker);
+    ebi_update_assignments(qts, SFR_CCFG_EBI_CS1A, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DDR_BASE), ==, 0);
+    qtest_writel(qts, SAM9X7_DDR_BASE, UINT32_MAX);
+    ebi_enable_ddr(qts);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DDR_BASE), ==, ddr_marker);
+    ebi_update_assignments(qts, SFR_CCFG_DDR_MP_EN, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DDR_BASE), ==, ddr_marker);
+    ebi_update_assignments(qts, 0, SFR_CCFG_DDR_MP_EN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DDR_BASE), ==, ddr_marker);
+
+    /* CS1A cannot substitute for either of the two NAND assignments. */
+    ebi_update_assignments(qts,
+                           SFR_CCFG_EBI_CS2A | SFR_CCFG_NFD0_ON_D16,
+                           SFR_CCFG_EBI_CS2A);
+    nand_command(qts, NAND_CMD_READ_ID);
+    nand_address(qts, 0x00);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0);
+
+    ebi_update_assignments(qts, 0, SFR_CCFG_NFD0_ON_D16);
+    nand_command(qts, NAND_CMD_READ_ID);
+    nand_address(qts, 0x00);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0xc2);
+
+    /* NAND assignment cannot keep DDR decoded without CS1A. */
+    ebi_update_assignments(qts, SFR_CCFG_EBI_CS1A, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DDR_BASE), ==, 0);
+    ebi_update_assignments(qts, 0, SFR_CCFG_EBI_CS1A);
+
+    /* A disabled window neither advances nor mutates the NAND protocol. */
+    ebi_update_assignments(qts, SFR_CCFG_EBI_CS2A, 0);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0);
+    nand_command(qts, NAND_CMD_STATUS);
+    ebi_update_assignments(qts, 0, SFR_CCFG_EBI_CS2A);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0xdc);
+
+    ebi_update_assignments(qts, SFR_CCFG_NFD0_ON_D16, 0);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0);
+    nand_command(qts, NAND_CMD_STATUS);
+    ebi_update_assignments(qts, 0, SFR_CCFG_NFD0_ON_D16);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0x90);
+
+    assigned = ebi_read_assignments(qts);
+    g_assert_cmphex(assigned & assignments, ==, assignments);
+    qtest_writel(qts, SAM9X7_SFR_BASE + SFR_WPMR,
+                 SFR_WPMR_KEY | SFR_WPMR_WPEN);
+    qtest_writel(qts, SAM9X7_SFR_BASE + SFR_CCFG_EBICSA,
+                 assigned & ~assignments);
+    g_assert_cmphex(ebi_read_assignments(qts), ==, assigned);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DDR_BASE), ==, ddr_marker);
+
+    qtest_writel(qts, SAM9X7_SFR_BASE + SFR_WPMR, SFR_WPMR_KEY);
+    ebi_update_assignments(qts, assignments | SFR_CCFG_DDR_MP_EN, 0);
+    g_assert_cmphex(ebi_read_assignments(qts), ==, reset_assignments);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_DDR_BASE), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_nand_cs2_mirroring(void)
+{
+    static const uint8_t id[] = { 0xc2, 0xdc, 0x90, 0xa2, 0x57, 0x03 };
+    const uint64_t aperture_end = SAM9X7_NAND_BASE + SAM9X7_NAND_SIZE;
+    const uint64_t top_data = aperture_end - SAM9X7_NAND_SLICE_SIZE;
+    const unsigned int num_slices =
+        SAM9X7_NAND_SIZE / SAM9X7_NAND_SLICE_SIZE;
+    unsigned int slice;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    ebi_enable_nand(qts);
+    for (slice = 0; slice < num_slices; slice++) {
+        uint64_t command = SAM9X7_NAND_BASE +
+                           slice * SAM9X7_NAND_SLICE_SIZE;
+        uint64_t address = SAM9X7_NAND_BASE +
+                           ((slice + 1) % num_slices) *
+                           SAM9X7_NAND_SLICE_SIZE;
+        unsigned int i;
+
+        qtest_writeb(qts, command + BIT(22), NAND_CMD_READ_ID);
+        qtest_writeb(qts, address + BIT(21), slice & 1 ? 0x20 : 0x00);
+        if (slice & 1) {
+            for (i = 0; i < 4; i++) {
+                uint64_t data = SAM9X7_NAND_BASE +
+                    ((slice + i + 2) % num_slices) *
+                    SAM9X7_NAND_SLICE_SIZE;
+
+                g_assert_cmphex(qtest_readb(qts, data), ==, "ONFI"[i]);
+            }
+        } else {
+            for (i = 0; i < ARRAY_SIZE(id); i++) {
+                uint64_t data = SAM9X7_NAND_BASE +
+                    ((slice + i + 2) % num_slices) *
+                    SAM9X7_NAND_SLICE_SIZE;
+
+                g_assert_cmphex(qtest_readb(qts, data), ==, id[i]);
+            }
+        }
+    }
+
+    /* The canonical and top mirrors also share one protocol cursor. */
+    qtest_writeb(qts, top_data + BIT(22), NAND_CMD_READ_ID);
+    qtest_writeb(qts, NAND_ALE, 0x20);
+    g_assert_cmphex(qtest_readb(qts, top_data), ==, 'O');
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 'N');
+
+    qtest_writeb(qts, top_data + BIT(22), NAND_CMD_READ_ID);
+    qtest_writeb(qts, top_data + BIT(21), 0x20);
+    qtest_writeb(qts, aperture_end + BIT(22), NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 'O');
+    g_assert_cmphex(qtest_readb(qts, aperture_end), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_ebi_assignment_migration_reset(void)
+{
+    static const uint8_t nand_payload[] = { 0x6d, 0xb2 };
+    const uint32_t reset_assignments = 0x00000300;
+    const uint32_t enabled_assignments = reset_assignments |
+                                         SFR_CCFG_EBI_CS1A |
+                                         SFR_CCFG_EBI_CS2A |
+                                         SFR_CCFG_NFD0_ON_D16;
+    const uint32_t ddr_marker = 0x51a9c75a;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    uint32_t value;
+
+    g_assert_cmphex(ebi_read_assignments(to), ==, reset_assignments);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_DDR_BASE), ==, 0);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, 0);
+
+    ebi_enable_ddr_and_nand(from);
+    qtest_writel(from, SAM9X7_DDR_BASE, ddr_marker);
+    nand_program(from, 23, 31, nand_payload, sizeof(nand_payload));
+    nand_command(from, NAND_CMD_READ_ID);
+    nand_address(from, 0x00);
+    g_assert_cmphex(qtest_readb(from, NAND_DATA), ==, 0xc2);
+
+    nand_migrate(from, to);
+    g_assert_cmphex(ebi_read_assignments(to), ==, enabled_assignments);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_DDR_BASE), ==, ddr_marker);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, 0xdc);
+
+    qtest_writel(to, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_writel(to, SAM9X7_RSTC_BASE + RSTC_CR,
+                 RSTC_KEY | RSTC_CR_PROCRST);
+    qtest_qmp_eventwait(to, "RESET");
+    value = qtest_readl(to, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_SOFTWARE));
+    g_assert_cmphex(ebi_read_assignments(to), ==, reset_assignments);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_DDR_BASE), ==, 0);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, 0);
+
+    ebi_enable_ddr_and_nand(to);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_DDR_BASE), ==, ddr_marker);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, 0x90);
+
+    qtest_system_reset(to);
+    g_assert_cmphex(ebi_read_assignments(to), ==, reset_assignments);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_DDR_BASE), ==, 0);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, 0);
+
+    ebi_enable_ddr_and_nand(to);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_DDR_BASE), ==, ddr_marker);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, 0xff);
+    nand_start_read(to, 23, 31);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, nand_payload[0]);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, nand_payload[1]);
+    nand_command(to, NAND_CMD_READ_ID);
+    nand_address(to, 0x00);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, 0xc2);
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
+static void test_ebi_assignment_migration_deassert(void)
+{
+    const uint32_t partial_assignments = 0x00000300 |
+                                         SFR_CCFG_NFD0_ON_D16;
+    const uint32_t source_marker = 0xdec0de75;
+    const uint32_t destination_marker = 0xbad0cafe;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+
+    ebi_enable_ddr_and_nand(from);
+    qtest_writel(from, SAM9X7_DDR_BASE, source_marker);
+    nand_command(from, NAND_CMD_READ_ID);
+    nand_address(from, 0x00);
+    g_assert_cmphex(qtest_readb(from, NAND_DATA), ==, 0xc2);
+    ebi_update_assignments(from,
+                           SFR_CCFG_EBI_CS1A | SFR_CCFG_EBI_CS2A, 0);
+    g_assert_cmphex(ebi_read_assignments(from), ==, partial_assignments);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_DDR_BASE), ==, 0);
+    g_assert_cmphex(qtest_readb(from, NAND_DATA), ==, 0);
+
+    /* Migration must deassert stale destination routes as well as assert. */
+    ebi_enable_ddr_and_nand(to);
+    qtest_writel(to, SAM9X7_DDR_BASE, destination_marker);
+    nand_command(to, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, NAND_STATUS_IDLE);
+
+    nand_migrate(from, to);
+    g_assert_cmphex(ebi_read_assignments(to), ==, partial_assignments);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_DDR_BASE), ==, 0);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, 0);
+
+    ebi_update_assignments(to, 0,
+                           SFR_CCFG_EBI_CS1A | SFR_CCFG_EBI_CS2A);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_DDR_BASE), ==, source_marker);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, 0xdc);
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
 static const uint8_t nand_parameter_page[256] = {
     0x4f, 0x4e, 0x46, 0x49, 0x02, 0x00, 0x18, 0x00,
     0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -10555,6 +11011,7 @@ static void test_nand_identification_program_and_erase(void)
     unsigned int copy;
     unsigned int i;
 
+    ebi_enable_nand(qts);
     g_assert_true(qtest_qom_get_bool(qts, "/machine", "nand-cs"));
     g_assert_true(qtest_qom_get_bool(qts, "/machine", "qspi-cs"));
 
@@ -10716,6 +11173,7 @@ static void test_nand_features_and_reset_domains(void)
     uint32_t value;
     unsigned int i;
 
+    ebi_enable_nand(qts);
     qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
     for (i = 0; i < G_N_ELEMENTS(feature_cases); i++) {
         nand_get_features(qts, feature_cases[i].address, feature);
@@ -10773,6 +11231,8 @@ static void test_nand_features_and_reset_domains(void)
     value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
     g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
                     RSTC_SR_RSTTYP(RSTC_TYPE_SOFTWARE));
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0);
+    ebi_enable_nand(qts);
     for (i = 1; i < sizeof(feature); i++) {
         g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0);
     }
@@ -10781,6 +11241,7 @@ static void test_nand_features_and_reset_domains(void)
                     sizeof(timing_mode_4));
 
     qtest_system_reset(qts);
+    ebi_enable_nand(qts);
     for (i = 0; i < G_N_ELEMENTS(feature_cases); i++) {
         nand_get_features(qts, feature_cases[i].address, feature);
         g_assert_cmpmem(feature, sizeof(feature), timing_mode_0,
@@ -10801,6 +11262,7 @@ static void test_nand_parameter_status_poll_migration(void)
     uint8_t parameter_page[256];
     unsigned int i;
 
+    ebi_enable_nand(from);
     nand_command(from, NAND_CMD_READ_PARAM);
     nand_address(from, 0x00);
     nand_command(from, NAND_CMD_STATUS);
@@ -10840,6 +11302,7 @@ static void test_nand_page_status_poll_migration(void)
     QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
     unsigned int i;
 
+    ebi_enable_nand(from);
     nand_program(from, 0, 0, first_payload, sizeof(first_payload));
     nand_program(from, 0, NAND_TEST_OOB_COLUMN,
                  first_oob, sizeof(first_oob));
@@ -10885,6 +11348,7 @@ static void test_nand_random_data_input_migration(void)
     QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
     unsigned int i;
 
+    ebi_enable_nand(from);
     nand_command(from, NAND_CMD_PROGRAM_START);
     nand_page_address(from, column, page);
     for (i = 0; i < sizeof(payload); i++) {
@@ -10931,6 +11395,7 @@ static void test_nand_program_old_source_migration(void)
     QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
     unsigned int i;
 
+    ebi_enable_nand(from);
     nand_command(from, NAND_CMD_PROGRAM_START);
     nand_page_address(from, column, page);
     qtest_writeb(from, NAND_DATA, payload[0]);
@@ -10958,6 +11423,7 @@ static void test_nand_off_device_program_migration(void)
     QTestState *from = qtest_init(SAM9X75_MACHINE);
     QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
 
+    ebi_enable_nand(from);
     nand_command(from, NAND_CMD_PROGRAM_START);
     nand_page_address(from, 0, 0x00ffffff);
     qtest_writeb(from, NAND_DATA, 0x5a);
@@ -10981,6 +11447,7 @@ static void test_nand_features_status_poll_migration(void)
     QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
     unsigned int i;
 
+    ebi_enable_nand(from);
     nand_set_features(from, 0x01, timing_mode_3, sizeof(timing_mode_3));
     nand_command(from, NAND_CMD_GET_FEATURES);
     nand_address(from, 0x01);
@@ -11014,6 +11481,7 @@ static void test_nand_set_features_migration(void)
     uint8_t feature[4];
     unsigned int i;
 
+    ebi_enable_nand(from);
     nand_set_features(from, 0x01, timing_mode_4, 2);
     nand_migrate(from, to);
     for (i = 2; i < sizeof(timing_mode_4); i++) {
@@ -11035,6 +11503,8 @@ static void test_nand_empty_media_migration(void)
     unsigned int i;
 
     /* Incoming state replaces, rather than merges with, destination media. */
+    ebi_enable_nand(from);
+    ebi_enable_nand(to);
     nand_program(to, 9, 0, payload, sizeof(payload));
     nand_migrate(from, to);
     nand_start_read(to, 9, 0);
@@ -11081,6 +11551,7 @@ static void nand_test_backend_migration(bool raw)
     from = qtest_init(args);
     to = qtest_initf("%s -incoming defer", args);
 
+    ebi_enable_nand(from);
     nand_program(from, page, 0, payload, sizeof(payload));
     nand_program(from, page, NAND_TEST_OOB_COLUMN, oob, sizeof(oob));
     nand_migrate(from, to);
@@ -11120,6 +11591,7 @@ static void test_board_memory_cs_jumpers(void)
     g_assert_false(qtest_qom_get_bool(qts, "/machine", "nand-cs"));
     g_assert_false(qtest_qom_get_bool(qts, "/machine", "qspi-cs"));
 
+    ebi_enable_nand(qts);
     nand_command(qts, NAND_CMD_READ_ID);
     nand_address(qts, 0x00);
     g_assert_cmphex(qtest_readl(qts, NAND_DATA), ==, UINT32_MAX);
@@ -11583,6 +12055,10 @@ int main(int argc, char **argv)
                    test_matrix_remap_migration);
     qtest_add_func("sam9x75/rom/supplied-image", test_rom_image_loading);
     qtest_add_func("sam9x75/rom/cpu-entry", test_rom_cpu_entry);
+    qtest_add_func("sam9x75/boot/direct-linux-ddr-assignment",
+                   test_direct_linux_ddr_assignment);
+    qtest_add_func("sam9x75/boot/firmware-elf-true-reset-assignment",
+                   test_firmware_elf_true_reset_assignment);
     qtest_add_func("sam9x75/rom/image-size-validation",
                    test_rom_image_size_validation);
     qtest_add_func("sam9x75/rom/boot-path-validation",
@@ -11768,8 +12244,16 @@ int main(int argc, char **argv)
                    test_sdhci_software_reset_command_irq);
     qtest_add_func("sam9x75/board/m2-interface-jumper",
                    test_board_m2_interface_jumper);
+    qtest_add_func("sam9x75/ebi/chip-select-assignments",
+                   test_ebi_chip_select_assignments);
+    qtest_add_func("sam9x75/ebi/assignment-migration-reset",
+                   test_ebi_assignment_migration_reset);
+    qtest_add_func("sam9x75/ebi/assignment-migration-deassert",
+                   test_ebi_assignment_migration_deassert);
     qtest_add_func("sam9x75/nand/identification-program-and-erase",
                    test_nand_identification_program_and_erase);
+    qtest_add_func("sam9x75/nand/cs2-mirroring",
+                   test_nand_cs2_mirroring);
     qtest_add_func("sam9x75/nand/features-and-reset-domains",
                    test_nand_features_and_reset_domains);
     qtest_add_func("sam9x75/nand/parameter-status-poll-migration",

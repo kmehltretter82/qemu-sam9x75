@@ -238,8 +238,6 @@ static void sam9x75_curiosity_init(MachineState *machine)
         exit(EXIT_FAILURE);
     }
 
-    memory_region_add_subregion(sysmem, SAM9X7_DDR_BASE, machine->ram);
-
     soc = SAM9X7(object_new(TYPE_SAM9X7));
     object_property_add_child(OBJECT(machine), "soc", OBJECT(soc));
     object_unref(OBJECT(soc));
@@ -247,6 +245,8 @@ static void sam9x75_curiosity_init(MachineState *machine)
 
     object_property_set_link(OBJECT(soc), "memory", OBJECT(sysmem),
                              &error_abort);
+    object_property_set_link(OBJECT(soc), "ddr-memory",
+                             OBJECT(machine->ram), &error_abort);
     qdev_prop_set_chr(DEVICE(&soc->dbgu), "chardev", serial_hd(0));
     for (i = 0; i < ARRAY_SIZE(soc->usart); i++) {
         qdev_prop_set_chr(DEVICE(&soc->usart[i]), "chardev",

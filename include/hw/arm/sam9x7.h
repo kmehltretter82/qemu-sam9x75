@@ -75,7 +75,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_DDR_BASE              0x20000000
 #define SAM9X7_DDR_SIZE              0x10000000
 #define SAM9X7_NAND_BASE             0x30000000
-#define SAM9X7_NAND_SIZE             0x00800000
+#define SAM9X7_NAND_SIZE             0x10000000
 #define SAM9X7_QSPI_MEM_BASE         0x60000000
 #define SAM9X7_QSPI_MEM_SIZE         0x20000000
 #define SAM9X7_SDMMC0_BASE           0x80000000
@@ -174,13 +174,19 @@ struct SAM9X7State {
     Clock *slow_xtal;
 
     bool core_reset_requested;
+    /* Derived from SFR outputs and reconstructed after migration. */
+    bool nand_cs2_assigned;
+    bool nand_d16_assigned;
 
     MemoryRegion rom;
     MemoryRegion boot_alias;
     MemoryRegion boot_sram_alias;
     MemoryRegion sram0;
     MemoryRegion sram1;
+    MemoryRegion ddr_window;
+    MemoryRegion nand_window;
     MemoryRegion *memory;
+    MemoryRegion *ddr_memory;
 };
 
 bool sam9x7_core_reset_requested(const SAM9X7State *s);
