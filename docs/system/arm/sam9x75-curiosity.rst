@@ -104,8 +104,10 @@ Support matrix
        ``REFRESH`` command.  The BSC request is state that RomBOOT reads; there
        is deliberately no direct BSC-to-OTPC hardware signal.  MPDDRC
        configuration, refresh, error reporting, interrupts and write
-       protection have an initial register model; DDR timing/training remains
-       missing.
+       protection have an initial register model.  Runtime low-power-register
+       updates, the arbitration masks and write-after-initialization safety
+       reporting follow the documented register policy; DDR timing/training
+       remains missing.
    * - DBGU and chip identification
      - Functional
      - Full SAM9X7 aperture, byte and word data accesses, masks, timeout,
@@ -116,7 +118,10 @@ Support matrix
      - Initial
      - 128-source AIC5 register bank with SAM9X7 wiring, priority/nesting,
        IRQ/FIQ, edge/level modes, fast forcing, general mask, spurious vector
-       and write protection; protection-mode corner cases need hardware tests.
+       and write protection.  The busless system and EBI interrupt OR gates
+       restore their output after migration, deassert on cold reset and
+       re-drive retained sources after a core reset.  Protection-mode corner
+       cases need hardware tests.
    * - PMC, SCKC and clocks
      - Initial
      - Main and slow oscillators, five SAM9X7 PLL clock entries, master,
@@ -255,8 +260,15 @@ Support matrix
        low.  Page and OOB program/read/erase paths, including the AT91Bootstrap
        ``80h``/``85h``/``10h`` Random Data Input sequence, are present.  Active
        ordinary and random-input programs, device-owned sparse/OOB state and
-       shared backend data have migration coverage.  SMC registers and initial
-       PMECC/PMERRLOC control/status are present.  An
+       shared backend data have migration coverage.  The SMC chip-select banks,
+       write protection, write-once scrambling keys, safety reporting and
+       level interrupt shared with MPDDRC are present, including the modeled
+       A1 ``OCMS`` write-protection erratum.  PMECC exposes all eight ECC and
+       remainder banks through its complete ``0x600`` aperture, with initial
+       PMECC/PMERRLOC control/status behavior.  The current upstream Linux
+       ``sam9x7.dtsi`` describes only ``0x300`` bytes for that first resource
+       and needs a separate correction before software can map the upper
+       banks.  An
        unmodified NAND AT91Bootstrap detects ONFI, selects timing mode 3, loads
        U-Boot from offset ``0x40000`` and reaches the prompt.
        Ready/busy timing and pin signaling, the additional redundant parameter
@@ -470,9 +482,10 @@ phase green merely by avoiding it in the device tree.
    QEMU chardev, SSI, I2C and analog/digital endpoint abstractions.
 #. **Close storage and memory-controller fidelity.**  Complete SDHCI command,
    error, media-change and migration behavior; complete NAND OOB, bad-block,
-   ready/busy timing, PMECC generation/correction and DMA; finish SMC, matrix
-   and MPDDRC-visible behavior, including per-host remap and arbitration
-   effects; and cover persistent QSPI protocol widths and errata.
+   ready/busy timing, PMECC generation/correction and DMA; finish SMC
+   transaction timing, matrix and MPDDRC-visible behavior, including per-host
+   remap and arbitration effects; and cover persistent QSPI protocol widths
+   and errata.
 #. **Boot like the board.**  Implement the mask-ROM media-selection state
    machine, straps, authentication/error fallbacks and the documented QSPI
    erratum on top of the modeled reset and SRAM remap path.  Prove cold boot
