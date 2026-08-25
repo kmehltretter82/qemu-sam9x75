@@ -40,6 +40,8 @@ struct AT91SPIState {
     qemu_irq cs[AT91_SPI_NUM_CS];
     QEMUTimer *transfer_timer;
 
+    uint8_t num_cs;
+
     uint32_t mode;
     uint32_t interrupt_mask;
     uint32_t status;

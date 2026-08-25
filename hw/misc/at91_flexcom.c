@@ -29,7 +29,7 @@ static void at91_flexcom_update_irq(AT91FlexcomState *s)
         level = s->usart_irq_level;
         break;
     case AT91_FLEXCOM_MODE_SPI:
-        level = s->spi_irq_level;
+        level = s->spi && s->spi_irq_level;
         break;
     case AT91_FLEXCOM_MODE_TWI:
         level = s->twi_irq_level;
@@ -51,8 +51,10 @@ static void at91_flexcom_update_dma(AT91FlexcomState *s)
         rx = s->usart_rx_request_level;
         break;
     case AT91_FLEXCOM_MODE_SPI:
-        tx = s->spi_tx_request_level;
-        rx = s->spi_rx_request_level;
+        if (s->spi) {
+            tx = s->spi_tx_request_level;
+            rx = s->spi_rx_request_level;
+        }
         break;
     case AT91_FLEXCOM_MODE_TWI:
         tx = s->twi_tx_request_level;
@@ -68,7 +70,8 @@ static void at91_flexcom_update_dma(AT91FlexcomState *s)
 static void at91_flexcom_update_mode(AT91FlexcomState *s)
 {
     qemu_set_irq(s->usart_enabled, s->mr == AT91_FLEXCOM_MODE_USART);
-    qemu_set_irq(s->spi_enabled, s->mr == AT91_FLEXCOM_MODE_SPI);
+    qemu_set_irq(s->spi_enabled,
+                 s->spi && s->mr == AT91_FLEXCOM_MODE_SPI);
     qemu_set_irq(s->twi_enabled, s->mr == AT91_FLEXCOM_MODE_TWI);
     at91_flexcom_update_irq(s);
     at91_flexcom_update_dma(s);

@@ -52,6 +52,11 @@ answer requires a differential probe on the physical board.
 No QEMU-only device tree is used to conceal missing hardware.  Supported
 firmware and operating systems must consume the same DTB as the board.
 
+The machine has not been released or assigned a versioned migration ABI.
+Migration tests therefore cover same-build operation; development snapshots
+and migration streams are not guaranteed to load across commits.  Freeze or
+version the machine topology before making that compatibility promise.
+
 Support matrix
 --------------
 
@@ -149,19 +154,33 @@ Support matrix
    * - FLEXCOM0--12
      - Initial
      - All thirteen wrappers expose mode ownership, shared AIC routing and
-       shared XDMAC request routing, uniquely named I2C buses and SSI buses.
-       Each USART personality has the SAM9X7
-       register masks and reset values, a 16-byte FIFO, byte/halfword/word
+       shared XDMAC request routing.  Every wrapper has a USART and TWI
+       personality and a uniquely named I2C bus.  Only FLEXCOM0--5 synthesize
+       an SPI personality; those six instances have uniquely named SSI buses,
+       while FLEXCOM6--12 have no SPI child or SSI bus.  The model currently
+       leaves their nominal ``+0x400`` slots unmapped; the exact reserved-slot
+       access behavior remains a hardware-validation item.
+       The common USART path has the SAM9X7 register masks and reset values, a
+       16-byte FIFO, byte/halfword/word
        transfers, clocked character-backend transmission and reception,
        local/automatic/remote loopback, timeout and comparison events, write
        protection, migration and its documented XDMAC transmit/receive pair.
-       Each SPI personality has the SAM9X7 register layout, masks and write
-       protection, 16-entry transmit/receive FIFOs, 8--16-bit host transfers,
-       fixed and variable peripheral selection, direct and decoded chip
-       selects, PCLK/GCLK bit-rate selection, programmable chip-select and
-       transfer delays, local loopback, comparison, interrupts, migration and
-       its documented XDMAC pair.  The host data path uses a normal QEMU SSI
-       bus, and FLEXCOM4 NPCS1 reaches the M.2 socket through J24.
+       The silicon implements Basic, hardware-handshake and RS485 USART modes
+       on all thirteen instances.  FLEXCOM0--3 additionally implement
+       ISO7816, LIN, IrDA, Manchester and LON; FLEXCOM4--5 implement the same
+       advanced modes except LON.  The model does not yet enforce that
+       per-instance advanced-mode/register matrix.
+       Each of the six SPI personalities has the SAM9X7 register layout,
+       masks and write protection, 16-entry transmit/receive FIFOs, 8--16-bit
+       host transfers, fixed and variable peripheral selection, direct and
+       decoded chip selects, PCLK/GCLK bit-rate selection, programmable
+       chip-select and transfer delays, local loopback, comparison,
+       interrupts, migration and its documented XDMAC pair.  The host data
+       path uses a normal QEMU SSI bus, and FLEXCOM4 NPCS1 reaches the M.2
+       socket through J24.  FLEXCOM0--3 have two physical NPCS signals and
+       FLEXCOM4--5 have four.  The behavior of CSR and PCS encodings that do
+       not have a corresponding package signal is not inferred from the pin
+       count and still requires hardware readback.
        The TWI host path covers PCLK/GCLK-paced byte transfers, internal
        addresses, repeated starts, NACK and AIC signaling,
        alternative-command mode, 16-byte transmit/receive FIFOs, byte,
@@ -170,6 +189,7 @@ Support matrix
        documented XDMAC transmit/receive pair.
        SPI client mode and pin-level mode-fault/framing input, CRC and two-pin
        engines, bit-level USART framing and synchronous/protocol engines,
+       per-instance USART feature enforcement,
        complete flow-control endpoints, TWI client mode, SMBus/PEC,
        high-speed timing, separately timed address/START/STOP phases and
        arbitration fidelity remain missing.  SAM9X7 documentation and its
@@ -188,8 +208,9 @@ Support matrix
        channel from starving its peers.  Migration is exercised with an enabled
        receive descriptor awaiting FLEXCOM0 USART data and an enabled, suspended
        USART transmit channel that resumes and completes after migration.  DBGU,
-       every FLEXCOM USART, SPI and TWI personality, I2SMCC, Class-D, AES, SHA and
-       TDES request lines are wired.  The 4 KiB multiport FIFO datapath,
+       all thirteen FLEXCOM USART and TWI personalities, the six FLEXCOM0--5
+       SPI personalities, I2SMCC, Class-D, AES, SHA and TDES request lines are
+       wired.  The 4 KiB multiport FIFO datapath,
        including its GTYPE-reported 256-byte per-channel allocation, independent
        read/write scheduling and suspend/drain behavior, RDIP/WRIP visibility,
        GWAC pool weighting and CNDC/descriptor QOS effects, the remaining
@@ -430,8 +451,11 @@ phase green merely by avoiding it in the device tree.
    now distinguishes VDDCORE resets from the retained VDDBU domain.  Next
    complete the remaining meaningful jumper/mux selections.
 #. **Complete reusable data paths.**  The SPI personality and SSI host path now
-   exist on all FLEXCOM instances.  Finish its client, CRC and two-pin modes;
-   finish synchronous and protocol-specific USART behavior; complete TWI
+   exist on the documented FLEXCOM0--5 instances, and remain absent from
+   FLEXCOM6--12.  Finish SPI client, CRC and two-pin modes; finish synchronous
+   and protocol-specific USART behavior and enforce the documented
+   per-instance USART feature matrix once unsupported-register readback has
+   been measured; complete TWI
    client/SMBus/PEC and high-speed/arbitration behavior; complete the XDMAC
    channel FIFOs, independent read/write pipelines and GWAC/CNDC.QOS behavior;
    and wire every remaining documented XDMAC request.  Complete SSC, TC1,
@@ -731,6 +755,67 @@ This electrically disconnects the M.2 card from SDMMC1.  Attaching the second
 SD drive attaches an SPI-mode SD card to FLEXCOM4 NPCS1 instead.  The same
 ``if=sd,index=1`` drive syntax is used for both jumper positions; only the
 electrical route changes.
+
+FLEXCOM hardware validation
+---------------------------
+
+The FLEXCOM synthesis boundary and the readback behavior of unavailable
+features must be measured separately.  Use a RAM-resident bare-metal probe
+with a data-abort handler, keep normal board drivers quiescent, and save raw
+register values rather than reducing an unexpected result to pass/fail.  The
+probe should proceed as follows:
+
+#. Enable each control instance through its documented PMC peripheral ID:
+   FLEXCOM3 is PID 8, FLEXCOM4 is PID 13, FLEXCOM5 is PID 14, FLEXCOM6 is
+   PID 9 and FLEXCOM12 is PID 33.  Record the chip identification, clock
+   configuration and wrapper ``MR`` before each case, and reset the wrapper
+   and personality between cases.
+#. Use FLEXCOM3, FLEXCOM4 and FLEXCOM5 as positive SPI controls without
+   assigning their pins to the peripheral.  Select SPI in the wrapper, use
+   local loopback, and record the SPI ``MR``, ``SR``, receive data, FIFO state,
+   shared AIC result and both XDMAC request directions.  The corresponding
+   XDMAC request pairs are 6/7, 8/9 and 10/11.  This establishes that the same
+   probe and clocks can observe both a two-NPCS and the four-NPCS instances.
+#. Repeat the register sequence at the FLEXCOM6 SPI offset, but leave PA24,
+   PA25 and PB7--PB9 under PIO control.  Record whether selecting SPI in the
+   wrapper reads back, whether each access at wrapper offset ``0x400`` aborts,
+   reads as zero or another value, or retains a write, and whether local
+   loopback can change data/FIFO status.  Also prove whether AIC source 9 or
+   XDMAC request 12/13 can be asserted.  This is the decisive first-absent
+   instance test: the documented synthesis has no FLEXCOM6 SPI controller,
+   while QEMU's current unmapped slot is only a provisional reserved-access
+   behavior.  A read-only repeat at FLEXCOM12 provides a useful far-boundary
+   check.  Do not configure any FLEXCOM6 or FLEXCOM12 candidate pin as an SPI
+   signal during these tests.
+#. Select USART mode and compare the per-instance feature boundary without
+   assigning external pins.  FLEXCOM3 is the positive control for Basic,
+   hardware-handshake, RS485, ISO7816, LIN, IrDA, Manchester and LON modes.
+   FLEXCOM4 must be checked for the same set except LON.  FLEXCOM6 must be
+   checked for Basic, hardware-handshake and RS485 only.  For each unsupported
+   case, record the ``US_MR`` mode-field readback, ``US_MAN``, ``US_LINMR``,
+   ``US_LINIR`` and the ``US_LON*`` register window, plus status, interrupt and
+   DMA effects.  Reset after each pattern.  A mode's absence does not by
+   itself establish that its registers are read-as-zero/write-ignored; that
+   distinction determines the eventual QEMU masks.
+#. Only after the internal tests are repeatable, observe physical chip-select
+   outputs with a high-impedance probe and no external stimulus.  FLEXCOM3
+   exposes NPCS0 on IO3/PC25 and NPCS1 on IO4/PC24.  FLEXCOM4 exposes NPCS0 on
+   IO3/PA12, NPCS1 on IO4/PA13 or PA30, NPCS2 on IO5/PA14 or PA31, and NPCS3 on
+   IO6/PB3.  FLEXCOM5 exposes NPCS0 on IO3/PA14, NPCS1 on IO4/PA12 or PA30,
+   NPCS2 on IO5/PA25 and NPCS3 on IO6/PA24.  Select one documented I/O set at
+   a time and verify the schematic net before changing the PIO mux.  PA12 is
+   shared with the PAC1934 alert, PA24/PA25 carry the board PMIC I2C link, and
+   FLEXCOM4 NPCS1 can reach the M.2 socket through J24; isolate the other
+   device or skip that output if the net cannot be guaranteed undriven, and
+   remove any M.2 card before changing J24.  FLEXCOM6 candidate signals also
+   overlap PA24/PA25 and Ethernet signals on PB7--PB9, so SPI6 must remain an
+   internal register probe rather than a pin-level experiment.
+
+The scope result establishes only which NPCS signals leave the package.
+Separately capture FLEXCOM0--3 ``CSR2``/``CSR3`` and direct/decoded ``PCS``
+readback while the pins remain unassigned.  Do not mask those fields in QEMU
+solely because NPCS2/NPCS3 have no physical signal; their internal behavior
+must follow the hardware result.
 
 Completion gates
 ----------------

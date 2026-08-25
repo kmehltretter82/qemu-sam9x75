@@ -1,10 +1,10 @@
 /*
  * Microchip AT91 FLEXCOM SPI
  *
- * This models the SPI personality integrated in each SAM9X7 FLEXCOM.  The
- * controller provides host transfers on a QEMU SSI bus, the SAM9X7 16-entry
- * FIFOs, interrupt and DMA request generation, chip-select timing, local
- * loopback, comparison and register write protection.
+ * This models the SPI personality integrated in SAM9X7 FLEXCOM0 through
+ * FLEXCOM5.  The controller provides host transfers on a QEMU SSI bus, the
+ * SAM9X7 16-entry FIFOs, interrupt and DMA request generation, chip-select
+ * timing, local loopback, comparison and register write protection.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -13,6 +13,7 @@
 
 #include "hw/core/irq.h"
 #include "hw/core/qdev-clock.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/ssi/at91_spi.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
@@ -326,7 +327,7 @@ static void at91_spi_drive_cs(AT91SPIState *s)
     if (s->mode & SPI_MR_CSIE) {
         levels ^= 0xf;
     }
-    for (i = 0; i < AT91_SPI_NUM_CS; i++) {
+    for (i = 0; i < s->num_cs; i++) {
         qemu_set_irq(s->cs[i], !!(levels & BIT(i)));
     }
 }
@@ -1102,9 +1103,17 @@ static void at91_spi_realize(DeviceState *dev, Error **errp)
 {
     AT91SPIState *s = AT91_SPI(dev);
 
+    if (!s->num_cs || s->num_cs > AT91_SPI_NUM_CS) {
+        error_setg(errp, TYPE_AT91_SPI ": num-cs must be between 1 and %u",
+                   AT91_SPI_NUM_CS);
+        return;
+    }
     if (!clock_has_source(s->pclk) || !clock_has_source(s->gclk)) {
         error_setg(errp, TYPE_AT91_SPI ": pclk and gclk must be connected");
+        return;
     }
+
+    qdev_init_gpio_out_named(dev, s->cs, "cs", s->num_cs);
 }
 
 static void at91_spi_init(Object *obj)
@@ -1118,7 +1127,6 @@ static void at91_spi_init(Object *obj)
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
     qdev_init_gpio_out_named(dev, &s->tx_request, "tx-request", 1);
     qdev_init_gpio_out_named(dev, &s->rx_request, "rx-request", 1);
-    qdev_init_gpio_out_named(dev, s->cs, "cs", AT91_SPI_NUM_CS);
     qdev_init_gpio_in_named(dev, at91_spi_set_enabled,
                             "flexcom-enabled", 1);
     s->pclk = qdev_init_clock_in(dev, "pclk", at91_spi_clock_changed,
@@ -1136,6 +1144,10 @@ static void at91_spi_finalize(Object *obj)
     timer_free(s->transfer_timer);
 }
 
+static const Property at91_spi_properties[] = {
+    DEFINE_PROP_UINT8("num-cs", AT91SPIState, num_cs, AT91_SPI_NUM_CS),
+};
+
 static void at91_spi_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -1143,6 +1155,7 @@ static void at91_spi_class_init(ObjectClass *klass, const void *data)
     dc->desc = "Microchip AT91 FLEXCOM SPI";
     dc->realize = at91_spi_realize;
     dc->vmsd = &at91_spi_vmstate;
+    device_class_set_props(dc, at91_spi_properties);
     device_class_set_legacy_reset(dc, at91_spi_reset);
 }
 

@@ -57,6 +57,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_NUM_PIO              4
 #define SAM9X7_NUM_SDMMC            2
 #define SAM9X7_NUM_FLEXCOM          13
+#define SAM9X7_NUM_FLEXCOM_SPI       6
 #define SAM9X7_NUM_GMAC_QUEUES       6
 
 #define SAM9X7_GPIO_RESET            "reset"
@@ -155,7 +156,7 @@ struct SAM9X7State {
     CadenceGEMState gmac;
     AT91FlexcomState flexcom[SAM9X7_NUM_FLEXCOM];
     AT91USARTState usart[SAM9X7_NUM_FLEXCOM];
-    AT91SPIState spi[SAM9X7_NUM_FLEXCOM];
+    AT91SPIState spi[SAM9X7_NUM_FLEXCOM_SPI];
     AT91TWIState twi[SAM9X7_NUM_FLEXCOM];
     AT91SDHCIState sdmmc[SAM9X7_NUM_SDMMC];
     AT91PIOState pio[SAM9X7_NUM_PIO];

@@ -10,6 +10,7 @@
 #include "migration/migration-qmp.h"
 #include "qemu/bswap.h"
 #include "qemu/bitops.h"
+#include "qobject/qlist.h"
 
 #define SAM9X75_MACHINE         "-machine sam9x75-curiosity"
 #define SOC_RESET_POWER_IRQ     0
@@ -36,12 +37,17 @@
 #define SAM9X7_USART0_BASE      (SAM9X7_FLEXCOM0_BASE + 0x200)
 #define SAM9X7_SPI0_BASE        (SAM9X7_FLEXCOM0_BASE + 0x400)
 #define SAM9X7_TWI0_BASE        (SAM9X7_FLEXCOM0_BASE + 0x600)
+#define SAM9X7_FLEXCOM3_BASE    0xf8028000
+#define SAM9X7_USART3_BASE      (SAM9X7_FLEXCOM3_BASE + 0x200)
+#define SAM9X7_SPI3_BASE        (SAM9X7_FLEXCOM3_BASE + 0x400)
 #define SAM9X7_FLEXCOM6_BASE    0xf8010000
 #define SAM9X7_USART6_BASE      (SAM9X7_FLEXCOM6_BASE + 0x200)
 #define SAM9X7_SPI6_BASE        (SAM9X7_FLEXCOM6_BASE + 0x400)
 #define SAM9X7_TWI6_BASE        (SAM9X7_FLEXCOM6_BASE + 0x600)
 #define SAM9X7_FLEXCOM7_BASE    0xf8014000
 #define SAM9X7_TWI7_BASE        (SAM9X7_FLEXCOM7_BASE + 0x600)
+#define SAM9X7_FLEXCOM12_BASE   0xf0024000
+#define SAM9X7_SPI12_BASE       (SAM9X7_FLEXCOM12_BASE + 0x400)
 #define SAM9X7_PIT64B0_BASE     0xf0028000
 #define SAM9X7_TRNG_BASE        0xf0030000
 #define SAM9X7_AES_BASE         0xf0034000
@@ -167,6 +173,7 @@
 #define FLEX_MR                 0x00
 #define FLEX_RHR                0x10
 #define FLEX_THR                0x20
+#define FLEX_MODE_NONE          0
 #define FLEX_MODE_USART         1
 #define FLEX_MODE_SPI           2
 #define FLEX_MODE_TWI           3
@@ -188,6 +195,7 @@
 #define SPI_TPHR                0x54
 #define SPI_WPMR                0xe4
 #define SPI_WPSR                0xe8
+#define SPI_NUM_CS              4
 
 #define SPI_CR_SPIEN            BIT(0)
 #define SPI_CR_SPIDIS           BIT(1)
@@ -1278,6 +1286,31 @@ static int64_t qom_get_int(QTestState *qts, const char *path,
     value = qdict_get_int(response, "return");
     qobject_unref(response);
     return value;
+}
+
+static bool qom_has_property(QTestState *qts, const char *path,
+                             const char *property)
+{
+    QDict *response;
+    QList *properties;
+    QListEntry *entry;
+    bool found = false;
+
+    response = qtest_qmp(qts,
+                         "{ 'execute': 'qom-list', 'arguments': { "
+                         "'path': %s } }", path);
+    g_assert_false(qdict_haskey(response, "error"));
+    properties = qdict_get_qlist(response, "return");
+    QLIST_FOREACH_ENTRY(properties, entry) {
+        QDict *item = qobject_to(QDict, qlist_entry_obj(entry));
+
+        if (g_str_equal(qdict_get_str(item, "name"), property)) {
+            found = true;
+            break;
+        }
+    }
+    qobject_unref(response);
+    return found;
 }
 
 static void send_input_key(QTestState *qts, const char *qcode, bool down)
@@ -2798,11 +2831,11 @@ static void test_pac1934_i2c_jumpers(void)
 
 static void test_flexcom_usart_registers_irq_and_protection(void)
 {
-    const uint64_t base = SAM9X7_USART6_BASE;
+    const uint64_t base = SAM9X7_USART3_BASE;
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
     uint32_t status;
 
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR), ==,
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_FLEXCOM3_BASE + FLEX_MR), ==,
                     FLEX_MODE_USART);
     g_assert_cmphex(qtest_readl(qts, base + US_MR), ==, 0xc0000000);
     g_assert_cmphex(qtest_readl(qts, base + US_CSR), ==, 0);
@@ -2891,8 +2924,8 @@ static void test_flexcom_usart_registers_irq_and_protection(void)
                     (0x200U << 8) | 1);
     qtest_writel(qts, base + US_WPMR, US_WPMR_KEY);
 
-    pmc_write_pcr(qts, 9, PMC_PCR_EN);
-    aic_configure(qts, 9, AIC_SMR_LEVEL_HIGH | 3, 0x90090009);
+    pmc_write_pcr(qts, 8, PMC_PCR_EN);
+    aic_configure(qts, 8, AIC_SMR_LEVEL_HIGH | 3, 0x80080008);
     qtest_writel(qts, base + US_MR, US_MR_NORMAL_LOCAL);
     qtest_writel(qts, base + US_BRGR, 217);
     qtest_writel(qts, base + US_CR, US_CR_RXEN | US_CR_TXEN);
@@ -2900,17 +2933,17 @@ static void test_flexcom_usart_registers_irq_and_protection(void)
     status = qtest_readl(qts, base + US_CSR);
     g_assert_cmphex(status & (US_INT_TXRDY | US_INT_TXEMPTY), ==,
                     US_INT_TXRDY | US_INT_TXEMPTY);
-    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(9));
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(8));
 
-    qtest_writeb(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR, FLEX_MODE_TWI);
+    qtest_writeb(qts, SAM9X7_FLEXCOM3_BASE + FLEX_MR, FLEX_MODE_TWI);
     g_assert_cmphex(qtest_readl(qts, base + US_MR), ==, 0);
-    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(9));
-    qtest_writeb(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR, FLEX_MODE_USART);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(8));
+    qtest_writeb(qts, SAM9X7_FLEXCOM3_BASE + FLEX_MR, FLEX_MODE_USART);
     g_assert_cmphex(qtest_readl(qts, base + US_MR), ==,
                     US_MR_NORMAL_LOCAL);
-    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(9));
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(8));
     qtest_writel(qts, base + US_IDR, US_INT_TXRDY);
-    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(9));
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(8));
 
     qtest_quit(qts);
 }
@@ -3116,14 +3149,14 @@ static void test_flexcom_usart_migration(void)
 
 static void test_flexcom_spi_registers_irq_and_protection(void)
 {
-    const uint64_t base = SAM9X7_SPI6_BASE;
+    const uint64_t base = SAM9X7_SPI3_BASE;
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
     uint32_t status;
 
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR), ==,
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_FLEXCOM3_BASE + FLEX_MR), ==,
                     FLEX_MODE_USART);
     g_assert_cmphex(qtest_readl(qts, base + SPI_SR), ==, 0);
-    qtest_writeb(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR, FLEX_MODE_SPI);
+    qtest_writeb(qts, SAM9X7_FLEXCOM3_BASE + FLEX_MR, FLEX_MODE_SPI);
     g_assert_cmphex(qtest_readl(qts, base + SPI_MR), ==, 0);
     g_assert_cmphex(qtest_readl(qts, base + SPI_SR), ==, 0);
     g_assert_cmphex(qtest_readl(qts, base + SPI_IMR), ==, 0);
@@ -3152,7 +3185,7 @@ static void test_flexcom_spi_registers_irq_and_protection(void)
     g_assert_cmphex(qtest_readl(qts, base + SPI_FMR), ==, 0x3f3f0033);
 
     qtest_system_reset(qts);
-    qtest_writeb(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR, FLEX_MODE_SPI);
+    qtest_writeb(qts, SAM9X7_FLEXCOM3_BASE + FLEX_MR, FLEX_MODE_SPI);
     qtest_writel(qts, base + SPI_WPMR,
                  SPI_WPMR_KEY | SPI_WPMR_WPEN | SPI_WPMR_WPITEN |
                  SPI_WPMR_WPCREN);
@@ -3174,8 +3207,8 @@ static void test_flexcom_spi_registers_irq_and_protection(void)
     g_assert_cmphex(qtest_readl(qts, base + SPI_WPSR), ==, 1);
     qtest_writel(qts, base + SPI_WPMR, SPI_WPMR_KEY);
 
-    pmc_write_pcr(qts, 9, PMC_PCR_EN);
-    aic_configure(qts, 9, AIC_SMR_LEVEL_HIGH | 3, 0x90090009);
+    pmc_write_pcr(qts, 8, PMC_PCR_EN);
+    aic_configure(qts, 8, AIC_SMR_LEVEL_HIGH | 3, 0x80080008);
     qtest_writel(qts, base + SPI_MR,
                  SPI_MR_MSTR | SPI_MR_LLB | SPI_MR_PCS(0xe));
     qtest_writel(qts, base + SPI_CSR(0),
@@ -3186,24 +3219,131 @@ static void test_flexcom_spi_registers_irq_and_protection(void)
     g_assert_cmphex(status & (SPI_INT_TDRE | SPI_INT_TXEMPTY |
                              SPI_STATUS_SPIENS), ==,
                     SPI_INT_TDRE | SPI_INT_TXEMPTY | SPI_STATUS_SPIENS);
-    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(9));
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(8));
 
-    qtest_writeb(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR, FLEX_MODE_TWI);
+    qtest_writeb(qts, SAM9X7_FLEXCOM3_BASE + FLEX_MR, FLEX_MODE_TWI);
     g_assert_cmphex(qtest_readl(qts, base + SPI_MR), ==, 0);
-    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(9));
-    qtest_writeb(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR, FLEX_MODE_SPI);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(8));
+    qtest_writeb(qts, SAM9X7_FLEXCOM3_BASE + FLEX_MR, FLEX_MODE_SPI);
     g_assert_cmphex(qtest_readl(qts, base + SPI_MR), ==,
                     SPI_MR_MSTR | SPI_MR_LLB | SPI_MR_PCS(0xe));
-    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(9));
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(8));
     qtest_writel(qts, base + SPI_IDR, SPI_INT_TDRE);
-    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(9));
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(8));
+
+    qtest_quit(qts);
+}
+
+static void test_flexcom_spi_instance_capabilities(void)
+{
+    static const uint8_t num_cs[] = { 2, 2, 2, 2, 4, 4 };
+    static const struct {
+        uint64_t flex_base;
+        uint64_t spi_base;
+        unsigned int pid;
+        unsigned int request;
+    } absent[] = {
+        { SAM9X7_FLEXCOM6_BASE, SAM9X7_SPI6_BASE, 9, 12 },
+        { SAM9X7_FLEXCOM12_BASE, SAM9X7_SPI12_BASE, 33, 24 },
+    };
+    const uint32_t tx_source = SAM9X7_DDR_BASE + 0x1f000;
+    const uint32_t rx_target = SAM9X7_DDR_BASE + 0x1f100;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    QDict *response;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(num_cs); i++) {
+        g_autofree char *path = g_strdup_printf("/machine/soc/spi[%u]", i);
+        unsigned int cs;
+
+        g_assert_cmpint(qom_get_int(qts, path, "num-cs"), ==, num_cs[i]);
+        for (cs = 0; cs <= SPI_NUM_CS; cs++) {
+            g_autofree char *property = g_strdup_printf("cs[%u]", cs);
+
+            g_assert_cmpint(qom_has_property(qts, path, property), ==,
+                            cs < num_cs[i]);
+        }
+    }
+    for (i = ARRAY_SIZE(num_cs); i < 13; i++) {
+        g_autofree char *path = g_strdup_printf("/machine/soc/spi[%u]", i);
+
+        response = qtest_qmp(qts,
+            "{ 'execute': 'qom-list', 'arguments': { 'path': %s } }",
+            path);
+        g_assert_true(qdict_haskey(response, "error"));
+        qobject_unref(response);
+    }
+
+    qtest_writel(qts, tx_source, 0x12345678);
+    qtest_writel(qts, rx_target, 0xa5a5a5a5);
+    for (i = 0; i < ARRAY_SIZE(absent); i++) {
+        uint32_t pending;
+
+        pmc_write_pcr(qts, absent[i].pid, PMC_PCR_EN);
+        qtest_writeb(qts, absent[i].flex_base + FLEX_MR, FLEX_MODE_SPI);
+
+        /*
+         * Probe only externally visible functionality here.  Wrapper-mode,
+         * reserved-window and common-register readback remain real-hardware
+         * questions.
+         */
+        qtest_writel(qts, absent[i].spi_base + SPI_MR,
+                     SPI_MR_MSTR | SPI_MR_LLB | SPI_MR_PCS(0xe));
+        qtest_writel(qts, absent[i].spi_base + SPI_CSR(0),
+                     SPI_CSR_BITS(8) | SPI_CSR_SCBR(217));
+        qtest_writel(qts, absent[i].spi_base + SPI_IER, SPI_INT_TDRE);
+        qtest_writel(qts, absent[i].spi_base + SPI_CR, SPI_CR_SPIEN);
+        qtest_writeb(qts, absent[i].flex_base + FLEX_THR, 0x5a);
+        qtest_clock_step(qts, 10000);
+        if (absent[i].pid < 32) {
+            pending = qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0);
+            g_assert_false(pending & BIT(absent[i].pid));
+        } else {
+            pending = qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1);
+            g_assert_false(pending & BIT(absent[i].pid - 32));
+        }
+
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_CHANNEL(0) + XDMAC_CSA,
+                     tx_source);
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_CHANNEL(0) + XDMAC_CDA,
+                     absent[i].flex_base + FLEX_THR);
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_CHANNEL(0) + XDMAC_CUBC,
+                     1);
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_CHANNEL(0) + XDMAC_CC,
+                     XDMAC_CC_TYPE_PER | XDMAC_CC_DSYNC_MEM2PER |
+                     XDMAC_CC_DWIDTH_WORD |
+                     XDMAC_CC_PERID(absent[i].request));
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
+
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_CHANNEL(1) + XDMAC_CSA,
+                     absent[i].flex_base + FLEX_RHR);
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_CHANNEL(1) + XDMAC_CDA,
+                     rx_target);
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_CHANNEL(1) + XDMAC_CUBC,
+                     1);
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_CHANNEL(1) + XDMAC_CC,
+                     XDMAC_CC_TYPE_PER | XDMAC_CC_DWIDTH_WORD |
+                     XDMAC_CC_PERID(absent[i].request + 1));
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(1));
+        qtest_clock_step(qts, 10000);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                        (BIT(0) | BIT(1)), ==, BIT(0) | BIT(1));
+        g_assert_cmphex(qtest_readl(qts,
+                                   SAM9X7_XDMAC_BASE + XDMAC_CHANNEL(0) +
+                                   XDMAC_CUBC), ==, 1);
+        g_assert_cmphex(qtest_readl(qts,
+                                   SAM9X7_XDMAC_BASE + XDMAC_CHANNEL(1) +
+                                   XDMAC_CUBC), ==, 1);
+        g_assert_cmphex(qtest_readl(qts, rx_target), ==, 0xa5a5a5a5);
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, BIT(0) | BIT(1));
+    }
 
     qtest_quit(qts);
 }
 
 static void test_flexcom_spi_fifo_loopback_and_timing(void)
 {
-    const uint64_t base = SAM9X7_SPI6_BASE;
+    const uint64_t base = SAM9X7_SPI3_BASE;
     const uint32_t fifo_mode = SPI_FMR_TXRDYM_TWO |
                                SPI_FMR_RXRDYM_TWO |
                                SPI_FMR_TXFTHRES(0) |
@@ -3215,8 +3355,8 @@ static void test_flexcom_spi_fifo_loopback_and_timing(void)
     uint32_t status;
     unsigned int i;
 
-    pmc_write_pcr(qts, 9, PMC_PCR_EN);
-    qtest_writeb(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR, FLEX_MODE_SPI);
+    pmc_write_pcr(qts, 8, PMC_PCR_EN);
+    qtest_writeb(qts, SAM9X7_FLEXCOM3_BASE + FLEX_MR, FLEX_MODE_SPI);
     qtest_writel(qts, base + SPI_MR,
                  SPI_MR_MSTR | SPI_MR_LLB | SPI_MR_PCS(0xe));
     qtest_writel(qts, base + SPI_CSR(0),
@@ -3227,15 +3367,15 @@ static void test_flexcom_spi_fifo_loopback_and_timing(void)
     qtest_writel(qts, base + SPI_FMR, fifo_mode);
     qtest_writel(qts, base + SPI_CR, SPI_CR_SPIEN);
 
-    dlybs_ns = usart_cycles_to_ns(qts, 9, 11);
-    transfer_ns = usart_cycles_to_ns(qts, 9, 16 * 217);
-    dlybct_ns = usart_cycles_to_ns(qts, 9, 3 * 32);
+    dlybs_ns = usart_cycles_to_ns(qts, 8, 11);
+    transfer_ns = usart_cycles_to_ns(qts, 8, 16 * 217);
+    dlybct_ns = usart_cycles_to_ns(qts, 8, 3 * 32);
     g_assert_cmpuint(dlybs_ns, >, 1);
     g_assert_cmpuint(transfer_ns, >, dlybs_ns);
     g_assert_cmpuint(dlybct_ns, >, 1);
 
-    qtest_writel(qts, SAM9X7_FLEXCOM6_BASE + FLEX_THR, 0x44332211);
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_FLEXCOM6_BASE + FLEX_THR), ==,
+    qtest_writel(qts, SAM9X7_FLEXCOM3_BASE + FLEX_THR, 0x44332211);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_FLEXCOM3_BASE + FLEX_THR), ==,
                     0x2211);
     g_assert_cmphex(qtest_readl(qts, base + SPI_FLR), ==, 1);
     qtest_clock_step(qts, dlybs_ns - 1);
@@ -3261,7 +3401,7 @@ static void test_flexcom_spi_fifo_loopback_and_timing(void)
                              SPI_INT_RXFTHF), ==,
                     SPI_INT_TXFEF | SPI_INT_TXFTHF | SPI_INT_RXFTHF);
     g_assert_cmphex(qtest_readw(qts,
-                               SAM9X7_FLEXCOM6_BASE + FLEX_RHR), ==,
+                               SAM9X7_FLEXCOM3_BASE + FLEX_RHR), ==,
                     0x2211);
     g_assert_cmphex(qtest_readl(qts, base + SPI_RDR), ==, 0x000e4433);
     g_assert_cmphex(qtest_readl(qts, base + SPI_FLR), ==, 0);
@@ -3269,8 +3409,8 @@ static void test_flexcom_spi_fifo_loopback_and_timing(void)
     g_assert_true(qtest_readl(qts, base + SPI_SR) & SPI_INT_RXFPTEF);
 
     qtest_system_reset(qts);
-    pmc_write_pcr(qts, 9, PMC_PCR_EN);
-    qtest_writeb(qts, SAM9X7_FLEXCOM6_BASE + FLEX_MR, FLEX_MODE_SPI);
+    pmc_write_pcr(qts, 8, PMC_PCR_EN);
+    qtest_writeb(qts, SAM9X7_FLEXCOM3_BASE + FLEX_MR, FLEX_MODE_SPI);
     qtest_writel(qts, base + SPI_MR,
                  SPI_MR_MSTR | SPI_MR_LLB | SPI_MR_PCS(0xe));
     qtest_writel(qts, base + SPI_CSR(0), SPI_CSR_BITS(16));
@@ -4729,7 +4869,7 @@ static void test_flexcom_twi_xdmac_requests_and_mode_gating(void)
                  XDMAC_CC_TYPE_PER | XDMAC_CC_DSYNC_MEM2PER |
                  XDMAC_CC_DWIDTH_WORD | XDMAC_CC_PERID(12) |
                  XDMAC_CC_SAM_INC);
-    qtest_writeb(qts, flex_base + FLEX_MR, FLEX_MODE_SPI);
+    qtest_writeb(qts, flex_base + FLEX_MR, FLEX_MODE_NONE);
     qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
     qtest_clock_step(qts, 10000);
     g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(0));
@@ -11017,6 +11157,8 @@ int main(int argc, char **argv)
                    test_flexcom_usart_xdmac_requests_and_mode_gating);
     qtest_add_func("sam9x75/flexcom-spi/registers-irq-and-protection",
                    test_flexcom_spi_registers_irq_and_protection);
+    qtest_add_func("sam9x75/flexcom-spi/instance-capabilities",
+                   test_flexcom_spi_instance_capabilities);
     qtest_add_func("sam9x75/flexcom-spi/fifo-loopback-and-timing",
                    test_flexcom_spi_fifo_loopback_and_timing);
     qtest_add_func("sam9x75/flexcom-spi/migration",
