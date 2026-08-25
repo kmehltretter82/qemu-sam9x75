@@ -270,7 +270,7 @@ Support matrix
        ``END``, complete the transfer, or retry after the fault.  Incomplete
        descriptor tables report an ADMA length mismatch without raising
        transfer-complete; ``INT`` still raises DMA status when its descriptor
-       line itself completed.  At QEMU commit ``e5936216dd7e``, the pinned
+       line itself completed.  At QEMU commit ``cd0edc328d6e``, the pinned
        AT91Bootstrap SD/ADMA path loaded unmodified U-Boot, which initialized
        DDR, NAND, MMC and QSPI and loaded Linux from SD.  Linux reached its
        embedded-initramfs shell.  A disposable 512 MiB derivative that
@@ -782,7 +782,7 @@ material; protect stored artifacts and use an encrypted migration channel.
 
 The following pinned AT91Bootstrap ELF and SD image are the integration target
 for the current media boot path.  This flow was repeated at QEMU commit
-``e5936216dd7e`` after exact EBI decode was introduced::
+``cd0edc328d6e`` after the TC1, UDPHS and M_CAN refinement waves::
 
   qemu-system-arm -M sam9x75-curiosity \
     -kernel sam9x7-sdcardboot-uboot-4.0.13.elf \
