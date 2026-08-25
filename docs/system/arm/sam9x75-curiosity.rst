@@ -789,7 +789,8 @@ material; protect stored artifacts and use an encrypted migration channel.
 
 The following pinned AT91Bootstrap ELF and SD image are the integration target
 for the current media boot path.  This flow was repeated at QEMU commit
-``cd0edc328d6e`` after the TC1, UDPHS and M_CAN refinement waves::
+``d0c6dff95350`` after the TC1, UDPHS and M_CAN refinement and protocol-status
+waves::
 
   qemu-system-arm -M sam9x75-curiosity \
     -kernel sam9x7-sdcardboot-uboot-4.0.13.elf \
