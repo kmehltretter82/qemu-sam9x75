@@ -82,6 +82,7 @@
 #define SAM9X7_PMC_BASE         0xfffffc00
 #define SAM9X7_WDT_BASE         0xffffff80
 
+#define SDHCI_SYSAD             0x00
 #define SDHCI_BLKSIZE           0x04
 #define SDHCI_BLKCNT            0x06
 #define SDHCI_ARGUMENT          0x08
@@ -114,7 +115,9 @@
 #define SDHCI_TRNS_DMA          BIT(0)
 #define SDHCI_TRNS_BLK_CNT_EN   BIT(1)
 #define SDHCI_TRNS_READ         BIT(4)
-#define SDHCI_CMD_RESPONSE      3
+#define SDHCI_TRNS_MULTI        BIT(5)
+#define SDHCI_CMD_RESPONSE      2
+#define SDHCI_CMD_RESPONSE_BUSY 3
 #define SDHCI_CMD_DATA_PRESENT  BIT(5)
 #define SDHCI_CTRL_ADMA2_32     BIT(4)
 #define SDHCI_CLOCK_ENABLE      (BIT(2) | BIT(1) | BIT(0))
@@ -128,13 +131,19 @@
 #define SDMMC_CACR_CAPWREN      BIT(0)
 #define SDHCI_INT_CMD_COMPLETE  BIT(0)
 #define SDHCI_INT_XFER_COMPLETE BIT(1)
+#define SDHCI_INT_DMA           BIT(3)
 #define SDHCI_INT_ERROR         BIT(15)
 #define SDHCI_ERR_ADMA          BIT(9)
 
 #define SDHCI_CMD_INDEX(index)  ((index) << 8)
 #define SDHCI_ADMA2_VALID       BIT(0)
 #define SDHCI_ADMA2_END         BIT(1)
+#define SDHCI_ADMA2_INT         BIT(2)
 #define SDHCI_ADMA2_TRAN        BIT(5)
+#define SDHCI_ADMA_STATE_STOP   0
+#define SDHCI_ADMA_STATE_FDS    1
+#define SDHCI_ADMA_STATE_TFR    3
+#define SDHCI_ADMA_LENGTH_MISMATCH BIT(2)
 
 #define CLOCK_PERIOD_1SEC       (1000000000ULL << 32)
 #define CLOCK_PERIOD_FROM_HZ(hz) \
@@ -10334,36 +10343,28 @@ static void sdhci_issue_command(QTestState *qts, uint16_t block_size,
     qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_CMDREG, command);
 }
 
-static void test_sdhci_adma2_linux_nop_terminator(void)
+static QTestState *sdhci_start_test_card(const uint8_t *contents,
+                                         size_t contents_len,
+                                         char **sd_path)
 {
-    const uint64_t descriptor_addr = SAM9X7_DDR_BASE + 0x1000;
-    const uint64_t data_addr = SAM9X7_DDR_BASE + 0x2000;
-    g_autofree char *sd_path = NULL;
-    uint8_t expected[512];
-    uint8_t actual[512];
     QTestState *qts;
     GError *error = NULL;
     uint16_t rca;
+    ssize_t ret;
     int fd;
-    int ret;
-    size_t i;
 
-    for (i = 0; i < sizeof(expected); i++) {
-        expected[i] = i ^ 0xa5;
-    }
-
-    fd = g_file_open_tmp("sam9x75-sdhci-XXXXXX", &sd_path, &error);
+    fd = g_file_open_tmp("sam9x75-sdhci-XXXXXX", sd_path, &error);
     g_assert_no_error(error);
     g_assert_cmpint(fd, >=, 0);
-    ret = write(fd, expected, sizeof(expected));
-    g_assert_cmpint(ret, ==, sizeof(expected));
+    ret = write(fd, contents, contents_len);
+    g_assert_cmpint(ret, ==, contents_len);
     ret = ftruncate(fd, 1 << 20);
     g_assert_cmpint(ret, ==, 0);
     close(fd);
 
     qts = qtest_initf(SAM9X75_MACHINE
                       " -drive file=%s,if=sd,format=raw,auto-read-only=off",
-                      sd_path);
+                      *sd_path);
 
     ebi_enable_ddr(qts);
     qtest_writeb(qts, SAM9X7_SDMMC0_BASE + SDHCI_SWRST,
@@ -10380,47 +10381,446 @@ static void test_sdhci_adma2_linux_nop_terminator(void)
                         SDHCI_CMD_INDEX(3) | SDHCI_CMD_RESPONSE);
     rca = qtest_readl(qts, SAM9X7_SDMMC0_BASE + SDHCI_RSPREG0) >> 16;
     sdhci_issue_command(qts, 0, 0, (uint32_t)rca << 16, 0,
-                        SDHCI_CMD_INDEX(7) | SDHCI_CMD_RESPONSE);
+                        SDHCI_CMD_INDEX(7) | SDHCI_CMD_RESPONSE_BUSY);
 
+    return qts;
+}
+
+static void sdhci_enable_adma_interrupts(QTestState *qts)
+{
     qtest_writeb(qts, SAM9X7_SDMMC0_BASE + SDHCI_HOSTCTL,
                  SDHCI_CTRL_ADMA2_32);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_NORINTSTSEN,
+                 SDHCI_INT_CMD_COMPLETE | SDHCI_INT_XFER_COMPLETE |
+                 SDHCI_INT_DMA);
+    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_ERRINTSTSEN,
+                 SDHCI_ERR_ADMA);
+}
+
+static void sdhci_assert_adma_fault(QTestState *qts, uint8_t state,
+                                    uint32_t descriptor_addr,
+                                    bool dma_interrupt)
+{
+    uint16_t normal_status;
+
+    g_assert_cmphex(qtest_readb(qts,
+                               SAM9X7_SDMMC0_BASE + SDHCI_ADMAERR),
+                    ==, state);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_SDMMC0_BASE + SDHCI_ADMASYSADDR),
+                    ==, descriptor_addr);
+    g_assert_cmphex(qtest_readw(qts,
+                               SAM9X7_SDMMC0_BASE + SDHCI_ERRINTSTS) &
+                    SDHCI_ERR_ADMA, !=, 0);
+
+    normal_status = qtest_readw(qts,
+                                SAM9X7_SDMMC0_BASE + SDHCI_NORINTSTS);
+    g_assert_cmphex(normal_status & SDHCI_INT_ERROR, !=, 0);
+    g_assert_cmphex(normal_status & SDHCI_INT_XFER_COMPLETE, ==, 0);
+    g_assert_cmphex(normal_status & SDHCI_INT_DMA, ==,
+                    dma_interrupt ? SDHCI_INT_DMA : 0);
+}
+
+static void test_sdhci_adma2_linux_nop_terminator(void)
+{
+    const uint64_t descriptor_addr = SAM9X7_DDR_BASE + 0x1000;
+    const uint64_t data_addr = SAM9X7_DDR_BASE + 0x2000;
+    g_autofree char *sd_path = NULL;
+    uint8_t expected[4096];
+    uint8_t actual[4096];
+    QTestState *qts;
+    size_t i;
+
+    for (i = 0; i < sizeof(expected); i++) {
+        expected[i] = i ^ 0xa5;
+    }
+
+    qts = sdhci_start_test_card(expected, sizeof(expected), &sd_path);
+
+    sdhci_enable_adma_interrupts(qts);
     qtest_writel(qts, descriptor_addr,
-                 (512U << 16) | SDHCI_ADMA2_TRAN | SDHCI_ADMA2_VALID);
+                 (sizeof(expected) << 16) |
+                 SDHCI_ADMA2_TRAN | SDHCI_ADMA2_VALID);
     qtest_writel(qts, descriptor_addr + 4, data_addr);
     qtest_writel(qts, descriptor_addr + 8,
                  SDHCI_ADMA2_END | SDHCI_ADMA2_VALID);
     qtest_writel(qts, descriptor_addr + 12, 0);
     qtest_writel(qts, SAM9X7_SDMMC0_BASE + SDHCI_ADMASYSADDR,
                  descriptor_addr);
-    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_NORINTSTSEN,
-                 SDHCI_INT_CMD_COMPLETE | SDHCI_INT_XFER_COMPLETE);
-    qtest_writew(qts, SAM9X7_SDMMC0_BASE + SDHCI_ERRINTSTSEN,
-                 SDHCI_ERR_ADMA);
-
-    /* Linux terminates ADMA2 tables with a valid END/NOP descriptor. */
-    sdhci_issue_command(qts, sizeof(expected), 1, 0,
+    /* Match the 4 KiB Linux table sampled on physical SAM9X75 silicon. */
+    sdhci_issue_command(qts, 512, sizeof(expected) / 512, 0,
                         SDHCI_TRNS_DMA | SDHCI_TRNS_BLK_CNT_EN |
-                        SDHCI_TRNS_READ,
-                        SDHCI_CMD_INDEX(17) | SDHCI_CMD_DATA_PRESENT |
+                        SDHCI_TRNS_READ | SDHCI_TRNS_MULTI,
+                        SDHCI_CMD_INDEX(18) | SDHCI_CMD_DATA_PRESENT |
                         SDHCI_CMD_RESPONSE);
     qtest_clock_step(qts, 1000);
 
     g_assert_cmphex(qtest_readb(qts, SAM9X7_SDMMC0_BASE + SDHCI_ADMAERR),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_SDMMC0_BASE + SDHCI_ADMASYSADDR),
+                    ==, descriptor_addr + 16);
+    g_assert_cmphex(qtest_readw(qts,
+                               SAM9X7_SDMMC0_BASE + SDHCI_BLKCNT),
                     ==, 0);
     g_assert_cmphex(qtest_readw(qts,
                                SAM9X7_SDMMC0_BASE + SDHCI_ERRINTSTS) &
                     SDHCI_ERR_ADMA, ==, 0);
     g_assert_cmphex(qtest_readw(qts,
                                SAM9X7_SDMMC0_BASE + SDHCI_NORINTSTS) &
-                    SDHCI_INT_ERROR, ==, 0);
-    g_assert_cmphex(qtest_readw(qts,
-                               SAM9X7_SDMMC0_BASE + SDHCI_NORINTSTS) &
-                    SDHCI_INT_XFER_COMPLETE, !=, 0);
+                    (SDHCI_INT_ERROR | SDHCI_INT_DMA |
+                     SDHCI_INT_XFER_COMPLETE),
+                    ==, SDHCI_INT_XFER_COMPLETE);
     qtest_memread(qts, data_addr, actual, sizeof(actual));
     g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
 
     qtest_quit(qts);
     unlink(sd_path);
+}
+
+static void test_sdhci_adma2_end_int_success(void)
+{
+    const uint32_t descriptor_addr = SAM9X7_SRAM0_BASE + 0x1000;
+    const uint32_t data_addr = SAM9X7_SRAM0_BASE + 0x2000;
+    g_autofree char *sd_path = NULL;
+    uint8_t expected[512];
+    uint8_t actual[512];
+    QTestState *qts;
+    size_t i;
+
+    for (i = 0; i < sizeof(expected); i++) {
+        expected[i] = i ^ 0xc3;
+    }
+
+    qts = sdhci_start_test_card(expected, sizeof(expected), &sd_path);
+    sdhci_enable_adma_interrupts(qts);
+
+    qtest_writel(qts, descriptor_addr,
+                 (sizeof(expected) << 16) | SDHCI_ADMA2_TRAN |
+                 SDHCI_ADMA2_INT | SDHCI_ADMA2_END |
+                 SDHCI_ADMA2_VALID);
+    qtest_writel(qts, descriptor_addr + 4, data_addr);
+    qtest_writel(qts, SAM9X7_SDMMC0_BASE + SDHCI_ADMASYSADDR,
+                 descriptor_addr);
+
+    sdhci_issue_command(qts, sizeof(expected), 1, 0,
+                        SDHCI_TRNS_DMA | SDHCI_TRNS_BLK_CNT_EN |
+                        SDHCI_TRNS_READ | SDHCI_TRNS_MULTI,
+                        SDHCI_CMD_INDEX(18) | SDHCI_CMD_DATA_PRESENT |
+                        SDHCI_CMD_RESPONSE);
+    qtest_clock_step(qts, 1000);
+
+    g_assert_cmphex(qtest_readb(qts,
+                               SAM9X7_SDMMC0_BASE + SDHCI_ADMAERR),
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_SDMMC0_BASE + SDHCI_ADMASYSADDR),
+                    ==, descriptor_addr + 8);
+    g_assert_cmphex(qtest_readw(qts,
+                               SAM9X7_SDMMC0_BASE + SDHCI_ERRINTSTS) &
+                    SDHCI_ERR_ADMA, ==, 0);
+    g_assert_cmphex(qtest_readw(qts,
+                               SAM9X7_SDMMC0_BASE + SDHCI_NORINTSTS) &
+                    (SDHCI_INT_ERROR | SDHCI_INT_DMA |
+                     SDHCI_INT_XFER_COMPLETE),
+                    ==, SDHCI_INT_DMA | SDHCI_INT_XFER_COMPLETE);
+    qtest_memread(qts, data_addr, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+
+    qtest_quit(qts);
+    unlink(sd_path);
+}
+
+static void test_sdhci_adma2_overlong_table_mismatch(void)
+{
+    const uint32_t descriptor_addr = SAM9X7_SRAM0_BASE + 0x1000;
+    const uint32_t data_addr = SAM9X7_SRAM0_BASE + 0x2000;
+    g_autofree char *sd_path = NULL;
+    uint8_t expected[512];
+    uint8_t actual[1024];
+    QTestState *qts;
+    size_t i;
+
+    for (i = 0; i < sizeof(expected); i++) {
+        expected[i] = i ^ 0x3c;
+    }
+
+    qts = sdhci_start_test_card(expected, sizeof(expected), &sd_path);
+    sdhci_enable_adma_interrupts(qts);
+    qtest_memset(qts, data_addr, 0xa7, sizeof(actual));
+
+    qtest_writel(qts, descriptor_addr,
+                 (sizeof(expected) << 16) |
+                 SDHCI_ADMA2_TRAN | SDHCI_ADMA2_VALID);
+    qtest_writel(qts, descriptor_addr + 4, data_addr);
+    qtest_writel(qts, descriptor_addr + 8,
+                 (sizeof(expected) << 16) | SDHCI_ADMA2_TRAN |
+                 SDHCI_ADMA2_INT | SDHCI_ADMA2_END |
+                 SDHCI_ADMA2_VALID);
+    qtest_writel(qts, descriptor_addr + 12,
+                 data_addr + sizeof(expected));
+    qtest_writel(qts, SAM9X7_SDMMC0_BASE + SDHCI_ADMASYSADDR,
+                 descriptor_addr);
+
+    /* The descriptor table must not transfer beyond the requested block. */
+    sdhci_issue_command(qts, sizeof(expected), 1, 0,
+                        SDHCI_TRNS_DMA | SDHCI_TRNS_BLK_CNT_EN |
+                        SDHCI_TRNS_READ | SDHCI_TRNS_MULTI,
+                        SDHCI_CMD_INDEX(18) | SDHCI_CMD_DATA_PRESENT |
+                        SDHCI_CMD_RESPONSE);
+    qtest_clock_step(qts, 1000);
+
+    sdhci_assert_adma_fault(qts,
+                            SDHCI_ADMA_LENGTH_MISMATCH |
+                            SDHCI_ADMA_STATE_TFR,
+                            descriptor_addr + 16, false);
+    qtest_memread(qts, data_addr, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(expected), expected, sizeof(expected));
+    for (i = sizeof(expected); i < sizeof(actual); i++) {
+        g_assert_cmphex(actual[i], ==, 0xa7);
+    }
+
+    qtest_quit(qts);
+    unlink(sd_path);
+}
+
+static void test_sdhci_adma2_block_count_mismatch(void)
+{
+    const uint32_t descriptor_addr = SAM9X7_SRAM0_BASE + 0x1000;
+    const uint32_t data_addr = SAM9X7_SRAM0_BASE + 0x2000;
+    g_autofree char *sd_path = NULL;
+    uint8_t expected[512];
+    uint8_t actual[512];
+    QTestState *qts;
+    size_t i;
+
+    for (i = 0; i < sizeof(expected); i++) {
+        expected[i] = i ^ 0x96;
+    }
+
+    qts = sdhci_start_test_card(expected, sizeof(expected), &sd_path);
+    sdhci_enable_adma_interrupts(qts);
+
+    qtest_writel(qts, descriptor_addr,
+                 (sizeof(expected) << 16) | SDHCI_ADMA2_TRAN |
+                 SDHCI_ADMA2_INT | SDHCI_ADMA2_END |
+                 SDHCI_ADMA2_VALID);
+    qtest_writel(qts, descriptor_addr + 4, data_addr);
+    qtest_writel(qts, SAM9X7_SDMMC0_BASE + SDHCI_ADMASYSADDR,
+                 descriptor_addr);
+
+    /* The table describes one block, while the command requests two. */
+    sdhci_issue_command(qts, sizeof(expected), 2, 0,
+                        SDHCI_TRNS_DMA | SDHCI_TRNS_BLK_CNT_EN |
+                        SDHCI_TRNS_READ | SDHCI_TRNS_MULTI,
+                        SDHCI_CMD_INDEX(18) | SDHCI_CMD_DATA_PRESENT |
+                        SDHCI_CMD_RESPONSE);
+    qtest_clock_step(qts, 1000);
+
+    sdhci_assert_adma_fault(qts,
+                            SDHCI_ADMA_LENGTH_MISMATCH |
+                            SDHCI_ADMA_STATE_TFR,
+                            descriptor_addr + 8, true);
+    g_assert_cmphex(qtest_readw(qts,
+                               SAM9X7_SDMMC0_BASE + SDHCI_BLKCNT),
+                    ==, 1);
+    qtest_memread(qts, data_addr, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+
+    qtest_quit(qts);
+    unlink(sd_path);
+}
+
+static void test_sdhci_adma2_partial_end_nop_mismatch(void)
+{
+    const uint32_t descriptor_addr = SAM9X7_SRAM0_BASE + 0x1000;
+    const uint32_t data_addr = SAM9X7_SRAM0_BASE + 0x2000;
+    g_autofree char *sd_path = NULL;
+    uint8_t expected[512];
+    uint8_t actual[512];
+    QTestState *qts;
+    size_t i;
+
+    for (i = 0; i < sizeof(expected); i++) {
+        expected[i] = i ^ 0x69;
+    }
+
+    qts = sdhci_start_test_card(expected, sizeof(expected), &sd_path);
+    sdhci_enable_adma_interrupts(qts);
+    qtest_memset(qts, data_addr, 0xa7, sizeof(actual));
+
+    /* A partial transfer followed by Linux's END/NOP must not succeed. */
+    qtest_writel(qts, descriptor_addr,
+                 (128U << 16) | SDHCI_ADMA2_TRAN | SDHCI_ADMA2_VALID);
+    qtest_writel(qts, descriptor_addr + 4, data_addr);
+    qtest_writel(qts, descriptor_addr + 8,
+                 SDHCI_ADMA2_INT | SDHCI_ADMA2_END | SDHCI_ADMA2_VALID);
+    qtest_writel(qts, descriptor_addr + 12, 0);
+    qtest_writel(qts, SAM9X7_SDMMC0_BASE + SDHCI_ADMASYSADDR,
+                 descriptor_addr);
+
+    sdhci_issue_command(qts, sizeof(expected), 1, 0,
+                        SDHCI_TRNS_DMA | SDHCI_TRNS_READ,
+                        SDHCI_CMD_INDEX(17) | SDHCI_CMD_DATA_PRESENT |
+                        SDHCI_CMD_RESPONSE);
+    qtest_clock_step(qts, 1000);
+
+    sdhci_assert_adma_fault(qts,
+                            SDHCI_ADMA_LENGTH_MISMATCH |
+                            SDHCI_ADMA_STATE_STOP,
+                            descriptor_addr + 16, true);
+    qtest_memread(qts, data_addr, actual, sizeof(actual));
+    g_assert_cmpmem(actual, 128, expected, 128);
+    for (i = 128; i < sizeof(actual); i++) {
+        g_assert_cmphex(actual[i], ==, 0xa7);
+    }
+
+    qtest_quit(qts);
+    unlink(sd_path);
+}
+
+static void test_sdhci_adma2_descriptor_tail_fault(void)
+{
+    const uint32_t descriptor_addr = SAM9X7_SRAM1_BASE + 0xffc;
+    g_autofree char *sd_path = NULL;
+    uint8_t sector[512] = {};
+    QTestState *qts;
+
+    qts = sdhci_start_test_card(sector, sizeof(sector), &sd_path);
+    sdhci_enable_adma_interrupts(qts);
+
+    /*
+     * Only the first half of this descriptor is mapped.  If the failed
+     * eight-byte fetch were ignored, these attributes would complete the
+     * command as a valid END/NOP descriptor.
+     */
+    qtest_writel(qts, descriptor_addr,
+                 SDHCI_ADMA2_VALID | SDHCI_ADMA2_END | SDHCI_ADMA2_INT);
+    qtest_writel(qts, SAM9X7_SDMMC0_BASE + SDHCI_ADMASYSADDR,
+                 descriptor_addr);
+
+    sdhci_issue_command(qts, sizeof(sector), 1, 0,
+                        SDHCI_TRNS_DMA | SDHCI_TRNS_BLK_CNT_EN |
+                        SDHCI_TRNS_READ,
+                        SDHCI_CMD_INDEX(17) | SDHCI_CMD_DATA_PRESENT |
+                        SDHCI_CMD_RESPONSE);
+    qtest_clock_step(qts, 1000);
+
+    sdhci_assert_adma_fault(qts, SDHCI_ADMA_STATE_FDS, descriptor_addr,
+                            false);
+
+    qtest_quit(qts);
+    unlink(sd_path);
+}
+
+static void test_sdhci_adma2_mmio_descriptor_fault(void)
+{
+    const uint32_t descriptor_addr = SAM9X7_SDMMC0_BASE;
+    g_autofree char *sd_path = NULL;
+    uint8_t sector[512] = {};
+    QTestState *qts;
+
+    qts = sdhci_start_test_card(sector, sizeof(sector), &sd_path);
+    sdhci_enable_adma_interrupts(qts);
+
+    /*
+     * Make the controller's first eight MMIO bytes look like a valid
+     * END/NOP descriptor.  ADMA fetches are memory-only bus transactions
+     * and must reject this device region instead of executing it.
+     */
+    qtest_writel(qts, SAM9X7_SDMMC0_BASE + SDHCI_SYSAD,
+                 SDHCI_ADMA2_VALID | SDHCI_ADMA2_END | SDHCI_ADMA2_INT);
+    qtest_writel(qts, SAM9X7_SDMMC0_BASE + SDHCI_ADMASYSADDR,
+                 descriptor_addr);
+
+    sdhci_issue_command(qts, sizeof(sector), 1, 0,
+                        SDHCI_TRNS_DMA | SDHCI_TRNS_BLK_CNT_EN |
+                        SDHCI_TRNS_READ,
+                        SDHCI_CMD_INDEX(17) | SDHCI_CMD_DATA_PRESENT |
+                        SDHCI_CMD_RESPONSE);
+    qtest_clock_step(qts, 1000);
+
+    sdhci_assert_adma_fault(qts, SDHCI_ADMA_STATE_FDS, descriptor_addr,
+                            false);
+
+    qtest_quit(qts);
+    unlink(sd_path);
+}
+
+static void test_sdhci_adma2_data_fault(bool card_to_memory)
+{
+    const uint32_t descriptor_addr = SAM9X7_SRAM0_BASE + 0x1000;
+    const uint32_t fault_addr = SAM9X7_SDMMC1_BASE;
+    g_autofree char *disk_contents = NULL;
+    g_autofree char *sd_path = NULL;
+    uint8_t sector[512];
+    QTestState *qts;
+    GError *error = NULL;
+    gsize disk_len;
+    uint32_t attributes = (sizeof(sector) << 16) | SDHCI_ADMA2_TRAN |
+                          SDHCI_ADMA2_INT | SDHCI_ADMA2_VALID;
+    uint16_t transfer_mode = SDHCI_TRNS_DMA | SDHCI_TRNS_BLK_CNT_EN |
+                             SDHCI_TRNS_MULTI;
+    uint16_t command;
+    size_t i;
+
+    for (i = 0; i < sizeof(sector); i++) {
+        sector[i] = i ^ 0x5a;
+    }
+
+    qts = sdhci_start_test_card(sector, sizeof(sector), &sd_path);
+    sdhci_enable_adma_interrupts(qts);
+
+    if (card_to_memory) {
+        attributes |= SDHCI_ADMA2_END;
+    }
+    qtest_writel(qts, descriptor_addr, attributes);
+    qtest_writel(qts, descriptor_addr + 4, fault_addr);
+    qtest_writel(qts, descriptor_addr + 8,
+                 SDHCI_ADMA2_END | SDHCI_ADMA2_VALID);
+    qtest_writel(qts, descriptor_addr + 12, 0);
+    qtest_writel(qts, SAM9X7_SDMMC0_BASE + SDHCI_ADMASYSADDR,
+                 descriptor_addr);
+
+    if (card_to_memory) {
+        transfer_mode |= SDHCI_TRNS_READ;
+        command = SDHCI_CMD_INDEX(18);
+    } else {
+        command = SDHCI_CMD_INDEX(25);
+    }
+
+    sdhci_issue_command(qts, sizeof(sector), 1, 0, transfer_mode,
+                        command | SDHCI_CMD_DATA_PRESENT |
+                        SDHCI_CMD_RESPONSE);
+
+    /* Neither END handling nor a later retry may continue after a fault. */
+    qtest_clock_step(qts, 1000);
+    sdhci_assert_adma_fault(qts, SDHCI_ADMA_STATE_TFR,
+                            descriptor_addr + 8, false);
+    qtest_clock_step(qts, 1000);
+    sdhci_assert_adma_fault(qts, SDHCI_ADMA_STATE_TFR,
+                            descriptor_addr + 8, false);
+
+    qtest_quit(qts);
+
+    if (!card_to_memory) {
+        g_file_get_contents(sd_path, &disk_contents, &disk_len, &error);
+        g_assert_no_error(error);
+        g_assert_cmpuint(disk_len, >=, sizeof(sector));
+        g_assert_cmpmem(disk_contents, sizeof(sector),
+                        sector, sizeof(sector));
+    }
+    unlink(sd_path);
+}
+
+static void test_sdhci_adma2_read_data_fault(void)
+{
+    test_sdhci_adma2_data_fault(true);
+}
+
+static void test_sdhci_adma2_write_data_fault(void)
+{
+    test_sdhci_adma2_data_fault(false);
 }
 
 static void test_sdhci_preset_registers(void)
@@ -12234,6 +12634,22 @@ int main(int argc, char **argv)
                    test_wdt_events_and_system_irq);
     qtest_add_func("sam9x75/sdhci/adma2-linux-nop-terminator",
                    test_sdhci_adma2_linux_nop_terminator);
+    qtest_add_func("sam9x75/sdhci/adma2-end-int-success",
+                   test_sdhci_adma2_end_int_success);
+    qtest_add_func("sam9x75/sdhci/adma2-block-count-mismatch",
+                   test_sdhci_adma2_block_count_mismatch);
+    qtest_add_func("sam9x75/sdhci/adma2-overlong-table-mismatch",
+                   test_sdhci_adma2_overlong_table_mismatch);
+    qtest_add_func("sam9x75/sdhci/adma2-partial-end-nop-mismatch",
+                   test_sdhci_adma2_partial_end_nop_mismatch);
+    qtest_add_func("sam9x75/sdhci/adma2-descriptor-tail-fault",
+                   test_sdhci_adma2_descriptor_tail_fault);
+    qtest_add_func("sam9x75/sdhci/adma2-mmio-descriptor-fault",
+                   test_sdhci_adma2_mmio_descriptor_fault);
+    qtest_add_func("sam9x75/sdhci/adma2-read-data-fault",
+                   test_sdhci_adma2_read_data_fault);
+    qtest_add_func("sam9x75/sdhci/adma2-write-data-fault",
+                   test_sdhci_adma2_write_data_fault);
     qtest_add_func("sam9x75/sdhci/preset-registers",
                    test_sdhci_preset_registers);
     qtest_add_func("sam9x75/sdhci/host-control2-migration",

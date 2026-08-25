@@ -734,15 +734,19 @@ typedef struct ADMADescr {
     uint8_t incr;
 } ADMADescr;
 
-static void get_adma_description(SDHCIState *s, ADMADescr *dscr)
+static MemTxResult get_adma_description(SDHCIState *s, ADMADescr *dscr)
 {
+    const MemTxAttrs attrs = { .memory = true };
+    uint8_t adma2_64[12] = {};
     uint32_t adma1 = 0;
     uint64_t adma2 = 0;
     hwaddr entry_addr = (hwaddr)s->admasysaddr;
+    MemTxResult res = MEMTX_OK;
+
     switch (SDHC_DMA_TYPE(s->hostctl1)) {
     case SDHC_CTRL_ADMA2_32:
-        dma_memory_read(s->dma_as, entry_addr, &adma2, sizeof(adma2),
-                        MEMTXATTRS_UNSPECIFIED);
+        res = dma_memory_read(s->dma_as, entry_addr, &adma2, sizeof(adma2),
+                              attrs);
         adma2 = le64_to_cpu(adma2);
         /*
          * The spec does not specify endianness of descriptor table.
@@ -754,8 +758,8 @@ static void get_adma_description(SDHCIState *s, ADMADescr *dscr)
         dscr->incr = 8;
         break;
     case SDHC_CTRL_ADMA1_32:
-        dma_memory_read(s->dma_as, entry_addr, &adma1, sizeof(adma1),
-                        MEMTXATTRS_UNSPECIFIED);
+        res = dma_memory_read(s->dma_as, entry_addr, &adma1, sizeof(adma1),
+                              attrs);
         adma1 = le32_to_cpu(adma1);
         dscr->addr = (hwaddr)(adma1 & 0xFFFFF000);
         dscr->attr = (uint8_t)extract32(adma1, 0, 7);
@@ -767,18 +771,38 @@ static void get_adma_description(SDHCIState *s, ADMADescr *dscr)
         }
         break;
     case SDHC_CTRL_ADMA2_64:
-        dma_memory_read(s->dma_as, entry_addr, &dscr->attr, 1,
-                        MEMTXATTRS_UNSPECIFIED);
-        dma_memory_read(s->dma_as, entry_addr + 2, &dscr->length, 2,
-                        MEMTXATTRS_UNSPECIFIED);
-        dscr->length = le16_to_cpu(dscr->length);
-        dma_memory_read(s->dma_as, entry_addr + 4, &dscr->addr, 8,
-                        MEMTXATTRS_UNSPECIFIED);
-        dscr->addr = le64_to_cpu(dscr->addr);
+        res = dma_memory_read(s->dma_as, entry_addr, adma2_64,
+                              sizeof(adma2_64), attrs);
+        dscr->attr = adma2_64[0];
+        dscr->length = lduw_le_p(&adma2_64[2]);
+        dscr->addr = ldq_le_p(&adma2_64[4]);
         dscr->attr &= (uint8_t) ~0xC0;
         dscr->incr = 12;
         break;
     }
+
+    return res;
+}
+
+static void sdhci_adma_error(SDHCIState *s, uint8_t state)
+{
+    s->admaerr &= ~SDHC_ADMAERR_STATE_MASK;
+    s->admaerr |= state;
+
+    if (s->errintstsen & SDHC_EISEN_ADMAERR) {
+        trace_sdhci_error("Set ADMA error flag");
+        s->errintsts |= SDHC_EIS_ADMAERR;
+        s->norintsts |= SDHC_NIS_ERR;
+    }
+
+    sdhci_update_irq(s);
+}
+
+static void sdhci_adma_length_mismatch(SDHCIState *s, uint8_t state)
+{
+    trace_sdhci_error("SD/MMC host ADMA length mismatch");
+    s->admaerr |= SDHC_ADMAERR_LENGTH_MISMATCH;
+    sdhci_adma_error(s, state);
 }
 
 /* Advanced DMA data transfer */
@@ -790,32 +814,23 @@ static void sdhci_do_adma(SDHCIState *s)
     const MemTxAttrs attrs = { .memory = true };
     ADMADescr dscr = {};
     MemTxResult res = MEMTX_ERROR;
+    bool transfer_completed;
     int i;
-
-    if (sdhci_block_count_enabled(s) && !s->blkcnt) {
-        /* Stop Multiple Transfer */
-        sdhci_end_transfer(s);
-        return;
-    }
 
     for (i = 0; i < SDHC_ADMA_DESCS_PER_DELAY; ++i) {
         s->admaerr &= ~SDHC_ADMAERR_LENGTH_MISMATCH;
 
-        get_adma_description(s, &dscr);
+        res = get_adma_description(s, &dscr);
+        if (res != MEMTX_OK) {
+            trace_sdhci_error("ADMA descriptor fetch failed");
+            sdhci_adma_error(s, SDHC_ADMAERR_STATE_ST_FDS);
+            return;
+        }
         trace_sdhci_adma_loop(dscr.addr, dscr.length, dscr.attr);
 
         if ((dscr.attr & SDHC_ADMA_ATTR_VALID) == 0) {
             /* Indicate that error occurred in ST_FDS state */
-            s->admaerr &= ~SDHC_ADMAERR_STATE_MASK;
-            s->admaerr |= SDHC_ADMAERR_STATE_ST_FDS;
-
-            /* Generate ADMA error interrupt */
-            if (s->errintstsen & SDHC_EISEN_ADMAERR) {
-                s->errintsts |= SDHC_EIS_ADMAERR;
-                s->norintsts |= SDHC_NIS_ERR;
-            }
-
-            sdhci_update_irq(s);
+            sdhci_adma_error(s, SDHC_ADMAERR_STATE_ST_FDS);
             return;
         }
 
@@ -825,6 +840,12 @@ static void sdhci_do_adma(SDHCIState *s)
         case SDHC_ADMA_ATTR_ACT_TRAN:  /* data transfer */
             /* A zero length means 64 KiB only for a transfer descriptor. */
             length = dscr.length ? dscr.length : 64 * KiB;
+            if (sdhci_block_count_enabled(s) && !s->blkcnt) {
+                s->admasysaddr += dscr.incr;
+                sdhci_adma_length_mismatch(s,
+                                           SDHC_ADMAERR_STATE_ST_TFR);
+                return;
+            }
             s->prnsts |= SDHC_DATA_INHIBIT | SDHC_DAT_LINE_ACTIVE;
             if (s->trnmod & SDHC_TRNS_READ) {
                 s->prnsts |= SDHC_DOING_READ;
@@ -891,15 +912,11 @@ static void sdhci_do_adma(SDHCIState *s)
             }
             if (res != MEMTX_OK) {
                 s->data_count = 0;
-                if (s->errintstsen & SDHC_EISEN_ADMAERR) {
-                    trace_sdhci_error("Set ADMA error flag");
-                    s->errintsts |= SDHC_EIS_ADMAERR;
-                    s->norintsts |= SDHC_NIS_ERR;
-                }
-                sdhci_update_irq(s);
-            } else {
                 s->admasysaddr += dscr.incr;
+                sdhci_adma_error(s, SDHC_ADMAERR_STATE_ST_TFR);
+                return;
             }
+            s->admasysaddr += dscr.incr;
             break;
         case SDHC_ADMA_ATTR_ACT_LINK:   /* link to next descriptor table */
             s->admasysaddr = dscr.addr;
@@ -908,6 +925,12 @@ static void sdhci_do_adma(SDHCIState *s)
         default:
             s->admasysaddr += dscr.incr;
             break;
+        }
+
+        transfer_completed = dscr.attr & SDHC_ADMA_ATTR_END;
+        if (length) {
+            sdhci_adma_length_mismatch(s, SDHC_ADMAERR_STATE_ST_TFR);
+            return;
         }
 
         if (dscr.attr & SDHC_ADMA_ATTR_INT) {
@@ -922,24 +945,18 @@ static void sdhci_do_adma(SDHCIState *s)
             }
         }
 
-        /* ADMA transfer terminates if blkcnt == 0 or by END attribute */
-        if ((sdhci_block_count_enabled(s) && s->blkcnt == 0) ||
-            (dscr.attr & SDHC_ADMA_ATTR_END)) {
-            trace_sdhci_adma_transfer_completed();
-            if (length || ((dscr.attr & SDHC_ADMA_ATTR_END) &&
-                sdhci_block_count_enabled(s) &&
-                s->blkcnt != 0)) {
-                trace_sdhci_error("SD/MMC host ADMA length mismatch");
-                s->admaerr |= SDHC_ADMAERR_LENGTH_MISMATCH |
-                        SDHC_ADMAERR_STATE_ST_TFR;
-                if (s->errintstsen & SDHC_EISEN_ADMAERR) {
-                    trace_sdhci_error("Set ADMA error flag");
-                    s->errintsts |= SDHC_EIS_ADMAERR;
-                    s->norintsts |= SDHC_NIS_ERR;
-                }
-
-                sdhci_update_irq(s);
+        if (transfer_completed) {
+            if (s->data_count ||
+                ((dscr.attr & SDHC_ADMA_ATTR_END) &&
+                 sdhci_block_count_enabled(s) && s->blkcnt != 0)) {
+                sdhci_adma_length_mismatch(
+                    s, (dscr.attr & SDHC_ADMA_ATTR_ACT_MASK) ==
+                       SDHC_ADMA_ATTR_ACT_TRAN ?
+                       SDHC_ADMAERR_STATE_ST_TFR :
+                       SDHC_ADMAERR_STATE_ST_STOP);
+                return;
             }
+            trace_sdhci_adma_transfer_completed();
             sdhci_end_transfer(s);
             return;
         }
