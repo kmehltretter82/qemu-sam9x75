@@ -1191,6 +1191,7 @@
 #define NAND_CMD_ERASE          0x60
 #define NAND_CMD_STATUS         0x70
 #define NAND_CMD_PROGRAM_START  0x80
+#define NAND_CMD_RANDOM_INPUT   0x85
 #define NAND_CMD_READ_ID        0x90
 #define NAND_CMD_ERASE_START    0xd0
 #define NAND_CMD_READ_PARAM     0xec
@@ -1198,6 +1199,7 @@
 #define NAND_CMD_SET_FEATURES   0xef
 #define NAND_CMD_RESET          0xff
 
+#define NAND_STATUS_FAIL        BIT(0)
 #define NAND_STATUS_TRUE_READY  BIT(5)
 #define NAND_STATUS_READY       BIT(6)
 #define NAND_STATUS_WP          BIT(7)
@@ -10843,6 +10845,104 @@ static void test_nand_page_status_poll_migration(void)
     qtest_quit(from);
 }
 
+static void test_nand_random_data_input_migration(void)
+{
+    static const uint8_t payload[] = { 0x5a, 0xa5, 0x36, 0xc9 };
+    static const uint8_t oob[] = { 0x69, 0x96, 0x3c, 0xc3 };
+    const uint32_t page = 17;
+    const uint32_t column = 32;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    unsigned int i;
+
+    nand_command(from, NAND_CMD_PROGRAM_START);
+    nand_page_address(from, column, page);
+    for (i = 0; i < sizeof(payload); i++) {
+        qtest_writeb(from, NAND_DATA, payload[i]);
+    }
+
+    nand_command(from, NAND_CMD_RANDOM_INPUT);
+    nand_address(from, NAND_TEST_OOB_COLUMN & 0xff);
+    nand_address(from, NAND_TEST_OOB_COLUMN >> 8);
+    qtest_writeb(from, NAND_DATA, oob[0]);
+
+    nand_migrate(from, to);
+
+    for (i = 1; i < sizeof(oob); i++) {
+        qtest_writeb(to, NAND_DATA, oob[i]);
+    }
+    nand_command(to, NAND_CMD_PAGE_PROGRAM);
+    nand_command(to, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, NAND_STATUS_IDLE);
+
+    nand_start_read(to, page, column);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, payload[i]);
+    }
+    nand_start_read(to, page, NAND_TEST_OOB_COLUMN);
+    for (i = 0; i < sizeof(oob); i++) {
+        g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, oob[i]);
+    }
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
+static void test_nand_program_old_source_migration(void)
+{
+    static const uint8_t payload[] = { 0xde, 0xad, 0xbe, 0xef };
+    const char *source_env = g_getenv("QTEST_QEMU_BINARY_OLD") ?
+                             "QTEST_QEMU_BINARY_OLD" :
+                             "QTEST_QEMU_BINARY";
+    const uint32_t page = 23;
+    const uint32_t column = 5;
+    QTestState *from = qtest_init_ext(source_env, SAM9X75_MACHINE,
+                                      NULL, true);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    unsigned int i;
+
+    nand_command(from, NAND_CMD_PROGRAM_START);
+    nand_page_address(from, column, page);
+    qtest_writeb(from, NAND_DATA, payload[0]);
+    qtest_writeb(from, NAND_DATA, payload[1]);
+
+    nand_migrate(from, to);
+
+    qtest_writeb(to, NAND_DATA, payload[2]);
+    qtest_writeb(to, NAND_DATA, payload[3]);
+    nand_command(to, NAND_CMD_PAGE_PROGRAM);
+    nand_command(to, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, NAND_STATUS_IDLE);
+
+    nand_start_read(to, page, column);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, payload[i]);
+    }
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
+static void test_nand_off_device_program_migration(void)
+{
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+
+    nand_command(from, NAND_CMD_PROGRAM_START);
+    nand_page_address(from, 0, 0x00ffffff);
+    qtest_writeb(from, NAND_DATA, 0x5a);
+
+    nand_migrate(from, to);
+
+    nand_command(to, NAND_CMD_PAGE_PROGRAM);
+    nand_command(to, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
 static void test_nand_features_status_poll_migration(void)
 {
     static const uint8_t timing_mode_3[4] = { 3, 0, 0, 0 };
@@ -11405,6 +11505,12 @@ int main(int argc, char **argv)
                    test_nand_parameter_status_poll_migration);
     qtest_add_func("sam9x75/nand/page-status-poll-migration",
                    test_nand_page_status_poll_migration);
+    qtest_add_func("sam9x75/nand/random-data-input-migration",
+                   test_nand_random_data_input_migration);
+    qtest_add_func("sam9x75/nand/program-old-source-migration",
+                   test_nand_program_old_source_migration);
+    qtest_add_func("sam9x75/nand/off-device-program-migration",
+                   test_nand_off_device_program_migration);
     qtest_add_func("sam9x75/nand/features-status-poll-migration",
                    test_nand_features_status_poll_migration);
     qtest_add_func("sam9x75/nand/set-features-migration",

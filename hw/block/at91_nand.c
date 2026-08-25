@@ -32,6 +32,7 @@
 #define NAND_CMD_ERASE          0x60
 #define NAND_CMD_STATUS         0x70
 #define NAND_CMD_PROGRAM_START  0x80
+#define NAND_CMD_RANDOM_INPUT   0x85
 #define NAND_CMD_READ_ID        0x90
 #define NAND_CMD_ERASE_START    0xd0
 #define NAND_CMD_RANDOM_START   0xe0
@@ -353,8 +354,12 @@ static void at91_nand_read_page(AT91NANDState *s)
 
 static void at91_nand_program_page(AT91NANDState *s)
 {
-    uint32_t page = at91_nand_row(s, true);
+    uint32_t page = s->current_page;
     unsigned int i;
+
+    if (page == UINT32_MAX) {
+        page = at91_nand_row(s, true);
+    }
 
     s->status &= ~NAND_STATUS_FAIL;
     if (!at91_nand_load_page(s, page, s->data)) {
@@ -429,9 +434,25 @@ static void at91_nand_command(AT91NANDState *s, uint8_t command)
         break;
     case NAND_CMD_PROGRAM_START:
         s->address_len = 0;
+        s->current_page = UINT32_MAX;
         s->program_column = 0;
         s->program_pos = UINT32_MAX;
         memset(s->program, 0xff, sizeof(s->program));
+        break;
+    case NAND_CMD_RANDOM_INPUT:
+        if (previous == NAND_CMD_PROGRAM_START) {
+            if (s->current_page == UINT32_MAX) {
+                s->current_page = at91_nand_row(s, true);
+            }
+            s->address_len = 0;
+            s->program_pos = UINT32_MAX;
+            command = NAND_CMD_PROGRAM_START;
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          TYPE_AT91_NAND ": random data input outside "
+                          "a program operation\n");
+            command = previous;
+        }
         break;
     case NAND_CMD_RANDOM_READ:
         s->address_len = 0;
@@ -490,6 +511,9 @@ static void at91_nand_data_write(AT91NANDState *s, uint8_t value)
 {
     if (s->command == NAND_CMD_PROGRAM_START) {
         if (s->program_pos == UINT32_MAX) {
+            if (s->current_page == UINT32_MAX) {
+                s->current_page = at91_nand_row(s, true);
+            }
             s->program_column = at91_nand_column(s);
             s->program_pos = s->program_column;
         }
@@ -830,6 +854,11 @@ static bool at91_nand_post_load(void *opaque, int version_id, Error **errp)
 {
     AT91NANDState *s = opaque;
 
+    if (version_id < 4 && s->command == NAND_CMD_PROGRAM_START) {
+        /* Older senders did not track the row of an active program. */
+        s->current_page = UINT32_MAX;
+    }
+
     if (s->address_len > ARRAY_SIZE(s->address)) {
         error_setg(errp, "invalid NAND address length %u", s->address_len);
         return false;
@@ -848,6 +877,11 @@ static bool at91_nand_post_load(void *opaque, int version_id, Error **errp)
         (s->program_pos != UINT32_MAX && s->program_pos > UINT16_MAX)) {
         error_setg(errp, "invalid NAND program cursor %" PRIu32 "/%" PRIu32,
                    s->program_column, s->program_pos);
+        return false;
+    }
+    if (s->current_page != UINT32_MAX && s->current_page > 0x00ffffff) {
+        error_setg(errp, "invalid NAND current page %" PRIu32,
+                   s->current_page);
         return false;
     }
     if (s->raw_backend && at91_nand_has_sparse_pages(s)) {
@@ -871,7 +905,7 @@ static bool at91_nand_post_load(void *opaque, int version_id, Error **errp)
 /* External backend data is shared storage; device-owned sparse state moves. */
 static const VMStateDescription at91_nand_vmstate = {
     .name = TYPE_AT91_NAND,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .pre_load_errp = at91_nand_pre_load,
     .post_load_errp = at91_nand_post_load,
