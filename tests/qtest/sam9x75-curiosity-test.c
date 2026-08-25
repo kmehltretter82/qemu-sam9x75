@@ -347,6 +347,8 @@
 #define US_WPMR_KEY            0x55534100
 
 #define GEM_NWCTRL              0x000
+#define GEM_NWCFG               0x004
+#define GEM_RXQBASE             0x018
 #define GEM_TXQBASE             0x01c
 #define GEM_ISR                 0x024
 #define GEM_IER                 0x028
@@ -359,10 +361,37 @@
 #define GEM_TRANSMIT_Q1_PTR     0x440
 #define GEM_INT_Q1_ENABLE       0x600
 
+#define GEM_OCTTXLO             0x100
+#define GEM_OCTTXHI             0x104
+#define GEM_TXCNT               0x108
+#define GEM_TXBCNT              0x10c
+#define GEM_TXMCNT              0x110
+#define GEM_TX64CNT             0x118
+#define GEM_TXURUNCNT           0x134
+#define GEM_SINGLECOLLCNT       0x138
+#define GEM_OCTRXLO             0x150
+#define GEM_OCTRXHI             0x154
+#define GEM_RXCNT               0x158
+#define GEM_RXBROADCNT          0x15c
+#define GEM_RXMULTICNT          0x160
+#define GEM_RX64CNT             0x168
+#define GEM_RXUDPCCNT           0x1b0
+#define GEM_STAT_FIRST          GEM_OCTTXLO
+#define GEM_STAT_LAST           GEM_RXUDPCCNT
+
+#define GEM_NWCTRL_LBL          BIT(1)
+#define GEM_NWCTRL_RXEN         BIT(2)
 #define GEM_NWCTRL_TXEN         BIT(3)
 #define GEM_NWCTRL_MPE          BIT(4)
+#define GEM_NWCTRL_CLRSTAT      BIT(5)
+#define GEM_NWCTRL_INCSTAT      BIT(6)
+#define GEM_NWCTRL_WESTAT       BIT(7)
 #define GEM_NWCTRL_TSTART       BIT(9)
+#define GEM_NWCFG_PROMISC       BIT(4)
+#define GEM_NWCFG_FCS_REMOVE    BIT(17)
 #define GEM_INT_XMIT_COMPLETE   BIT(7)
+#define GEM_RX_DESC_OWNERSHIP   BIT(0)
+#define GEM_RX_DESC_WRAP        BIT(1)
 #define GEM_TX_DESC_LAST        BIT(15)
 #define GEM_TX_DESC_WRAP        BIT(30)
 #define GEM_TX_DESC_USED        BIT(31)
@@ -4324,6 +4353,234 @@ static void test_gem_registers_mdio_dma_and_irqs(void)
     g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR2) & BIT(0));
 
     qtest_quit(qts);
+}
+
+static void gem_transmit_test_frame(QTestState *qts,
+                                    const uint8_t destination[6],
+                                    uint32_t nwctrl)
+{
+    const uint32_t descriptor = SAM9X7_SRAM0_BASE + 0x3000;
+    const uint32_t packet_addr = SAM9X7_SRAM0_BASE + 0x4000;
+    uint8_t packet[64] = {
+        [6] = 0x02,
+        [11] = 0x01,
+        [12] = 0x86,
+        [13] = 0xdd,
+    };
+
+    memcpy(packet, destination, 6);
+    qtest_memwrite(qts, packet_addr, packet, sizeof(packet));
+    qtest_writel(qts, descriptor, packet_addr);
+    qtest_writel(qts, descriptor + 4,
+                 GEM_TX_DESC_WRAP | GEM_TX_DESC_LAST | sizeof(packet));
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TXQBASE, descriptor);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL,
+                 nwctrl | GEM_NWCTRL_TXEN | GEM_NWCTRL_TSTART);
+    g_assert_true(qtest_readl(qts, descriptor + 4) & GEM_TX_DESC_USED);
+}
+
+static void gem_prepare_test_receive(QTestState *qts)
+{
+    const uint32_t descriptor = SAM9X7_SRAM0_BASE + 0x5000;
+    const uint32_t packet_addr = SAM9X7_SRAM0_BASE + 0x6000;
+
+    qtest_writel(qts, descriptor, packet_addr | GEM_RX_DESC_WRAP);
+    qtest_writel(qts, descriptor + 4, 0);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_RXQBASE, descriptor);
+}
+
+static void gem_assert_test_receive(QTestState *qts)
+{
+    const uint32_t descriptor = SAM9X7_SRAM0_BASE + 0x5000;
+
+    g_assert_true(qtest_readl(qts, descriptor) & GEM_RX_DESC_OWNERSHIP);
+    g_assert_cmphex(qtest_readl(qts, descriptor + 4) & 0x1fff, ==, 64);
+}
+
+static void gem_assert_stat_rtc(QTestState *qts, uint32_t offset,
+                                uint32_t expected)
+{
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + offset), ==,
+                    expected);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + offset), ==, 0);
+}
+
+static void test_gem_statistics_generated_and_clear(void)
+{
+    static const uint8_t ipv6_multicast[6] = {
+        0x33, 0x33, 0x00, 0x00, 0x00, 0x01,
+    };
+    static const uint8_t broadcast[6] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    };
+    static const uint8_t unicast[6] = {
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
+    };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t nwcfg;
+
+    nwcfg = qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_NWCFG);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCFG,
+                 nwcfg | GEM_NWCFG_PROMISC | GEM_NWCFG_FCS_REMOVE);
+
+    gem_prepare_test_receive(qts);
+    gem_transmit_test_frame(qts, ipv6_multicast,
+                            GEM_NWCTRL_LBL | GEM_NWCTRL_RXEN);
+    gem_assert_test_receive(qts);
+    gem_assert_stat_rtc(qts, GEM_OCTTXLO, 64);
+    gem_assert_stat_rtc(qts, GEM_OCTTXHI, 0);
+    gem_assert_stat_rtc(qts, GEM_TXCNT, 1);
+    gem_assert_stat_rtc(qts, GEM_TXBCNT, 0);
+    gem_assert_stat_rtc(qts, GEM_TXMCNT, 1);
+    gem_assert_stat_rtc(qts, GEM_TX64CNT, 1);
+    gem_assert_stat_rtc(qts, GEM_OCTRXLO, 64);
+    gem_assert_stat_rtc(qts, GEM_OCTRXHI, 0);
+    gem_assert_stat_rtc(qts, GEM_RXCNT, 1);
+    gem_assert_stat_rtc(qts, GEM_RXBROADCNT, 0);
+    gem_assert_stat_rtc(qts, GEM_RXMULTICNT, 1);
+    gem_assert_stat_rtc(qts, GEM_RX64CNT, 1);
+
+    gem_prepare_test_receive(qts);
+    gem_transmit_test_frame(qts, broadcast,
+                            GEM_NWCTRL_LBL | GEM_NWCTRL_RXEN);
+    gem_assert_test_receive(qts);
+    gem_assert_stat_rtc(qts, GEM_OCTTXLO, 64);
+    gem_assert_stat_rtc(qts, GEM_OCTTXHI, 0);
+    gem_assert_stat_rtc(qts, GEM_TXCNT, 1);
+    gem_assert_stat_rtc(qts, GEM_TXBCNT, 1);
+    gem_assert_stat_rtc(qts, GEM_TXMCNT, 0);
+    gem_assert_stat_rtc(qts, GEM_TX64CNT, 1);
+    gem_assert_stat_rtc(qts, GEM_OCTRXLO, 64);
+    gem_assert_stat_rtc(qts, GEM_OCTRXHI, 0);
+    gem_assert_stat_rtc(qts, GEM_RXCNT, 1);
+    gem_assert_stat_rtc(qts, GEM_RXBROADCNT, 1);
+    gem_assert_stat_rtc(qts, GEM_RXMULTICNT, 0);
+    gem_assert_stat_rtc(qts, GEM_RX64CNT, 1);
+
+    /* CLRSTAT takes effect before a simultaneous TSTART command. */
+    gem_transmit_test_frame(qts, broadcast, 0);
+    gem_transmit_test_frame(qts, unicast, GEM_NWCTRL_CLRSTAT);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL) &
+                    (GEM_NWCTRL_TXEN | GEM_NWCTRL_CLRSTAT), ==,
+                    GEM_NWCTRL_TXEN);
+    gem_assert_stat_rtc(qts, GEM_OCTTXLO, 64);
+    gem_assert_stat_rtc(qts, GEM_OCTTXHI, 0);
+    gem_assert_stat_rtc(qts, GEM_TXCNT, 1);
+    gem_assert_stat_rtc(qts, GEM_TXBCNT, 0);
+    gem_assert_stat_rtc(qts, GEM_TXMCNT, 0);
+    gem_assert_stat_rtc(qts, GEM_TX64CNT, 1);
+
+    qtest_quit(qts);
+}
+
+static void test_gem_statistics_test_controls(void)
+{
+    static const uint8_t unicast[6] = {
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x03,
+    };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t offset;
+
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL, GEM_NWCTRL_WESTAT);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TXCNT, 7);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL, 0);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TXCNT, 9);
+    gem_assert_stat_rtc(qts, GEM_TXCNT, 7);
+
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL, GEM_NWCTRL_WESTAT);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_OCTTXHI, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TXURUNCNT, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_SINGLECOLLCNT, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_RXUDPCCNT, UINT32_MAX);
+    gem_assert_stat_rtc(qts, GEM_OCTTXHI, UINT16_MAX);
+    gem_assert_stat_rtc(qts, GEM_TXURUNCNT, 0x3ff);
+    gem_assert_stat_rtc(qts, GEM_SINGLECOLLCNT, 0x3ffff);
+    gem_assert_stat_rtc(qts, GEM_RXUDPCCNT, UINT8_MAX);
+
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL,
+                 GEM_NWCTRL_WESTAT | GEM_NWCTRL_CLRSTAT);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL,
+                 GEM_NWCTRL_WESTAT | GEM_NWCTRL_INCSTAT);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL) &
+                    (GEM_NWCTRL_WESTAT | GEM_NWCTRL_INCSTAT), ==,
+                    GEM_NWCTRL_WESTAT);
+    for (offset = GEM_STAT_FIRST; offset <= GEM_STAT_LAST; offset += 4) {
+        gem_assert_stat_rtc(qts, offset, 1);
+    }
+
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TXCNT, UINT32_MAX);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_OCTTXHI, UINT16_MAX);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TXURUNCNT, 0x3ff);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_SINGLECOLLCNT, 0x3ffff);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_RXUDPCCNT, UINT8_MAX);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL,
+                 GEM_NWCTRL_WESTAT | GEM_NWCTRL_INCSTAT);
+    gem_assert_stat_rtc(qts, GEM_TXCNT, UINT32_MAX);
+    gem_assert_stat_rtc(qts, GEM_OCTTXHI, UINT16_MAX);
+    gem_assert_stat_rtc(qts, GEM_TXURUNCNT, 0x3ff);
+    gem_assert_stat_rtc(qts, GEM_SINGLECOLLCNT, 0x3ffff);
+    gem_assert_stat_rtc(qts, GEM_RXUDPCCNT, UINT8_MAX);
+
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_OCTTXLO,
+                 UINT32_MAX - 31);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_OCTTXHI, UINT16_MAX);
+    gem_transmit_test_frame(qts, unicast, GEM_NWCTRL_WESTAT);
+    gem_assert_stat_rtc(qts, GEM_OCTTXLO, UINT32_MAX);
+    gem_assert_stat_rtc(qts, GEM_OCTTXHI, UINT16_MAX);
+
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL, GEM_NWCTRL_WESTAT);
+    for (offset = GEM_STAT_FIRST; offset <= GEM_STAT_LAST; offset += 4) {
+        qtest_writel(qts, SAM9X7_GMAC_BASE + offset, 5);
+    }
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL,
+                 GEM_NWCTRL_WESTAT | GEM_NWCTRL_CLRSTAT);
+    for (offset = GEM_STAT_FIRST; offset <= GEM_STAT_LAST; offset += 4) {
+        gem_assert_stat_rtc(qts, offset, 0);
+    }
+
+    qtest_quit(qts);
+}
+
+static void test_gem_statistics_migration(void)
+{
+    static const uint8_t multicast[6] = {
+        0x01, 0x00, 0x5e, 0x00, 0x00, 0x01,
+    };
+    const char *source_env = g_getenv("QTEST_QEMU_BINARY_OLD") ?
+                             "QTEST_QEMU_BINARY_OLD" :
+                             "QTEST_QEMU_BINARY";
+    QTestState *from = qtest_init_ext(source_env, SAM9X75_MACHINE,
+                                      NULL, true);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+
+    qtest_irq_intercept_out_named(from, "/machine/soc/gmac", "sysbus-irq");
+    qtest_irq_intercept_out_named(to, "/machine/soc/gmac", "sysbus-irq");
+    qtest_writel(from, SAM9X7_GMAC_BASE + GEM_IER,
+                 GEM_INT_XMIT_COMPLETE);
+    gem_transmit_test_frame(from, multicast, 0);
+    g_assert_true(qtest_get_irq(from, 0));
+    qtest_writel(from, SAM9X7_GMAC_BASE + GEM_NWCTRL, GEM_NWCTRL_WESTAT);
+    qtest_writel(from, SAM9X7_GMAC_BASE + GEM_RXUDPCCNT, 7);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_true(qtest_get_irq(to, 0));
+    gem_assert_stat_rtc(to, GEM_OCTTXLO, 64);
+    gem_assert_stat_rtc(to, GEM_OCTTXHI, 0);
+    gem_assert_stat_rtc(to, GEM_TXCNT, 1);
+    gem_assert_stat_rtc(to, GEM_TXBCNT, 0);
+    gem_assert_stat_rtc(to, GEM_TXMCNT, 1);
+    gem_assert_stat_rtc(to, GEM_TX64CNT, 1);
+    gem_assert_stat_rtc(to, GEM_RXUDPCCNT, 7);
+    g_assert_true(qtest_readl(to, SAM9X7_GMAC_BASE + GEM_ISR) &
+                  GEM_INT_XMIT_COMPLETE);
+    g_assert_false(qtest_get_irq(to, 0));
+
+    qtest_quit(from);
+    qtest_quit(to);
 }
 
 static void test_board_ethernet_clock_jumper(void)
@@ -12856,6 +13113,12 @@ int main(int argc, char **argv)
                    test_aic_fiq_mask_and_write_protection);
     qtest_add_func("sam9x75/gem/registers-mdio-dma-and-irqs",
                    test_gem_registers_mdio_dma_and_irqs);
+    qtest_add_func("sam9x75/gem/statistics-generated-and-clear",
+                   test_gem_statistics_generated_and_clear);
+    qtest_add_func("sam9x75/gem/statistics-test-controls",
+                   test_gem_statistics_test_controls);
+    qtest_add_func("sam9x75/gem/statistics-migration",
+                   test_gem_statistics_migration);
     qtest_add_func("sam9x75/board/ethernet-clock-jumper",
                    test_board_ethernet_clock_jumper);
     qtest_add_func("sam9x75/flexcom-usart/registers-irq-and-protection",

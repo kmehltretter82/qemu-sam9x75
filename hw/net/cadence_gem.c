@@ -271,6 +271,10 @@ REG32(RXIPCSERRCNT, 0x1a8) /* IP header Checksum Err Counter */
 REG32(RXTCPCCNT, 0x1ac) /* TCP Checksum Error Counter */
 REG32(RXUDPCCNT, 0x1b0) /* UDP Checksum Error Counter */
 
+#define GEM_STAT_FIRST R_OCTTXLO
+#define GEM_STAT_LAST  R_RXUDPCCNT
+#define GEM_OCTETS_MAX UINT64_C(0x0000ffffffffffff)
+
 REG32(1588S, 0x1d0) /* 1588 Timer Seconds */
 REG32(1588NS, 0x1d4) /* 1588 Timer Nanoseconds */
 REG32(1588ADJ, 0x1d8) /* 1588 Timer Adjust */
@@ -554,6 +558,90 @@ static inline void rx_desc_set_sar(uint32_t *desc, int sar_idx)
 /* The broadcast MAC address: 0xFFFFFFFFFFFF */
 static const uint8_t broadcast_addr[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
+static bool gem_is_statistics_reg(unsigned int reg)
+{
+    return reg >= GEM_STAT_FIRST && reg <= GEM_STAT_LAST;
+}
+
+static uint32_t gem_statistics_mask(unsigned int reg)
+{
+    switch (reg) {
+    case R_OCTTXHI:
+    case R_TXPAUSECNT:
+    case R_OCTRXHI:
+    case R_RXPAUSECNT:
+        return UINT16_MAX;
+    case R_TXURUNCNT:
+    case R_EXCESSCOLLCNT:
+    case R_LATECOLLCNT:
+    case R_CSENSECNT:
+    case R_RXUNDERCNT ... R_RXALIGNERRCNT:
+    case R_RXORUNCNT:
+        return 0x3ff;
+    case R_SINGLECOLLCNT:
+    case R_MULTCOLLCNT:
+    case R_DEFERTXCNT:
+    case R_RXRSCERRCNT:
+        return 0x3ffff;
+    case R_RXIPCSERRCNT ... R_RXUDPCCNT:
+        return UINT8_MAX;
+    default:
+        return UINT32_MAX;
+    }
+}
+
+static void gem_clear_statistics(CadenceGEMState *s)
+{
+    memset(&s->regs[GEM_STAT_FIRST], 0,
+           (GEM_STAT_LAST - GEM_STAT_FIRST + 1) * sizeof(s->regs[0]));
+}
+
+static void gem_increment_statistics(CadenceGEMState *s, unsigned int reg)
+{
+    uint32_t mask = gem_statistics_mask(reg);
+    uint32_t value = s->regs[reg] & mask;
+
+    if (value != mask) {
+        value++;
+    }
+    s->regs[reg] = value;
+}
+
+static void gem_increment_all_statistics(CadenceGEMState *s)
+{
+    unsigned int reg;
+
+    for (reg = GEM_STAT_FIRST; reg <= GEM_STAT_LAST; reg++) {
+        gem_increment_statistics(s, reg);
+    }
+}
+
+static void gem_set_octets(CadenceGEMState *s, unsigned int lo_reg,
+                           unsigned int hi_reg, uint64_t octets)
+{
+    octets = MIN(octets, GEM_OCTETS_MAX);
+    s->regs[lo_reg] = octets;
+    s->regs[hi_reg] = octets >> 32;
+}
+
+static void gem_add_octets(CadenceGEMState *s, unsigned int lo_reg,
+                           unsigned int hi_reg, unsigned int bytes)
+{
+    uint64_t octets = ((uint64_t)(s->regs[hi_reg] & UINT16_MAX) << 32) |
+                      s->regs[lo_reg];
+
+    gem_set_octets(s, lo_reg, hi_reg, octets + bytes);
+}
+
+static void gem_import_v4_octets(CadenceGEMState *s, unsigned int lo_reg,
+                                  unsigned int hi_reg)
+{
+    uint64_t octets = ((uint64_t)s->regs[lo_reg] << 32) |
+                      s->regs[hi_reg];
+
+    gem_set_octets(s, lo_reg, hi_reg, octets);
+}
+
 static uint32_t gem_get_max_buf_len(CadenceGEMState *s, bool tx)
 {
     uint32_t size;
@@ -603,6 +691,9 @@ static void gem_init_register_masks(CadenceGEMState *s)
     s->regs_ro[R_ISR]      = 0xFFFFFFFF;
     s->regs_ro[R_IMR]      = 0xFFFFFFFF;
     s->regs_ro[R_MODID]    = 0xFFFFFFFF;
+    for (i = GEM_STAT_FIRST; i <= GEM_STAT_LAST; i++) {
+        s->regs_ro[i] = ~gem_statistics_mask(i);
+    }
     for (i = 0; i < s->num_priority_queues; i++) {
         s->regs_ro[R_INT_Q1_STATUS + i] = 0xFFFFFFFF;
         s->regs_ro[R_INT_Q1_ENABLE + i] = 0xFFFFF319;
@@ -613,6 +704,9 @@ static void gem_init_register_masks(CadenceGEMState *s)
     /* Mask of register bits which are clear on read */
     memset(&s->regs_rtc[0], 0, sizeof(s->regs_rtc));
     s->regs_rtc[R_ISR]      = 0xFFFFFFFF;
+    for (i = GEM_STAT_FIRST; i <= GEM_STAT_LAST; i++) {
+        s->regs_rtc[i] = gem_statistics_mask(i);
+    }
     for (i = 0; i < s->num_priority_queues; i++) {
         s->regs_rtc[R_INT_Q1_STATUS + i] = 0x00000CE6;
     }
@@ -722,42 +816,34 @@ static void gem_update_int_status(CadenceGEMState *s)
 static void gem_receive_updatestats(CadenceGEMState *s, const uint8_t *packet,
                                     unsigned bytes)
 {
-    uint64_t octets;
-
     /* Total octets (bytes) received */
-    octets = ((uint64_t)(s->regs[R_OCTRXLO]) << 32) |
-             s->regs[R_OCTRXHI];
-    octets += bytes;
-    s->regs[R_OCTRXLO] = octets >> 32;
-    s->regs[R_OCTRXHI] = octets;
+    gem_add_octets(s, R_OCTRXLO, R_OCTRXHI, bytes);
 
     /* Error-free Frames received */
-    s->regs[R_RXCNT]++;
+    gem_increment_statistics(s, R_RXCNT);
 
     /* Error-free Broadcast Frames counter */
     if (!memcmp(packet, broadcast_addr, 6)) {
-        s->regs[R_RXBROADCNT]++;
-    }
-
-    /* Error-free Multicast Frames counter */
-    if (packet[0] == 0x01) {
-        s->regs[R_RXMULTICNT]++;
+        gem_increment_statistics(s, R_RXBROADCNT);
+    } else if (is_multicast_ether_addr(packet)) {
+        /* Error-free Multicast Frames counter */
+        gem_increment_statistics(s, R_RXMULTICNT);
     }
 
     if (bytes <= 64) {
-        s->regs[R_RX64CNT]++;
+        gem_increment_statistics(s, R_RX64CNT);
     } else if (bytes <= 127) {
-        s->regs[R_RX65CNT]++;
+        gem_increment_statistics(s, R_RX65CNT);
     } else if (bytes <= 255) {
-        s->regs[R_RX128CNT]++;
+        gem_increment_statistics(s, R_RX128CNT);
     } else if (bytes <= 511) {
-        s->regs[R_RX256CNT]++;
+        gem_increment_statistics(s, R_RX256CNT);
     } else if (bytes <= 1023) {
-        s->regs[R_RX512CNT]++;
+        gem_increment_statistics(s, R_RX512CNT);
     } else if (bytes <= 1518) {
-        s->regs[R_RX1024CNT]++;
+        gem_increment_statistics(s, R_RX1024CNT);
     } else {
-        s->regs[R_RX1519CNT]++;
+        gem_increment_statistics(s, R_RX1519CNT);
     }
 }
 
@@ -1248,42 +1334,34 @@ static ssize_t gem_receive(NetClientState *nc, const uint8_t *buf, size_t size)
 static void gem_transmit_updatestats(CadenceGEMState *s, const uint8_t *packet,
                                      unsigned bytes)
 {
-    uint64_t octets;
-
     /* Total octets (bytes) transmitted */
-    octets = ((uint64_t)(s->regs[R_OCTTXLO]) << 32) |
-             s->regs[R_OCTTXHI];
-    octets += bytes;
-    s->regs[R_OCTTXLO] = octets >> 32;
-    s->regs[R_OCTTXHI] = octets;
+    gem_add_octets(s, R_OCTTXLO, R_OCTTXHI, bytes);
 
     /* Error-free Frames transmitted */
-    s->regs[R_TXCNT]++;
+    gem_increment_statistics(s, R_TXCNT);
 
     /* Error-free Broadcast Frames counter */
     if (!memcmp(packet, broadcast_addr, 6)) {
-        s->regs[R_TXBCNT]++;
-    }
-
-    /* Error-free Multicast Frames counter */
-    if (packet[0] == 0x01) {
-        s->regs[R_TXMCNT]++;
+        gem_increment_statistics(s, R_TXBCNT);
+    } else if (is_multicast_ether_addr(packet)) {
+        /* Error-free Multicast Frames counter */
+        gem_increment_statistics(s, R_TXMCNT);
     }
 
     if (bytes <= 64) {
-        s->regs[R_TX64CNT]++;
+        gem_increment_statistics(s, R_TX64CNT);
     } else if (bytes <= 127) {
-        s->regs[R_TX65CNT]++;
+        gem_increment_statistics(s, R_TX65CNT);
     } else if (bytes <= 255) {
-        s->regs[R_TX128CNT]++;
+        gem_increment_statistics(s, R_TX128CNT);
     } else if (bytes <= 511) {
-        s->regs[R_TX256CNT]++;
+        gem_increment_statistics(s, R_TX256CNT);
     } else if (bytes <= 1023) {
-        s->regs[R_TX512CNT]++;
+        gem_increment_statistics(s, R_TX512CNT);
     } else if (bytes <= 1518) {
-        s->regs[R_TX1024CNT]++;
+        gem_increment_statistics(s, R_TX1024CNT);
     } else {
-        s->regs[R_TX1519CNT]++;
+        gem_increment_statistics(s, R_TX1519CNT);
     }
 }
 
@@ -1602,6 +1680,9 @@ static uint64_t gem_read(void *opaque, hwaddr offset, unsigned size)
 
     offset >>= 2;
     retval = s->regs[offset];
+    if (gem_is_statistics_reg(offset)) {
+        retval &= gem_statistics_mask(offset);
+    }
 
     DB_PRINT("offset: 0x%04x read: 0x%08x\n", (unsigned)offset * 4,
              retval);
@@ -1650,6 +1731,14 @@ static void gem_write(void *opaque, hwaddr offset, uint64_t val,
     DB_PRINT("offset: 0x%04x write: 0x%08x ", (unsigned)offset, (unsigned)val);
     offset >>= 2;
 
+    if (gem_is_statistics_reg(offset)) {
+        if (FIELD_EX32(s->regs[R_NWCTRL], NWCTRL, STATS_WRITE_EN)) {
+            s->regs[offset] = val & gem_statistics_mask(offset);
+        }
+        DB_PRINT("newval: 0x%08x\n", s->regs[offset]);
+        return;
+    }
+
     /* Squash bits which are read only in write value */
     val &= ~(s->regs_ro[offset]);
     /* Preserve (only) bits which are read only and wtc in register */
@@ -1664,6 +1753,14 @@ static void gem_write(void *opaque, hwaddr offset, uint64_t val,
     /* Handle register write side effects */
     switch (offset) {
     case R_NWCTRL:
+        if (FIELD_EX32(val, NWCTRL, CLEAR_ALL_STATS_REGS)) {
+            gem_clear_statistics(s);
+            s->regs[R_NWCTRL] &= ~R_NWCTRL_CLEAR_ALL_STATS_REGS_MASK;
+        }
+        if (FIELD_EX32(val, NWCTRL, INC_ALL_STATS_REGS)) {
+            gem_increment_all_statistics(s);
+            s->regs[R_NWCTRL] &= ~R_NWCTRL_INC_ALL_STATS_REGS_MASK;
+        }
         if (FIELD_EX32(val, NWCTRL, ENABLE_RECEIVE)) {
             for (i = 0; i < s->num_priority_queues; ++i) {
                 gem_get_rx_desc(s, i);
@@ -1820,10 +1917,24 @@ static void gem_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
 }
 
+static int gem_post_load(void *opaque, int version_id)
+{
+    CadenceGEMState *s = opaque;
+
+    if (version_id < 5) {
+        gem_import_v4_octets(s, R_OCTTXLO, R_OCTTXHI);
+        gem_import_v4_octets(s, R_OCTRXLO, R_OCTRXHI);
+    }
+
+    gem_update_int_status(s);
+    return 0;
+}
+
 static const VMStateDescription vmstate_cadence_gem = {
     .name = "cadence_gem",
-    .version_id = 4,
+    .version_id = 5,
     .minimum_version_id = 4,
+    .post_load = gem_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, CadenceGEMState, CADENCE_GEM_MAXREG),
         VMSTATE_UINT16_ARRAY(phy_regs, CadenceGEMState, 32),
