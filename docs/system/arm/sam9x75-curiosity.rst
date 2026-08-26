@@ -180,12 +180,24 @@ Support matrix
        interrupts, lock and key rules, synchronization guard, reset policy and
        migration state.  RSTC has keyed user/external reset control, status,
        interrupt behavior and General/Backup/Watchdog/Software/User reset
-       causes.  The revision A1 ``RSTTYP`` erratum is modeled: initial and
-       subsequent General resets report Backup, while the other causes keep
-       their documented encodings.  MCP16502 nRSTO drives the SoC NRST
-       power-reset input: backup exit and warm reset reset VDDCORE devices
+       causes.  Software and Watchdog processor reset remain asserted for
+       three MD_SLCK cycles.  Synchronous User reset is sampled after two
+       cycles and is released six cycles after NRST rises; its input state and
+       all active reset timers migrate.  The external ERSTL pulse runs
+       independently.  For newly competing modeled sources, reset arbitration
+       follows Backup over Watchdog over Software over User; an already-held
+       User reset remains asserted until NRST rises.  ``RSTTYP`` changes only
+       when processor reset is actually released, including a Software or
+       Watchdog reset continued by a held User reset.  The revision A1
+       ``RSTTYP`` erratum is modeled:
+       initial and subsequent General resets report Backup, while the other
+       causes keep their documented encodings.  MCP16502 nRSTO drives the SoC
+       NRST power-reset input: backup exit and warm reset reset VDDCORE devices
        while the VDDBU-powered SYSCWP, BSC, GPBR, RSTC, RTT, RTC, SHDWC and
-       SCKC retain state.  SHDWC has
+       SCKC retain state.  The processor is held for the full interval; the
+       remaining embedded peripherals currently receive their reset state at
+       assertion but are not yet held in QEMU reset until the RSTC release
+       edge.  SHDWC has
        keyed two-slow-clock shutdown, SHDN,
        programmable WKUP0 polarity/debounce, raw RTC/RTT alarm wake-up,
        read-clear status, system write protection, VDDBU retention and

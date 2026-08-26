@@ -30,10 +30,26 @@ static void stellaris_gamepad_event(DeviceState *dev, QemuConsole *src,
     }
 }
 
+static void stellaris_gamepad_update_outputs(StellarisGamepad *s)
+{
+    unsigned int i;
+
+    for (i = 0; i < s->num_buttons; i++) {
+        qemu_set_irq(s->irqs[i], s->pressed[i]);
+    }
+}
+
+static int stellaris_gamepad_post_load(void *opaque, int version_id)
+{
+    stellaris_gamepad_update_outputs(STELLARIS_GAMEPAD(opaque));
+    return 0;
+}
+
 static const VMStateDescription vmstate_stellaris_gamepad = {
     .name = "stellaris_gamepad",
     .version_id = 4,
     .minimum_version_id = 4,
+    .post_load = stellaris_gamepad_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_VARRAY_UINT32(pressed, StellarisGamepad, num_buttons,
                               0, vmstate_info_uint8, uint8_t),
@@ -74,17 +90,22 @@ static void stellaris_gamepad_unrealize(DeviceState *dev)
 static void stellaris_gamepad_reset_enter(Object *obj, ResetType type)
 {
     StellarisGamepad *s = STELLARIS_GAMEPAD(obj);
-    unsigned int i;
 
-    memset(s->pressed, 0, s->num_buttons * sizeof(uint8_t));
-    for (i = 0; i < s->num_buttons; i++) {
-        qemu_set_irq(s->irqs[i], 0);
+    if (type != RESET_TYPE_WAKEUP || !s->retain_on_wakeup) {
+        memset(s->pressed, 0, s->num_buttons * sizeof(uint8_t));
     }
+}
+
+static void stellaris_gamepad_reset_hold(Object *obj, ResetType type)
+{
+    stellaris_gamepad_update_outputs(STELLARIS_GAMEPAD(obj));
 }
 
 static const Property stellaris_gamepad_properties[] = {
     DEFINE_PROP_ARRAY("keycodes", StellarisGamepad, num_buttons,
                       keycodes, qdev_prop_uint32, uint32_t),
+    DEFINE_PROP_BOOL("retain-on-wakeup", StellarisGamepad,
+                     retain_on_wakeup, false),
 };
 
 static void stellaris_gamepad_class_init(ObjectClass *klass, const void *data)
@@ -93,6 +114,7 @@ static void stellaris_gamepad_class_init(ObjectClass *klass, const void *data)
     ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     rc->phases.enter = stellaris_gamepad_reset_enter;
+    rc->phases.hold = stellaris_gamepad_reset_hold;
     dc->realize = stellaris_gamepad_realize;
     dc->unrealize = stellaris_gamepad_unrealize;
     dc->vmsd = &vmstate_stellaris_gamepad;

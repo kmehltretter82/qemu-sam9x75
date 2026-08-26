@@ -96,28 +96,31 @@ enum {
     SAM9X7_NUM_EBI_ASSIGNMENTS,
 };
 
-bool sam9x7_core_reset_requested(const SAM9X7State *s)
+static void sam9x7_update_cpu_reset_hold(SAM9X7State *s, bool force)
 {
-    return s && s->core_reset_requested;
+    CPUState *cs = CPU(&s->cpu);
+    bool requested = s->power_reset_requested || s->core_reset_requested;
+
+    if (requested && (!s->cpu_reset_hold_active || force)) {
+        s->cpu_reset_hold_active = true;
+        cpu_interrupt(cs, CPU_INTERRUPT_HALT);
+    } else if (!requested && s->cpu_reset_hold_active) {
+        s->cpu_reset_hold_active = false;
+        cpu_reset_interrupt(cs, CPU_INTERRUPT_HALT);
+        cs->halted = 0;
+        qemu_cpu_kick(cs);
+    }
 }
 
 static void sam9x7_set_reset(void *opaque, int n, int level)
 {
     SAM9X7State *s = SAM9X7(opaque);
-    CPUState *cs = CPU(&s->cpu);
 
     switch (n) {
     case SAM9X7_RESET_POWER:
+        s->power_reset_requested = !!level;
         qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&s->rstc),
                                             "power-reset", 0), level);
-        if (level) {
-            cpu_interrupt(cs, CPU_INTERRUPT_HALT);
-        } else {
-            /* Release a CPU held while the PMIC's nRSTO was asserted. */
-            cpu_reset_interrupt(cs, CPU_INTERRUPT_HALT);
-            cs->halted = 0;
-            qemu_cpu_kick(cs);
-        }
         break;
     case SAM9X7_RESET_REQUEST:
         s->core_reset_requested = !!level;
@@ -125,6 +128,13 @@ static void sam9x7_set_reset(void *opaque, int n, int level)
     default:
         g_assert_not_reached();
     }
+    sam9x7_update_cpu_reset_hold(s, false);
+}
+
+static void sam9x7_reset_exit(Object *obj, ResetType type)
+{
+    /* The CPU's reset phase clears HALT; restore an active reset hold. */
+    sam9x7_update_cpu_reset_hold(SAM9X7(obj), true);
 }
 
 static void sam9x7_set_boot_remap(void *opaque, int n, int level)
@@ -1126,11 +1136,13 @@ static const Property sam9x7_properties[] = {
 static void sam9x7_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->desc = "Microchip SAM9X7 SoC";
     dc->realize = sam9x7_realize;
     dc->user_creatable = false;
     device_class_set_props(dc, sam9x7_properties);
+    rc->phases.exit = sam9x7_reset_exit;
 }
 
 static const TypeInfo sam9x7_info = {

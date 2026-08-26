@@ -178,6 +178,7 @@ static void sam9x75_curiosity_create_controls(MachineState *machine,
         qlist_append_int(keycode_list, keycodes[i]);
     }
     qdev_prop_set_array(buttons, "keycodes", keycode_list);
+    qdev_prop_set_bit(buttons, "retain-on-wakeup", true);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(buttons), &error_fatal);
 
     qemu_set_irq(qdev_get_gpio_in(DEVICE(&soc->pio[2]), 9), 1);
@@ -532,8 +533,7 @@ static void sam9x75_curiosity_machine_reset(MachineState *machine,
     SAM9X75CuriosityMachineState *board =
         SAM9X75_CURIOSITY_MACHINE(machine);
     bool core_reset = type == RESET_TYPE_COLD && board->soc &&
-        (sam9x7_core_reset_requested(board->soc) ||
-         at91_rstc_watchdog_reset_pending(&board->soc->rstc));
+        at91_rstc_take_warm_reset_request(&board->soc->rstc);
 
     qemu_devices_reset(core_reset ? RESET_TYPE_WAKEUP : type);
 }

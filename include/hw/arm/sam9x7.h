@@ -196,6 +196,8 @@ struct SAM9X7State {
     Clock *slow_xtal;
 
     bool core_reset_requested;
+    bool power_reset_requested;
+    bool cpu_reset_hold_active;
     /* Derived from SFR outputs and reconstructed after migration. */
     bool nand_cs2_assigned;
     bool nand_d16_assigned;
@@ -214,7 +216,5 @@ struct SAM9X7State {
     MemoryRegion *ddr_memory;
     CanBusState *canbus[SAM9X7_NUM_MCAN];
 };
-
-bool sam9x7_core_reset_requested(const SAM9X7State *s);
 
 #endif /* HW_ARM_SAM9X7_H */

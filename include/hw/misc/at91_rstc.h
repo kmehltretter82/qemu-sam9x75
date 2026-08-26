@@ -28,6 +28,8 @@ struct AT91RSTCState {
     AT91SYSCWPState *sysc;
     QEMUTimer *external_timer;
     QEMUTimer *sample_timer;
+    QEMUTimer *reset_timer;
+    QEMUTimer *user_timer;
 
     bool general_reset_reports_backup;
     uint32_t mode;
@@ -39,9 +41,12 @@ struct AT91RSTCState {
     bool power_reset_level;
     bool nrst_out_level;
     bool reset_request_level;
+    bool warm_reset_pending;
+    bool software_procrst;
+    bool user_reset_active;
 };
 
 bool at91_rstc_gpbr_clear_enabled(const AT91RSTCState *s);
-bool at91_rstc_watchdog_reset_pending(const AT91RSTCState *s);
+bool at91_rstc_take_warm_reset_request(AT91RSTCState *s);
 
 #endif /* HW_MISC_AT91_RSTC_H */

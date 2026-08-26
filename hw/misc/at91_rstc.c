@@ -51,14 +51,23 @@
 #define RSTC_TYPE_SOFTWARE      3
 #define RSTC_TYPE_USER          4
 
+#define RSTC_INTERNAL_RESET_CYCLES 3
+#define RSTC_USER_SAMPLE_CYCLES 2
+#define RSTC_USER_RELEASE_CYCLES 6
+
 bool at91_rstc_gpbr_clear_enabled(const AT91RSTCState *s)
 {
     return s && (s->mode & RSTC_MR_ENGCLR);
 }
 
-bool at91_rstc_watchdog_reset_pending(const AT91RSTCState *s)
+bool at91_rstc_take_warm_reset_request(AT91RSTCState *s)
 {
-    return s && s->pending_reset_type == RSTC_TYPE_WATCHDOG;
+    bool pending = s && s->warm_reset_pending;
+
+    if (s) {
+        s->warm_reset_pending = false;
+    }
+    return pending;
 }
 
 static void at91_rstc_update_irq(AT91RSTCState *s)
@@ -84,7 +93,6 @@ static void at91_rstc_external_done(void *opaque)
 {
     AT91RSTCState *s = AT91_RSTC(opaque);
 
-    s->srcmp = false;
     s->nrst_out_level = true;
     qemu_set_irq(s->nrst_out, 1);
 }
@@ -101,23 +109,81 @@ static void at91_rstc_assert_external(AT91RSTCState *s)
               at91_rstc_slow_clock_delay(s, cycles));
 }
 
-static void at91_rstc_request_reset(AT91RSTCState *s)
+static void at91_rstc_assert_core_reset(AT91RSTCState *s)
 {
     s->reset_request_level = true;
     qemu_set_irq(s->reset_request, 1);
+}
+
+static void at91_rstc_request_reset(AT91RSTCState *s)
+{
+    at91_rstc_assert_core_reset(s);
+    s->warm_reset_pending = true;
     qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+}
+
+static bool at91_rstc_continue_user_reset(AT91RSTCState *s)
+{
+    if (s->nrst_level || s->power_reset_level ||
+        !(s->mode & RSTC_MR_URSTEN)) {
+        return false;
+    }
+
+    s->pending_reset_type = RSTC_TYPE_USER;
+    s->user_reset_active = true;
+    at91_rstc_assert_external(s);
+    return true;
+}
+
+static void at91_rstc_reset_done(void *opaque)
+{
+    AT91RSTCState *s = AT91_RSTC(opaque);
+    uint8_t reset_type = s->pending_reset_type;
+    bool reset_processor = reset_type == RSTC_TYPE_WATCHDOG ||
+                           (reset_type == RSTC_TYPE_SOFTWARE &&
+                            s->software_procrst);
+
+    s->srcmp = false;
+    s->software_procrst = false;
+    s->warm_reset_pending = false;
+    if (reset_processor) {
+        if (!at91_rstc_continue_user_reset(s)) {
+            /* RSTTYP changes only when Processor reset is released. */
+            s->reset_type = reset_type;
+            s->pending_reset_type = RSTC_TYPE_NONE;
+            s->reset_request_level = false;
+            qemu_set_irq(s->reset_request, 0);
+        }
+    }
+}
+
+static void at91_rstc_user_release_done(void *opaque)
+{
+    AT91RSTCState *s = AT91_RSTC(opaque);
+
+    if (!s->user_reset_active || !s->nrst_level ||
+        s->power_reset_level ||
+        s->pending_reset_type != RSTC_TYPE_USER) {
+        return;
+    }
+
+    s->user_reset_active = false;
+    s->reset_type = RSTC_TYPE_USER;
+    s->pending_reset_type = RSTC_TYPE_NONE;
+    s->reset_request_level = false;
+    s->warm_reset_pending = false;
+    qemu_set_irq(s->reset_request, 0);
 }
 
 static void at91_rstc_user_event(AT91RSTCState *s)
 {
-    s->ursts = true;
-    at91_rstc_update_irq(s);
-
     if (s->mode & RSTC_MR_URSTEN) {
-        if (s->power_reset_level) {
+        if (s->power_reset_level || s->user_reset_active ||
+            s->pending_reset_type != RSTC_TYPE_NONE) {
             return;
         }
         s->pending_reset_type = RSTC_TYPE_USER;
+        s->user_reset_active = true;
         at91_rstc_assert_external(s);
         at91_rstc_request_reset(s);
     }
@@ -139,18 +205,32 @@ static void at91_rstc_set_nrst(void *opaque, int n, int level)
 
     s->nrst_level = !!level;
     if (old_level && !s->nrst_level) {
+        /* URSTS records the raw high-to-low transition. */
+        s->ursts = true;
+        at91_rstc_update_irq(s);
+        if (s->user_reset_active) {
+            timer_del(s->user_timer);
+            return;
+        }
         if (s->mode & RSTC_MR_URSTASYNC) {
             at91_rstc_user_event(s);
         } else {
             timer_mod(s->sample_timer,
                       qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                      at91_rstc_slow_clock_delay(s, 1));
+                      at91_rstc_slow_clock_delay(
+                          s, RSTC_USER_SAMPLE_CYCLES));
         }
     } else if (!old_level && s->nrst_level) {
         timer_del(s->sample_timer);
         if (!s->power_reset_level &&
             s->pending_reset_type == RSTC_TYPE_BACKUP) {
             at91_rstc_request_reset(s);
+        } else if (s->user_reset_active &&
+                   s->pending_reset_type == RSTC_TYPE_USER) {
+            timer_mod(s->user_timer,
+                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                      at91_rstc_slow_clock_delay(
+                          s, RSTC_USER_RELEASE_CYCLES));
         }
     }
 }
@@ -166,6 +246,11 @@ static void at91_rstc_set_power_reset(void *opaque, int n, int level)
 
     s->power_reset_level = asserted;
     if (asserted) {
+        timer_del(s->reset_timer);
+        timer_del(s->user_timer);
+        s->srcmp = false;
+        s->software_procrst = false;
+        s->user_reset_active = false;
         s->ursts = true;
         s->pending_reset_type = RSTC_TYPE_BACKUP;
         at91_rstc_update_irq(s);
@@ -182,15 +267,35 @@ static void at91_rstc_set_wdt_reset(void *opaque, int n, int level)
     AT91RSTCState *s = AT91_RSTC(opaque);
 
     if (level) {
+        /* Backup and User reset have priority over Watchdog reset. */
+        if (s->pending_reset_type == RSTC_TYPE_BACKUP ||
+            s->pending_reset_type == RSTC_TYPE_USER) {
+            return;
+        }
+        timer_del(s->reset_timer);
+        timer_del(s->user_timer);
+        s->srcmp = false;
+        s->software_procrst = false;
+        s->user_reset_active = false;
         s->pending_reset_type = RSTC_TYPE_WATCHDOG;
         at91_rstc_assert_external(s);
+        at91_rstc_assert_core_reset(s);
+        s->warm_reset_pending = true;
+        timer_mod(s->reset_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  at91_rstc_slow_clock_delay(
+                      s, RSTC_INTERNAL_RESET_CYCLES));
     } else if (s->pending_reset_type == RSTC_TYPE_WATCHDOG &&
                !resettable_is_in_reset(OBJECT(s))) {
         /* A non-reset QEMU watchdog policy ends the physical pulse. */
         s->pending_reset_type = RSTC_TYPE_NONE;
+        s->warm_reset_pending = false;
+        timer_del(s->reset_timer);
         timer_del(s->external_timer);
         s->nrst_out_level = true;
+        s->reset_request_level = false;
         qemu_set_irq(s->nrst_out, 1);
+        qemu_set_irq(s->reset_request, 0);
     }
 }
 
@@ -249,7 +354,8 @@ static void at91_rstc_write(void *opaque, hwaddr offset, uint64_t value,
 
     switch (offset) {
     case RSTC_CR:
-        if ((value & RSTC_KEY_MASK) != RSTC_KEY || s->srcmp) {
+        if ((value & RSTC_KEY_MASK) != RSTC_KEY || s->srcmp ||
+            s->pending_reset_type != RSTC_TYPE_NONE) {
             return;
         }
         command = value & RSTC_CR_MASK;
@@ -258,6 +364,11 @@ static void at91_rstc_write(void *opaque, hwaddr offset, uint64_t value,
         }
 
         s->srcmp = true;
+        s->software_procrst = command & RSTC_CR_PROCRST;
+        timer_mod(s->reset_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  at91_rstc_slow_clock_delay(s,
+                                              RSTC_INTERNAL_RESET_CYCLES));
         if (command & RSTC_CR_EXTRST) {
             at91_rstc_assert_external(s);
         }
@@ -302,30 +413,53 @@ static const MemoryRegionOps at91_rstc_ops = {
 static void at91_rstc_reset_hold(Object *obj, ResetType type)
 {
     AT91RSTCState *s = AT91_RSTC(obj);
-    bool warm_reset = type == RESET_TYPE_WAKEUP &&
-                      s->pending_reset_type != RSTC_TYPE_NONE;
-    uint32_t saved_mode = s->mode;
+    bool active_reset = (s->pending_reset_type == RSTC_TYPE_SOFTWARE &&
+                         s->srcmp && s->software_procrst) ||
+                        (s->pending_reset_type == RSTC_TYPE_WATCHDOG &&
+                         timer_pending(s->reset_timer)) ||
+                        (s->pending_reset_type == RSTC_TYPE_USER &&
+                         s->user_reset_active) ||
+                        (s->pending_reset_type == RSTC_TYPE_BACKUP &&
+                         s->power_reset_level);
 
-    timer_del(s->external_timer);
-    timer_del(s->sample_timer);
-
-    if (warm_reset) {
-        s->reset_type = s->pending_reset_type;
-        s->mode = saved_mode;
-        s->ursts |= s->reset_type == RSTC_TYPE_USER;
-    } else {
+    /*
+     * RSTC is in the retained domain.  A VDDCORE reset happens at the
+     * assertion edge, while this state and its timers run until release.
+     */
+    if (type != RESET_TYPE_WAKEUP) {
+        timer_del(s->external_timer);
+        timer_del(s->sample_timer);
+        timer_del(s->reset_timer);
+        timer_del(s->user_timer);
         s->reset_type = RSTC_TYPE_GENERAL;
         s->mode = RSTC_MR_URSTEN;
         s->ursts = true;
         s->nrst_level = true;
         s->power_reset_level = false;
+        s->pending_reset_type = RSTC_TYPE_NONE;
+        s->srcmp = false;
+        s->software_procrst = false;
+        s->user_reset_active = false;
+        s->nrst_out_level = true;
+        s->reset_request_level = false;
+        s->warm_reset_pending = false;
+    } else if (!active_reset) {
+        if (s->pending_reset_type != RSTC_TYPE_NONE) {
+            s->reset_type = s->pending_reset_type;
+        }
+        timer_del(s->sample_timer);
+        timer_del(s->reset_timer);
+        timer_del(s->user_timer);
+        s->pending_reset_type = RSTC_TYPE_NONE;
+        s->srcmp = false;
+        s->software_procrst = false;
+        s->user_reset_active = false;
+        s->reset_request_level = false;
+        s->warm_reset_pending = false;
     }
-    s->pending_reset_type = RSTC_TYPE_NONE;
-    s->srcmp = false;
-    s->nrst_out_level = true;
-    s->reset_request_level = false;
-    qemu_set_irq(s->nrst_out, 1);
-    qemu_set_irq(s->reset_request, 0);
+
+    qemu_set_irq(s->nrst_out, s->nrst_out_level);
+    qemu_set_irq(s->reset_request, s->reset_request_level);
     at91_rstc_update_irq(s);
 }
 
@@ -367,6 +501,10 @@ static void at91_rstc_realize(DeviceState *dev, Error **errp)
                                      at91_rstc_external_done, s);
     s->sample_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                    at91_rstc_sample_nrst, s);
+    s->reset_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                  at91_rstc_reset_done, s);
+    s->user_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                 at91_rstc_user_release_done, s);
 }
 
 static void at91_rstc_finalize(Object *obj)
@@ -375,11 +513,27 @@ static void at91_rstc_finalize(Object *obj)
 
     timer_free(s->external_timer);
     timer_free(s->sample_timer);
+    timer_free(s->reset_timer);
+    timer_free(s->user_timer);
 }
 
 static int at91_rstc_post_load(void *opaque, int version_id)
 {
     AT91RSTCState *s = AT91_RSTC(opaque);
+
+    if (version_id < 3) {
+        s->software_procrst = s->srcmp &&
+                              s->pending_reset_type == RSTC_TYPE_SOFTWARE;
+        s->user_reset_active = false;
+        timer_del(s->reset_timer);
+        timer_del(s->user_timer);
+        if (s->srcmp) {
+            timer_mod(s->reset_timer,
+                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                      at91_rstc_slow_clock_delay(
+                          s, RSTC_INTERNAL_RESET_CYCLES));
+        }
+    }
 
     qemu_set_irq(s->nrst_out, s->nrst_out_level);
     qemu_set_irq(s->reset_request, s->reset_request_level);
@@ -389,13 +543,15 @@ static int at91_rstc_post_load(void *opaque, int version_id)
 
 static const VMStateDescription at91_rstc_vmstate = {
     .name = TYPE_AT91_RSTC,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = at91_rstc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_CLOCK(slck, AT91RSTCState),
         VMSTATE_TIMER_PTR(external_timer, AT91RSTCState),
         VMSTATE_TIMER_PTR(sample_timer, AT91RSTCState),
+        VMSTATE_TIMER_PTR_V(reset_timer, AT91RSTCState, 3),
+        VMSTATE_TIMER_PTR_V(user_timer, AT91RSTCState, 3),
         VMSTATE_UINT32(mode, AT91RSTCState),
         VMSTATE_UINT8(reset_type, AT91RSTCState),
         VMSTATE_UINT8(pending_reset_type, AT91RSTCState),
@@ -405,6 +561,8 @@ static const VMStateDescription at91_rstc_vmstate = {
         VMSTATE_BOOL(nrst_out_level, AT91RSTCState),
         VMSTATE_BOOL_V(power_reset_level, AT91RSTCState, 2),
         VMSTATE_BOOL_V(reset_request_level, AT91RSTCState, 2),
+        VMSTATE_BOOL_V(software_procrst, AT91RSTCState, 3),
+        VMSTATE_BOOL_V(user_reset_active, AT91RSTCState, 3),
         VMSTATE_END_OF_LIST()
     },
 };

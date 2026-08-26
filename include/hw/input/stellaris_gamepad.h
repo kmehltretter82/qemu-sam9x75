@@ -34,6 +34,7 @@ struct StellarisGamepad {
     qemu_irq *irqs;
     uint32_t *keycodes;
     uint8_t *pressed;
+    bool retain_on_wakeup;
 };
 
 #endif

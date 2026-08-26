@@ -15,6 +15,7 @@
 
 #define SAM9X75_MACHINE         "-machine sam9x75-curiosity"
 #define SOC_RESET_POWER_IRQ     0
+#define SOC_RESET_REQUEST_IRQ   1
 
 #define SAM9X7_BOOT_BASE        0x00000000
 #define SAM9X7_BOOT_ROM_SIZE    0x00014000
@@ -1082,11 +1083,16 @@
 #define RSTC_SR_SRCMP           BIT(17)
 #define RSTC_MR_URSTEN          BIT(0)
 #define RSTC_MR_URSTIEN         BIT(4)
+#define RSTC_MR_ERSTL(value)    ((value) << 8)
 #define RSTC_MR_ENGCLR          BIT(20)
 #define RSTC_KEY                0xa5000000
 #define RSTC_TYPE_BACKUP        1
 #define RSTC_TYPE_WATCHDOG      2
 #define RSTC_TYPE_SOFTWARE      3
+#define RSTC_TYPE_USER          4
+#define RSTC_SOFTWARE_CYCLES    3
+#define RSTC_USER_SAMPLE_CYCLES 2
+#define RSTC_USER_RELEASE_CYCLES 6
 
 #define SHDWC_CR                0x00
 #define SHDWC_MR                0x04
@@ -1105,6 +1111,12 @@
 #define SHDWC_WUIR_WKUPEN0      BIT(0)
 #define SHDWC_WUIR_WKUPT0       BIT(16)
 #define SHDWC_SLCK_CYCLE_NS      31250LL
+#define RSTC_SOFTWARE_TIME_NS    (RSTC_SOFTWARE_CYCLES * \
+                                  SHDWC_SLCK_CYCLE_NS)
+#define RSTC_USER_SAMPLE_TIME_NS (RSTC_USER_SAMPLE_CYCLES * \
+                                  SHDWC_SLCK_CYCLE_NS)
+#define RSTC_USER_RELEASE_TIME_NS (RSTC_USER_RELEASE_CYCLES * \
+                                   SHDWC_SLCK_CYCLE_NS)
 
 #define RTT_MR                  0x00
 #define RTT_AR                  0x04
@@ -1758,6 +1770,14 @@ static void send_input_key(QTestState *qts, const char *qcode, bool down)
         "{ 'execute': 'input-send-event', 'arguments': { 'events': ["
         "{ 'type': 'key', 'data': { 'down': %i, 'key': {"
         "'type': 'qcode', 'data': %s } } } ] } }", down, qcode);
+}
+
+static void sam9x75_migrate(QTestState *from, QTestState *to)
+{
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
 }
 
 static void pmc_write_pcr(QTestState *qts, unsigned int id,
@@ -2964,12 +2984,15 @@ static void test_board_wakeup_start_reset_and_pmic_modes(void)
     /* RESET reaches the RSTC's active-low NRST input and records URSTS. */
     qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
     send_input_key(qts, "r", true);
-    qtest_clock_step(qts, SHDWC_SLCK_CYCLE_NS + 1);
+    qtest_clock_step(qts, RSTC_USER_SAMPLE_TIME_NS);
     qtest_qmp_eventwait(qts, "RESET");
+    value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_true(value & RSTC_SR_URSTS);
+    g_assert_false(value & RSTC_SR_NRSTL);
     send_input_key(qts, "r", false);
     value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
-    g_assert_cmphex(value & (RSTC_SR_URSTS | RSTC_SR_NRSTL), ==,
-                    RSTC_SR_URSTS | RSTC_SR_NRSTL);
+    g_assert_false(value & RSTC_SR_URSTS);
+    g_assert_true(value & RSTC_SR_NRSTL);
 
     qtest_quit(qts);
 }
@@ -3052,6 +3075,14 @@ static void test_board_power_reset_domains(void)
                  RSTC_KEY | RSTC_CR_PROCRST);
     qtest_qmp_eventwait(qts, "RESET");
 
+    g_assert_true(qtest_get_irq(qts, SOC_RESET_REQUEST_IRQ));
+    qtest_clock_step(qts, RSTC_SOFTWARE_TIME_NS - 1);
+    g_assert_true(qtest_get_irq(qts, SOC_RESET_REQUEST_IRQ));
+    g_assert_true(qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR) &
+                  RSTC_SR_SRCMP);
+    qtest_clock_step(qts, 1);
+    g_assert_false(qtest_get_irq(qts, SOC_RESET_REQUEST_IRQ));
+
     value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
     g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
                     RSTC_SR_RSTTYP(RSTC_TYPE_SOFTWARE));
@@ -3076,6 +3107,11 @@ static void test_board_power_reset_domains(void)
     qtest_qmp_eventwait(qts, "WATCHDOG");
     qtest_qmp_eventwait(qts, "RESET");
 
+    g_assert_true(qtest_get_irq(qts, SOC_RESET_REQUEST_IRQ));
+    qtest_clock_step(qts, RSTC_SOFTWARE_TIME_NS - 1);
+    g_assert_true(qtest_get_irq(qts, SOC_RESET_REQUEST_IRQ));
+    qtest_clock_step(qts, 1);
+    g_assert_false(qtest_get_irq(qts, SOC_RESET_REQUEST_IRQ));
     value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
     g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
                     RSTC_SR_RSTTYP(RSTC_TYPE_WATCHDOG));
@@ -10875,6 +10911,8 @@ static void test_system_slowclock_pit_reset_and_protection(void)
     qtest_irq_intercept_out_named(qts, "/machine/soc/rstc", "nrst-out");
     qtest_system_reset(qts);
     g_assert_true(qtest_get_irq(qts, 0));
+    qtest_writel(qts, SAM9X7_RSTC_BASE + RSTC_MR,
+                 RSTC_KEY | RSTC_MR_URSTEN | RSTC_MR_ERSTL(1));
     qtest_writel(qts, SAM9X7_RSTC_BASE + RSTC_CR, RSTC_CR_EXTRST);
     g_assert_true(qtest_get_irq(qts, 0));
     qtest_writel(qts, SAM9X7_RSTC_BASE + RSTC_CR,
@@ -10882,10 +10920,20 @@ static void test_system_slowclock_pit_reset_and_protection(void)
     g_assert_false(qtest_get_irq(qts, 0));
     g_assert_true(qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR) &
                   RSTC_SR_SRCMP);
-    qtest_clock_step(qts, 2 * SHDWC_SLCK_CYCLE_NS);
-    g_assert_true(qtest_get_irq(qts, 0));
+
+    qtest_clock_step(qts, RSTC_SOFTWARE_TIME_NS - 1);
+    g_assert_false(qtest_get_irq(qts, 0));
+    g_assert_true(qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR) &
+                  RSTC_SR_SRCMP);
+    qtest_clock_step(qts, 1);
+    g_assert_false(qtest_get_irq(qts, 0));
     g_assert_false(qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR) &
                    RSTC_SR_SRCMP);
+
+    qtest_clock_step(qts, SHDWC_SLCK_CYCLE_NS - 1);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, 1);
+    g_assert_true(qtest_get_irq(qts, 0));
 
     qtest_quit(qts);
 }
@@ -10905,6 +10953,7 @@ static void test_rstc_a1_general_reset_reporting(void)
     qtest_writel(qts, SAM9X7_RSTC_BASE + RSTC_CR,
                  RSTC_KEY | RSTC_CR_PROCRST);
     qtest_qmp_eventwait(qts, "RESET");
+    qtest_clock_step(qts, RSTC_SOFTWARE_TIME_NS);
     value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
     g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
                     RSTC_SR_RSTTYP(RSTC_TYPE_SOFTWARE));
@@ -10916,6 +10965,281 @@ static void test_rstc_a1_general_reset_reporting(void)
                     RSTC_SR_RSTTYP(RSTC_TYPE_BACKUP));
 
     qtest_quit(qts);
+}
+
+static void test_rstc_timing_and_migration(void)
+{
+    const int64_t software_elapsed = SHDWC_SLCK_CYCLE_NS;
+    const int64_t external_time = 8 * SHDWC_SLCK_CYCLE_NS;
+    const int64_t release_elapsed = 2 * SHDWC_SLCK_CYCLE_NS;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    int64_t source_clock;
+    uint32_t value;
+
+    /* PROCRST completes in three cycles independently of an 8-cycle EXTRST. */
+    qtest_irq_intercept_out_named(from, "/machine/soc/rstc", "nrst-out");
+    qtest_irq_intercept_out_named(to, "/machine/soc/rstc", "nrst-out");
+    qtest_system_reset(from);
+    g_assert_true(qtest_get_irq(from, 0));
+    qtest_writel(from, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_writel(from, SAM9X7_RSTC_BASE + RSTC_MR,
+                 RSTC_KEY | RSTC_MR_URSTEN | RSTC_MR_ERSTL(2));
+    qtest_writel(from, SAM9X7_RSTC_BASE + RSTC_CR,
+                 RSTC_KEY | RSTC_CR_PROCRST | RSTC_CR_EXTRST);
+    qtest_qmp_eventwait(from, "RESET");
+    g_assert_false(qtest_get_irq(from, 0));
+    g_assert_true(qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR) &
+                  RSTC_SR_SRCMP);
+
+    source_clock = qtest_clock_step(from, software_elapsed);
+    sam9x75_migrate(from, to);
+    g_assert_cmpint(qtest_clock_set(to, source_clock), ==, source_clock);
+    g_assert_false(qtest_get_irq(to, 0));
+    g_assert_true(qtest_readl(to, SAM9X7_RSTC_BASE + RSTC_SR) &
+                  RSTC_SR_SRCMP);
+
+    qtest_clock_step(to,
+                     RSTC_SOFTWARE_TIME_NS - software_elapsed - 1);
+    g_assert_false(qtest_get_irq(to, 0));
+    g_assert_true(qtest_readl(to, SAM9X7_RSTC_BASE + RSTC_SR) &
+                  RSTC_SR_SRCMP);
+    qtest_clock_step(to, 1);
+    g_assert_false(qtest_get_irq(to, 0));
+    value = qtest_readl(to, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_false(value & RSTC_SR_SRCMP);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_SOFTWARE));
+
+    qtest_clock_step(to,
+                     external_time - RSTC_SOFTWARE_TIME_NS - 1);
+    g_assert_false(qtest_get_irq(to, 0));
+    qtest_clock_step(to, 1);
+    g_assert_true(qtest_get_irq(to, 0));
+
+    qtest_quit(to);
+    qtest_quit(from);
+
+    /* A held synchronous user reset asserts after two cycles. */
+    from = qtest_init(SAM9X75_MACHINE);
+    to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    qtest_irq_intercept_out_named(from, "/machine/soc/rstc",
+                                  "reset-request");
+    qtest_irq_intercept_out_named(to, "/machine/soc/rstc",
+                                  "reset-request");
+    qtest_writel(from, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    send_input_key(from, "r", true);
+    g_assert_false(qtest_get_irq(from, 0));
+    qtest_clock_step(from, RSTC_USER_SAMPLE_TIME_NS - 1);
+    g_assert_false(qtest_get_irq(from, 0));
+    value = qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_true(value & RSTC_SR_URSTS);
+    g_assert_false(value & RSTC_SR_NRSTL);
+    qtest_clock_step(from, 1);
+    qtest_qmp_eventwait(from, "RESET");
+    g_assert_true(qtest_get_irq(from, 0));
+
+    qtest_clock_step(from, RSTC_USER_RELEASE_TIME_NS + 1);
+    g_assert_true(qtest_get_irq(from, 0));
+    send_input_key(from, "r", false);
+    g_assert_true(qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR) &
+                  RSTC_SR_NRSTL);
+
+    source_clock = qtest_clock_step(from, release_elapsed);
+    sam9x75_migrate(from, to);
+    g_assert_cmpint(qtest_clock_set(to, source_clock), ==, source_clock);
+    value = qtest_readl(to, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_BACKUP));
+    g_assert_true(value & RSTC_SR_NRSTL);
+    g_assert_true(qtest_get_irq(to, 0));
+
+    qtest_clock_step(to,
+                     RSTC_USER_RELEASE_TIME_NS - release_elapsed - 1);
+    g_assert_true(qtest_get_irq(to, 0));
+    qtest_clock_step(to, 1);
+    g_assert_false(qtest_get_irq(to, 0));
+    value = qtest_readl(to, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_USER));
+    g_assert_true(value & RSTC_SR_NRSTL);
+
+    qtest_quit(to);
+    qtest_quit(from);
+
+    /* An explicit host reset cancels retained warm-reset sequencing. */
+    from = qtest_init(SAM9X75_MACHINE);
+    qtest_irq_intercept_in(from, "/machine/soc");
+    qtest_writel(from, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+
+    qtest_writel(from, SAM9X7_RSTC_BASE + RSTC_CR,
+                 RSTC_KEY | RSTC_CR_PROCRST);
+    qtest_qmp_eventwait(from, "RESET");
+    g_assert_true(qtest_get_irq(from, SOC_RESET_REQUEST_IRQ));
+    qtest_clock_step(from, SHDWC_SLCK_CYCLE_NS);
+    g_assert_true(qtest_get_irq(from, SOC_RESET_REQUEST_IRQ));
+    g_assert_true(qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR) &
+                  RSTC_SR_SRCMP);
+
+    qtest_system_reset(from);
+    g_assert_false(qtest_get_irq(from, SOC_RESET_REQUEST_IRQ));
+    value = qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_BACKUP));
+    g_assert_false(value & RSTC_SR_SRCMP);
+    g_assert_true(value & RSTC_SR_NRSTL);
+    qtest_clock_step(from, RSTC_SOFTWARE_TIME_NS);
+    g_assert_false(qtest_get_irq(from, SOC_RESET_REQUEST_IRQ));
+    value = qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_BACKUP));
+    g_assert_false(value & RSTC_SR_SRCMP);
+
+    qtest_writel(from, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    send_input_key(from, "r", true);
+    qtest_clock_step(from, RSTC_USER_SAMPLE_TIME_NS);
+    qtest_qmp_eventwait(from, "RESET");
+    g_assert_true(qtest_get_irq(from, SOC_RESET_REQUEST_IRQ));
+    value = qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_false(value & RSTC_SR_NRSTL);
+
+    qtest_system_reset(from);
+    g_assert_false(qtest_get_irq(from, SOC_RESET_REQUEST_IRQ));
+    value = qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_BACKUP));
+    g_assert_false(value & RSTC_SR_SRCMP);
+    g_assert_true(value & RSTC_SR_NRSTL);
+    qtest_clock_step(from, RSTC_USER_RELEASE_TIME_NS +
+                           RSTC_USER_SAMPLE_TIME_NS);
+    g_assert_false(qtest_get_irq(from, SOC_RESET_REQUEST_IRQ));
+    value = qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_BACKUP));
+    g_assert_false(value & RSTC_SR_SRCMP);
+
+    qtest_quit(from);
+
+    /* Watchdog preempts Software and restarts the three-cycle hold. */
+    from = qtest_init(SAM9X75_MACHINE);
+    qtest_irq_intercept_out_named(from, "/machine/soc/rstc",
+                                  "reset-request");
+    qtest_writel(from, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_writel(from, SAM9X7_RSTC_BASE + RSTC_CR,
+                 RSTC_KEY | RSTC_CR_PROCRST);
+    qtest_qmp_eventwait(from, "RESET");
+    g_assert_true(qtest_get_irq(from, 0));
+    qtest_clock_step(from, SHDWC_SLCK_CYCLE_NS);
+    g_assert_true(qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR) &
+                  RSTC_SR_SRCMP);
+
+    qtest_set_irq_in(from, "/machine/soc/rstc", "wdt-reset", 0, 1);
+    g_assert_true(qtest_get_irq(from, 0));
+    g_assert_false(qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR) &
+                   RSTC_SR_SRCMP);
+    qtest_clock_step(from, RSTC_SOFTWARE_TIME_NS - 1);
+    g_assert_true(qtest_get_irq(from, 0));
+    qtest_clock_step(from, 1);
+    g_assert_false(qtest_get_irq(from, 0));
+    value = qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_WATCHDOG));
+    qtest_set_irq_in(from, "/machine/soc/rstc", "wdt-reset", 0, 0);
+    qtest_quit(from);
+
+    /* Backup reset has priority over a simultaneous Watchdog input. */
+    from = qtest_init(SAM9X75_MACHINE);
+    qtest_irq_intercept_out_named(from, "/machine/soc/rstc",
+                                  "reset-request");
+    qtest_writel(from, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_set_irq_in(from, "/machine/soc/rstc", "power-reset", 0, 1);
+    g_assert_false(qtest_get_irq(from, 0));
+    value = qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_false(value & RSTC_SR_NRSTL);
+
+    qtest_set_irq_in(from, "/machine/soc/rstc", "wdt-reset", 0, 1);
+    qtest_clock_step(from, RSTC_SOFTWARE_TIME_NS);
+    g_assert_false(qtest_get_irq(from, 0));
+    value = qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_BACKUP));
+    g_assert_false(value & (RSTC_SR_NRSTL | RSTC_SR_SRCMP));
+    qtest_set_irq_in(from, "/machine/soc/rstc", "wdt-reset", 0, 0);
+    qtest_set_irq_in(from, "/machine/soc/rstc", "power-reset", 0, 0);
+    qtest_qmp_eventwait(from, "RESET");
+    g_assert_false(qtest_get_irq(from, 0));
+    value = qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_BACKUP));
+    g_assert_true(value & RSTC_SR_NRSTL);
+    qtest_quit(from);
+
+    /* A held User reset is not interrupted by Watchdog. */
+    from = qtest_init(SAM9X75_MACHINE);
+    qtest_irq_intercept_out_named(from, "/machine/soc/rstc",
+                                  "reset-request");
+    qtest_writel(from, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    send_input_key(from, "r", true);
+    qtest_clock_step(from, RSTC_USER_SAMPLE_TIME_NS);
+    qtest_qmp_eventwait(from, "RESET");
+    g_assert_true(qtest_get_irq(from, 0));
+    qtest_set_irq_in(from, "/machine/soc/rstc", "wdt-reset", 0, 1);
+    qtest_clock_step(from, RSTC_SOFTWARE_TIME_NS);
+    g_assert_true(qtest_get_irq(from, 0));
+    value = qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_BACKUP));
+    g_assert_false(value & (RSTC_SR_NRSTL | RSTC_SR_SRCMP));
+    qtest_set_irq_in(from, "/machine/soc/rstc", "wdt-reset", 0, 0);
+    send_input_key(from, "r", false);
+    qtest_clock_step(from, RSTC_USER_RELEASE_TIME_NS - 1);
+    g_assert_true(qtest_get_irq(from, 0));
+    qtest_clock_step(from, 1);
+    g_assert_false(qtest_get_irq(from, 0));
+    value = qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_USER));
+    qtest_quit(from);
+
+    /* A User assertion during Software keeps reset continuously held. */
+    from = qtest_init(SAM9X75_MACHINE);
+    qtest_irq_intercept_out_named(from, "/machine/soc/rstc",
+                                  "reset-request");
+    qtest_writel(from, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_writel(from, SAM9X7_RSTC_BASE + RSTC_CR,
+                 RSTC_KEY | RSTC_CR_PROCRST);
+    qtest_qmp_eventwait(from, "RESET");
+    qtest_clock_step(from, SHDWC_SLCK_CYCLE_NS);
+    g_assert_true(qtest_get_irq(from, 0));
+    send_input_key(from, "r", true);
+    value = qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_true(value & RSTC_SR_URSTS);
+    g_assert_false(value & RSTC_SR_NRSTL);
+
+    qtest_clock_step(from,
+                     RSTC_SOFTWARE_TIME_NS - SHDWC_SLCK_CYCLE_NS - 1);
+    g_assert_true(qtest_get_irq(from, 0));
+    g_assert_true(qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR) &
+                  RSTC_SR_SRCMP);
+    qtest_clock_step(from, 1);
+    g_assert_true(qtest_get_irq(from, 0));
+    value = qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_false(value & RSTC_SR_SRCMP);
+    g_assert_false(value & RSTC_SR_NRSTL);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_BACKUP));
+
+    qtest_clock_step(from, RSTC_USER_RELEASE_TIME_NS + 1);
+    g_assert_true(qtest_get_irq(from, 0));
+    send_input_key(from, "r", false);
+    qtest_clock_step(from, RSTC_USER_RELEASE_TIME_NS - 1);
+    g_assert_true(qtest_get_irq(from, 0));
+    qtest_clock_step(from, 1);
+    g_assert_false(qtest_get_irq(from, 0));
+    value = qtest_readl(from, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_USER));
+    qtest_quit(from);
 }
 
 static void test_rtt_count_alarm_modulo_and_protection(void)
@@ -14310,10 +14634,7 @@ static void nand_get_features(QTestState *qts, uint8_t address,
 
 static void nand_migrate(QTestState *from, QTestState *to)
 {
-    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
-    migrate_qmp(from, to, NULL, NULL, "{}");
-    wait_for_migration_complete(from);
-    wait_for_migration_complete(to);
+    sam9x75_migrate(from, to);
 }
 
 static QTestState *nand_migrate_pending_to_completion(QTestState *from,
@@ -14521,6 +14842,7 @@ static void test_ebi_assignment_migration_reset(void)
     qtest_writel(to, SAM9X7_RSTC_BASE + RSTC_CR,
                  RSTC_KEY | RSTC_CR_PROCRST);
     qtest_qmp_eventwait(to, "RESET");
+    qtest_clock_step(to, RSTC_SOFTWARE_TIME_NS);
     value = qtest_readl(to, SAM9X7_RSTC_BASE + RSTC_SR);
     g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
                     RSTC_SR_RSTTYP(RSTC_TYPE_SOFTWARE));
@@ -15034,6 +15356,7 @@ static void test_nand_features_and_reset_domains(void)
     qtest_writel(qts, SAM9X7_RSTC_BASE + RSTC_CR,
                  RSTC_KEY | RSTC_CR_PROCRST);
     qtest_qmp_eventwait(qts, "RESET");
+    qtest_clock_step(qts, RSTC_SOFTWARE_TIME_NS);
     value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
     g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
                     RSTC_SR_RSTTYP(RSTC_TYPE_SOFTWARE));
@@ -15153,13 +15476,13 @@ static void test_nand_pending_operation_reset_domains(void)
     qtest_writel(qts, SAM9X7_RSTC_BASE + RSTC_CR,
                  RSTC_KEY | RSTC_CR_PROCRST);
     qtest_qmp_eventwait(qts, "RESET");
-    value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
-    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
-                    RSTC_SR_RSTTYP(RSTC_TYPE_SOFTWARE));
     ebi_enable_nand(qts);
     nand_enable_ready_observation(qts);
     nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
     qtest_clock_step(qts, NAND_PROGRAM_TIME_NS - elapsed - 1);
+    value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_SOFTWARE));
     nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
     qtest_clock_step(qts, 1);
     nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
@@ -21923,6 +22246,8 @@ int main(int argc, char **argv)
                    test_system_slowclock_pit_reset_and_protection);
     qtest_add_func("sam9x75/rstc/a1-general-reset-reporting",
                    test_rstc_a1_general_reset_reporting);
+    qtest_add_func("sam9x75/rstc/timing-and-migration",
+                   test_rstc_timing_and_migration);
     qtest_add_func("sam9x75/rtt/count-alarm-modulo-and-protection",
                    test_rtt_count_alarm_modulo_and_protection);
     qtest_add_func("sam9x75/shdwc/registers-shutdown-and-pin-wake",
