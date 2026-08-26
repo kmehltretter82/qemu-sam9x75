@@ -571,9 +571,18 @@ static bool at91_sha_can_accept(const AT91SHAState *s)
 {
     bool more_message = !s->msr || s->bcr;
 
-    return clock_get_hz(s->pclk) && !s->busy && !s->locked &&
-           at91_sha_smod(s) == SHA_MR_SMOD_IDATAR0 &&
-           (more_message || s->awaiting_check);
+    if (!clock_get_hz(s->pclk) || s->locked ||
+        at91_sha_smod(s) != SHA_MR_SMOD_IDATAR0) {
+        return false;
+    }
+    if (!s->busy) {
+        return more_message || s->awaiting_check;
+    }
+
+    return s->processing_stage == SHA_STAGE_INPUT &&
+           (s->mr & SHA_MR_DUALBUFF) && more_message &&
+           s->queued_expected_bytes &&
+           s->queued_input_bytes < s->queued_expected_bytes;
 }
 
 static void at91_sha_update_request(AT91SHAState *s)
@@ -665,6 +674,18 @@ static void at91_sha_schedule(AT91SHAState *s)
                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + duration);
 }
 
+static void at91_sha_reset_queued_input(AT91SHAState *s)
+{
+    size_t block_size = at91_sha_block_size(s);
+
+    memset(s->queued_block, 0, sizeof(s->queued_block));
+    s->queued_input_words = 0;
+    s->queued_input_bytes = 0;
+    s->queued_expected_bytes = s->msr ?
+                               MIN((uint64_t)s->bcr, block_size) :
+                               block_size;
+}
+
 static void at91_sha_reset_input(AT91SHAState *s)
 {
     size_t block_size = at91_sha_block_size(s);
@@ -674,6 +695,7 @@ static void at91_sha_reset_input(AT91SHAState *s)
     s->input_bytes = 0;
     s->expected_bytes = s->msr ? MIN((uint64_t)s->bcr, block_size) :
                                  block_size;
+    at91_sha_reset_queued_input(s);
 }
 
 static void at91_sha_write_bit_length(AT91SHAState *s, uint64_t bytes)
@@ -746,6 +768,7 @@ static void at91_sha_finish_result(AT91SHAState *s)
 {
     at91_sha_update_output(s);
     s->busy = false;
+    s->current_auto_final = false;
     s->output_valid = true;
     s->processing_stage = SHA_STAGE_INPUT;
     at91_sha_reset_input(s);
@@ -773,6 +796,7 @@ static void at91_sha_finish_block(AT91SHAState *s)
             at91_sha_set_irq(s, SHA_INT_DATRDY);
         }
         s->busy = false;
+        s->current_auto_final = false;
         s->processing_stage = SHA_STAGE_INPUT;
         at91_sha_reset_input(s);
         at91_sha_update_request(s);
@@ -809,6 +833,39 @@ static void at91_sha_finish_inner(AT91SHAState *s)
     }
 }
 
+static void at91_sha_start_block(AT91SHAState *s, bool automatic);
+
+static void at91_sha_continue_queued_block(AT91SHAState *s)
+{
+    bool complete = s->queued_expected_bytes &&
+                    s->queued_input_bytes >= s->queued_expected_bytes;
+    bool report = s->mr & SHA_MR_BPE;
+
+    if (report) {
+        at91_sha_update_output(s);
+    }
+
+    memcpy(s->block, s->queued_block, sizeof(s->block));
+    s->input_words = s->queued_input_words;
+    s->input_bytes = s->queued_input_bytes;
+    s->expected_bytes = s->queued_expected_bytes;
+    s->busy = false;
+    s->current_auto_final = false;
+    s->processing_stage = SHA_STAGE_INPUT;
+    at91_sha_reset_queued_input(s);
+
+    if (complete) {
+        at91_sha_start_block(s, true);
+    } else {
+        at91_sha_update_request(s);
+    }
+
+    if (report) {
+        s->output_valid = true;
+        at91_sha_set_irq(s, SHA_INT_DATRDY);
+    }
+}
+
 static void at91_sha_processing_done(void *opaque)
 {
     AT91SHAState *s = opaque;
@@ -832,18 +889,24 @@ static void at91_sha_processing_done(void *opaque)
         break;
     }
 
-    auto_final = s->msr && !s->bcr;
+    auto_final = s->current_auto_final;
     if (auto_final) {
         if (!at91_sha_process_final_input(s)) {
+            s->current_auto_final = false;
             s->processing_stage = SHA_STAGE_PADDING;
             at91_sha_schedule(s);
             return;
         }
+        s->current_auto_final = false;
         at91_sha_finish_inner(s);
         return;
     }
 
     at91_sha_transform(s);
+    if (s->queued_input_words) {
+        at91_sha_continue_queued_block(s);
+        return;
+    }
     if (at91_sha_is_hmac(s) && !s->msr) {
         at91_sha_finish_inner(s);
     } else {
@@ -868,7 +931,9 @@ static void at91_sha_start_block(AT91SHAState *s, bool automatic)
     s->output_valid = false;
     s->awaiting_check = false;
     s->busy = true;
+    s->current_auto_final = s->msr && !s->bcr;
     s->processing_stage = SHA_STAGE_INPUT;
+    at91_sha_reset_queued_input(s);
     qemu_set_irq(s->irq, !!(s->isr & s->imr & SHA_INT_MASK));
     at91_sha_update_request(s);
     at91_sha_schedule(s);
@@ -912,7 +977,30 @@ static void at91_sha_write_data(AT91SHAState *s, hwaddr offset,
         return;
     }
     if (s->busy) {
-        at91_sha_raise_urad(s, SHA_URAT_INPUT_BUSY);
+        if (!at91_sha_can_accept(s)) {
+            at91_sha_raise_urad(s, SHA_URAT_INPUT_BUSY);
+            return;
+        }
+        if (offset != SHA_IDATAR0) {
+            at91_sha_raise_swe(s, offset, SHA_SWE_UNDEF_RW, false);
+            return;
+        }
+
+        position = s->queued_input_words;
+        if (position >= block_size / 4) {
+            at91_sha_raise_swe(s, offset, SHA_SWE_UNDEF_RW, false);
+            return;
+        }
+        stl_le_p(s->queued_block + position * 4, value);
+        s->queued_input_words++;
+        if (s->msr) {
+            valid = MIN(s->bcr, 4U);
+            s->bcr -= valid;
+        } else {
+            valid = 4;
+        }
+        s->queued_input_bytes += valid;
+        at91_sha_update_request(s);
         return;
     }
 
@@ -978,7 +1066,8 @@ static uint64_t at91_sha_read(void *opaque, hwaddr offset,
         return s->imr;
     case SHA_ISR:
         value = s->isr;
-        if (clock_get_hz(s->pclk) && !s->busy && !s->locked) {
+        if (clock_get_hz(s->pclk) && !s->locked &&
+            (!s->busy || at91_sha_can_accept(s))) {
             value |= SHA_ISR_WRDY;
         }
         at91_sha_clear_irq(s, SHA_INT_SECE);
@@ -1023,18 +1112,16 @@ static void at91_sha_reset_registers(AT91SHAState *s, bool hardware)
     s->isr = 0;
     s->msr = 0;
     s->bcr = 0;
-    memset(s->block, 0, sizeof(s->block));
+    at91_sha_reset_input(s);
     memset(s->output, 0, sizeof(s->output));
     memset(s->check, 0, sizeof(s->check));
     memset(s->hash, 0, sizeof(s->hash));
-    s->input_words = 0;
-    s->input_bytes = 0;
-    s->expected_bytes = at91_sha_block_size(s);
     s->check_words = 0;
     s->write_target = SHA_WRITE_DATA;
     s->processing_stage = SHA_STAGE_INPUT;
     s->first_pending = false;
     s->busy = false;
+    s->current_auto_final = false;
     s->output_valid = false;
     s->awaiting_check = false;
     if (hardware) {
@@ -1206,6 +1293,11 @@ static void at91_sha_realize(DeviceState *dev, Error **errp)
 static int at91_sha_post_load(void *opaque, int version_id)
 {
     AT91SHAState *s = opaque;
+    bool input_stage;
+    bool queue_relevant;
+    bool auto_final;
+    size_t block_size;
+    uint32_t queued_expected;
 
     s->mr &= SHA_MR_MASK;
     s->imr &= SHA_INT_MASK;
@@ -1214,6 +1306,45 @@ static int at91_sha_post_load(void *opaque, int version_id)
     s->write_target = MIN(s->write_target, (uint8_t)SHA_WRITE_IR1);
     s->processing_stage = MIN(s->processing_stage,
                               (uint8_t)SHA_STAGE_HMAC_OUTER);
+    block_size = at91_sha_block_size(s);
+    if (version_id < 2) {
+        at91_sha_reset_queued_input(s);
+        s->current_auto_final = s->busy &&
+                                s->processing_stage == SHA_STAGE_INPUT &&
+                                s->msr && !s->bcr;
+    }
+
+    input_stage = s->processing_stage == SHA_STAGE_INPUT;
+    queue_relevant = s->busy && input_stage &&
+                     at91_sha_smod(s) == SHA_MR_SMOD_IDATAR0 &&
+                     (s->mr & SHA_MR_DUALBUFF);
+    auto_final = s->busy && input_stage && s->msr && !s->bcr &&
+                 !s->queued_input_words;
+    if (s->input_words > block_size / sizeof(uint32_t) ||
+        s->input_bytes > block_size || s->expected_bytes > block_size ||
+        (input_stage &&
+         (s->input_words !=
+          DIV_ROUND_UP(s->input_bytes, sizeof(uint32_t)) ||
+          s->input_bytes > s->expected_bytes)) ||
+        s->current_auto_final != auto_final) {
+        return -EINVAL;
+    }
+
+    if (version_id >= 2) {
+        queued_expected = s->msr ?
+                          MIN((uint64_t)s->bcr + s->queued_input_bytes,
+                              block_size) : block_size;
+        if (s->queued_input_words > block_size / sizeof(uint32_t) ||
+            s->queued_input_words !=
+            DIV_ROUND_UP(s->queued_input_bytes, sizeof(uint32_t)) ||
+            s->queued_input_bytes > s->queued_expected_bytes ||
+            s->queued_expected_bytes > block_size ||
+            (queue_relevant &&
+             s->queued_expected_bytes != queued_expected) ||
+            (s->queued_input_words && !queue_relevant)) {
+            return -EINVAL;
+        }
+    }
     s->tx_request_level = false;
     qemu_set_irq(s->irq, !!(s->isr & s->imr & SHA_INT_MASK));
     at91_sha_update_request(s);
@@ -1223,7 +1354,7 @@ static int at91_sha_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_at91_sha = {
     .name = TYPE_AT91_SHA,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = at91_sha_post_load,
     .fields = (const VMStateField[]) {
@@ -1235,6 +1366,8 @@ static const VMStateDescription vmstate_at91_sha = {
         VMSTATE_UINT32(wpmr, AT91SHAState),
         VMSTATE_UINT32(wpsr, AT91SHAState),
         VMSTATE_UINT8_ARRAY(block, AT91SHAState, AT91_SHA_MAX_BLOCK_SIZE),
+        VMSTATE_UINT8_ARRAY_V(queued_block, AT91SHAState,
+                              AT91_SHA_MAX_BLOCK_SIZE, 2),
         VMSTATE_UINT32_ARRAY(output, AT91SHAState, AT91_SHA_MAX_WORDS),
         VMSTATE_UINT32_ARRAY(ir0, AT91SHAState, AT91_SHA_MAX_WORDS),
         VMSTATE_UINT32_ARRAY(ir1, AT91SHAState, AT91_SHA_MAX_WORDS),
@@ -1243,11 +1376,15 @@ static const VMStateDescription vmstate_at91_sha = {
         VMSTATE_UINT32(input_words, AT91SHAState),
         VMSTATE_UINT32(input_bytes, AT91SHAState),
         VMSTATE_UINT32(expected_bytes, AT91SHAState),
+        VMSTATE_UINT32_V(queued_input_words, AT91SHAState, 2),
+        VMSTATE_UINT32_V(queued_input_bytes, AT91SHAState, 2),
+        VMSTATE_UINT32_V(queued_expected_bytes, AT91SHAState, 2),
         VMSTATE_UINT32(check_words, AT91SHAState),
         VMSTATE_UINT8(write_target, AT91SHAState),
         VMSTATE_UINT8(processing_stage, AT91SHAState),
         VMSTATE_BOOL(first_pending, AT91SHAState),
         VMSTATE_BOOL(busy, AT91SHAState),
+        VMSTATE_BOOL_V(current_auto_final, AT91SHAState, 2),
         VMSTATE_BOOL(locked, AT91SHAState),
         VMSTATE_BOOL(output_valid, AT91SHAState),
         VMSTATE_BOOL(awaiting_check, AT91SHAState),

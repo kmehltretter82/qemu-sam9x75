@@ -1453,7 +1453,10 @@
 #define SHA_CR_WUIEHV           BIT(13)
 #define SHA_MR_SMOD_AUTO        1
 #define SHA_MR_SMOD_DMA         2
+#define SHA_MR_BPE              BIT(7)
+#define SHA_MR_UIHV             BIT(5)
 #define SHA_MR_ALGO(algo)       ((algo) << 8)
+#define SHA_MR_DUALBUFF         BIT(16)
 #define SHA_MR_CHECK_EHV        (1U << 24)
 #define SHA_MR_CHECK_MESSAGE    (2U << 24)
 #define SHA_ALGO_SHA1           0
@@ -1463,6 +1466,7 @@
 #define SHA_ALGO_SHA224         4
 #define SHA_ALGO_HMAC_SHA256    9
 #define SHA_INT_DATRDY          BIT(0)
+#define SHA_ISR_WRDY            BIT(4)
 #define SHA_INT_URAD            BIT(8)
 #define SHA_INT_CHECKF          BIT(16)
 #define SHA_INT_SECE            BIT(24)
@@ -11568,6 +11572,258 @@ static void test_sha_xdmac_auto_padding(void)
     g_assert_cmpmem(digest, sizeof(digest), expected, sizeof(expected));
 
     qtest_quit(qts);
+}
+
+static void test_sha_xdmac_context_restore_and_linked_padding(void)
+{
+    static const uint8_t expected[32] = {
+        0x47, 0x1f, 0xb9, 0x43, 0xaa, 0x23, 0xc5, 0x11,
+        0xf6, 0xf7, 0x2f, 0x8d, 0x16, 0x52, 0xd9, 0xc8,
+        0x80, 0xcf, 0xa3, 0x92, 0xad, 0x80, 0x50, 0x31,
+        0x20, 0x54, 0x77, 0x03, 0xe5, 0x6a, 0x2b, 0xe5,
+    };
+    const uint32_t message_address = SAM9X7_DDR_BASE + 0x12200;
+    const uint32_t padding_address = SAM9X7_DDR_BASE + 0x12300;
+    const uint32_t descriptor0_address = SAM9X7_DDR_BASE + 0x12400;
+    const uint32_t descriptor1_address = SAM9X7_DDR_BASE + 0x12420;
+    const uint32_t config = XDMAC_CC_TYPE_PER |
+                            XDMAC_CC_DSYNC_MEM2PER |
+                            XDMAC_CC_PERID(34) |
+                            XDMAC_CC_MBSIZE_SIXTEEN |
+                            XDMAC_CC_CSIZE_16 |
+                            XDMAC_CC_DWIDTH_WORD |
+                            XDMAC_CC_SAM_INC;
+    const uint64_t channel = XDMAC_CHANNEL(0);
+    uint8_t message[128];
+    uint8_t padding[64] = { 0x80 };
+    uint8_t interloper[64] = { 0 };
+    uint8_t digest[32];
+    uint32_t saved_state[8];
+    uint32_t interloper_state[8];
+    uint32_t descriptor[5] = { 0 };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint64_t duration;
+    uint32_t status;
+    unsigned int i;
+
+    ebi_enable_ddr(qts);
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    pmc_write_pcr(qts, 41, PMC_PCR_EN);
+    duration = sha_duration(qts, SHA_ALGO_SHA256);
+
+    for (i = 0; i < sizeof(message); i++) {
+        message[i] = i;
+    }
+    padding[62] = 0x04;
+    padding[63] = 0x00;
+    memcpy(interloper, "interloper", 10);
+    interloper[10] = 0x80;
+    interloper[63] = 10 * 8;
+    qtest_memwrite(qts, message_address, message + 64, 64);
+    qtest_memwrite(qts, padding_address, padding, sizeof(padding));
+
+    /*
+     * Linux saves the digest after an update, lets another queued request use
+     * the SHA engine, then restores it through WUIHV/FIRST/UIHV.  Preserve
+     * that ordering instead of relying on the model's live hash state.
+     */
+    sha_process_unpadded_sha256_block(qts, message, saved_state);
+    sha_process_unpadded_sha256_block(qts, interloper, interloper_state);
+
+    sha_load_ir(qts, SHA_CR_WUIHV, saved_state);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_FIRST);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MR,
+                 SHA_MR_SMOD_DMA | SHA_MR_UIHV | SHA_MR_DUALBUFF |
+                 SHA_MR_ALGO(SHA_ALGO_SHA256));
+
+    /*
+     * dmaengine_prep_slave_sg() emits this shape for the final data block and
+     * the Linux driver's separate software-padding buffer.
+     */
+    descriptor[0] = cpu_to_le32(descriptor1_address);
+    descriptor[1] = cpu_to_le32(XDMAC_MBR_UBC_NDE |
+                                XDMAC_MBR_UBC_NSEN |
+                                XDMAC_MBR_UBC_NDEN |
+                                XDMAC_MBR_UBC_NDV2 | 16);
+    descriptor[2] = cpu_to_le32(message_address);
+    descriptor[3] = cpu_to_le32(SAM9X7_SHA_BASE + SHA_IDATAR(0));
+    descriptor[4] = cpu_to_le32(config);
+    qtest_memwrite(qts, descriptor0_address, descriptor, sizeof(descriptor));
+
+    memset(descriptor, 0, sizeof(descriptor));
+    descriptor[1] = cpu_to_le32(XDMAC_MBR_UBC_NSEN |
+                                XDMAC_MBR_UBC_NDEN |
+                                XDMAC_MBR_UBC_NDV2 | 16);
+    descriptor[2] = cpu_to_le32(padding_address);
+    descriptor[3] = cpu_to_le32(SAM9X7_SHA_BASE + SHA_IDATAR(0));
+    descriptor[4] = cpu_to_le32(config);
+    qtest_memwrite(qts, descriptor1_address, descriptor, sizeof(descriptor));
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC, config);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CNDA,
+                 descriptor0_address);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CNDC,
+                 XDMAC_CNDC_NDE | XDMAC_CNDC_NDSUP |
+                 XDMAC_CNDC_NDDUP | XDMAC_CNDC_NDVIEW2);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CIE,
+                 XDMAC_INT_LIS);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
+
+    /* Retire the active data block before checking the linked transfer. */
+    qtest_clock_step(qts, duration);
+    xdmac_waitl(qts, XDMAC_GS, BIT(0), 0);
+    status = qtest_readl(qts,
+                         SAM9X7_XDMAC_BASE + channel + XDMAC_CIS);
+    g_assert_true(status & XDMAC_INT_LIS);
+    g_assert_cmphex(status & (XDMAC_INT_RBEIS | XDMAC_INT_WBEIS |
+                             XDMAC_INT_ROIS), ==, 0);
+
+    /* Linux enables DATRDY only from the DMA completion callback. */
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_IER, SHA_INT_DATRDY);
+    qtest_clock_step(qts, 2 * duration);
+    g_assert_true(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR) &
+                  SHA_INT_DATRDY);
+    sha_read_digest(qts, digest, sizeof(digest));
+    g_assert_cmpmem(digest, sizeof(digest), expected, sizeof(expected));
+
+    qtest_quit(qts);
+}
+
+static void test_sha_xdmac_dual_buffer_timing_and_migration(void)
+{
+    static const uint8_t expected[32] = {
+        0x47, 0x1f, 0xb9, 0x43, 0xaa, 0x23, 0xc5, 0x11,
+        0xf6, 0xf7, 0x2f, 0x8d, 0x16, 0x52, 0xd9, 0xc8,
+        0x80, 0xcf, 0xa3, 0x92, 0xad, 0x80, 0x50, 0x31,
+        0x20, 0x54, 0x77, 0x03, 0xe5, 0x6a, 0x2b, 0xe5,
+    };
+    const uint32_t source_address = SAM9X7_DDR_BASE + 0x12600;
+    const size_t initial_length = 96;
+    const uint64_t channel = XDMAC_CHANNEL(0);
+    const uint32_t config = XDMAC_CC_TYPE_PER |
+                            XDMAC_CC_DSYNC_MEM2PER |
+                            XDMAC_CC_PERID(34) |
+                            XDMAC_CC_MBSIZE_SIXTEEN |
+                            XDMAC_CC_CSIZE_16 |
+                            XDMAC_CC_DWIDTH_WORD |
+                            XDMAC_CC_SAM_INC;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    QTestState *after;
+    QTestState *qts;
+    uint8_t source[128];
+    uint8_t digest[32];
+    uint64_t duration;
+    int64_t transfer_clock;
+    int64_t source_clock;
+    int64_t transfer_elapsed;
+    unsigned int i;
+
+    ebi_enable_ddr(from);
+    pmc_write_pcr(from, 20, PMC_PCR_EN);
+    pmc_write_pcr(from, 41, PMC_PCR_EN);
+    duration = sha_duration(from, SHA_ALGO_SHA256);
+    for (i = 0; i < sizeof(source); i++) {
+        source[i] = i;
+    }
+    qtest_memwrite(from, source_address, source, sizeof(source));
+
+    qtest_writel(from, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_SWRST);
+    qtest_writel(from, SAM9X7_SHA_BASE + SHA_MR,
+                 SHA_MR_SMOD_DMA | SHA_MR_DUALBUFF |
+                 SHA_MR_ALGO(SHA_ALGO_SHA256));
+    qtest_writel(from, SAM9X7_SHA_BASE + SHA_MSR, sizeof(source));
+    qtest_writel(from, SAM9X7_SHA_BASE + SHA_BCR, sizeof(source));
+    qtest_writel(from, SAM9X7_SHA_BASE + SHA_IER, SHA_INT_DATRDY);
+    qtest_writel(from, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_FIRST);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CSA,
+                 source_address);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CDA,
+                 SAM9X7_SHA_BASE + SHA_IDATAR(0));
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC,
+                 initial_length / sizeof(uint32_t));
+    qtest_writel(from, SAM9X7_XDMAC_BASE + channel + XDMAC_CC, config);
+    transfer_clock = qtest_clock_step(from, 1);
+    qtest_writel(from, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
+
+    /* The second hardware bank accepts a partial block without clock time. */
+    xdmac_waitl(from, XDMAC_GS, BIT(0), 0);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_SHA_BASE + SHA_BCR), ==,
+                    sizeof(source) - initial_length);
+    g_assert_false(qtest_readl(from, SAM9X7_SHA_BASE + SHA_ISR) &
+                   SHA_INT_DATRDY);
+
+    /* Migrate with block one active and half of block two queued. */
+    source_clock = qtest_clock_step(from, 1);
+    transfer_elapsed = source_clock - transfer_clock;
+    g_assert_cmpint(transfer_elapsed, >=, 0);
+    g_assert_cmpint(transfer_elapsed + 1, <, duration);
+    source_clock = qtest_clock_step(from,
+                                    duration - transfer_elapsed - 1);
+    sam9x75_migrate(from, to);
+    g_assert_cmpint(qtest_clock_set(to, source_clock), ==, source_clock);
+    qts = to;
+
+    source_clock = qtest_clock_step(qts, 1);
+    g_assert_false(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR) &
+                   SHA_INT_DATRDY);
+    g_assert_true(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR) &
+                  SHA_ISR_WRDY);
+
+    /* The promoted half-block is idle and has no relevant queued bank. */
+    after = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    sam9x75_migrate(qts, after);
+    g_assert_cmpint(qtest_clock_set(after, source_clock), ==, source_clock);
+    qts = after;
+
+    /* The promoted partial block resumes with its final DMA words. */
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CSA,
+                 source_address + initial_length);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CDA,
+                 SAM9X7_SHA_BASE + SHA_IDATAR(0));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC,
+                 (sizeof(source) - initial_length) / sizeof(uint32_t));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC, config);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
+    xdmac_waitl(qts, XDMAC_GS, BIT(0), 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_BCR), ==, 0);
+
+    qtest_clock_step(qts, duration);
+    g_assert_false(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR) &
+                   SHA_INT_DATRDY);
+    qtest_clock_step(qts, duration);
+    g_assert_true(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR) &
+                  SHA_INT_DATRDY);
+    sha_read_digest(qts, digest, sizeof(digest));
+    g_assert_cmpmem(digest, sizeof(digest), expected, sizeof(expected));
+
+    /* BPE reports the freed bank; SWRST discards both active bank states. */
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_SWRST);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MR,
+                 SHA_MR_SMOD_DMA | SHA_MR_DUALBUFF | SHA_MR_BPE |
+                 SHA_MR_ALGO(SHA_ALGO_SHA256));
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_FIRST);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CSA,
+                 source_address);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CDA,
+                 SAM9X7_SHA_BASE + SHA_IDATAR(0));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC,
+                 sizeof(source) / sizeof(uint32_t));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC, config);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
+    xdmac_waitl(qts, XDMAC_GS, BIT(0), 0);
+    qtest_clock_step(qts, duration);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR) &
+                    (SHA_INT_DATRDY | SHA_ISR_WRDY), ==,
+                    SHA_INT_DATRDY | SHA_ISR_WRDY);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_SWRST);
+    qtest_clock_step(qts, duration);
+    g_assert_false(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR) &
+                   SHA_INT_DATRDY);
+
+    qtest_quit(after);
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
 static void test_trng_timing_irq_and_protection(void)
@@ -23632,6 +23888,10 @@ int main(int argc, char **argv)
                    test_sha_hmac_check_and_manual_padding);
     qtest_add_func("sam9x75/sha/xdmac-auto-padding",
                    test_sha_xdmac_auto_padding);
+    qtest_add_func("sam9x75/sha/xdmac-context-restore-and-linked-padding",
+                   test_sha_xdmac_context_restore_and_linked_padding);
+    qtest_add_func("sam9x75/sha/xdmac-dual-buffer-timing-and-migration",
+                   test_sha_xdmac_dual_buffer_timing_and_migration);
     qtest_add_func("sam9x75/trng/timing-irq-and-protection",
                    test_trng_timing_irq_and_protection);
     qtest_add_func("sam9x75/system/slowclock-pit-reset-and-protection",
