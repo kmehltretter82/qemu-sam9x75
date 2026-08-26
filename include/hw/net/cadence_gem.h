@@ -46,6 +46,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(CadenceGEMState, CADENCE_GEM)
 #define MAX_JUMBO_FRAME_SIZE_MASK 0x3FFF
 #define MAX_FRAME_SIZE MAX_JUMBO_FRAME_SIZE_MASK
 
+#define CADENCE_GEM_PHY_MMD_REGS        512
+
 struct CadenceGEMState {
     /*< private >*/
     SysBusDevice parent_obj;
@@ -85,6 +87,10 @@ struct CadenceGEMState {
     uint32_t phy_id;
     /* PHY registers backing store */
     uint16_t phy_regs[32];
+    /* LAN8841 Clause 22 MMD portal state. */
+    uint16_t phy_mmd_addr[32];
+    uint16_t phy_mmd_regs[CADENCE_GEM_PHY_MMD_REGS];
+    bool phy_mmd_subsection_loaded;
 
     uint8_t phy_loop; /* Are we in phy loopback? */
 

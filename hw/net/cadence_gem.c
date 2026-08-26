@@ -389,6 +389,28 @@ REG32(TYPE2_COMPARE_0_WORD_1, 0x704)
 #define LAN8841_REG_OUTPUT_CTRL       25
 #define LAN8841_REG_LED_MODE          26
 #define LAN8841_REG_INT_ST            27
+#define LAN8841_REG_MMD_CTRL           13
+#define LAN8841_REG_MMD_DATA           14
+#define LAN8841_MMD_CTRL_DEVAD_MASK    0x001f
+#define LAN8841_MMD_CTRL_FUNCTION_MASK 0xc000
+#define LAN8841_MMD_FUNCTION_ADDRESS   0
+#define LAN8841_MMD_FUNCTION_DATA      1
+#define LAN8841_MMD_FUNCTION_DATA_INC  2
+#define LAN8841_MMD_FUNCTION_WRITE_INC 3
+#define LAN8841_MMD2_COMMON_CTRL       0
+#define LAN8841_MMD2_STRAP_STATUS      1
+#define LAN8841_MMD2_STRAP_OVERRIDE    2
+#define LAN8841_MMD2_STRAP_MODE        3
+#define LAN8841_MMD2_RX_DLL_CTRL       76
+#define LAN8841_MMD2_TX_DLL_CTRL       77
+#define LAN8841_MMD2_PTP_CMD_CTRL      256
+#define LAN8841_MMD3_EEE_CAP           20
+#define LAN8841_MMD7_EEE_ADV           60
+#define LAN8841_MMD7_EEE_LP            61
+#define LAN8841_PTP_RESET              BIT(0)
+#define LAN8841_PTP_DISABLE            BIT(1)
+#define LAN8841_PTP_ENABLE             BIT(2)
+#define LAN8841_PTP_MANUAL_CAPTURE     0x1e00
 #define LAN8841_INT_LINK_UP           BIT(0)
 #define LAN8841_INT_LINK_DOWN         BIT(2)
 #define LAN8841_INT_PTP               BIT(9)
@@ -743,6 +765,186 @@ static void gem_init_register_masks(CadenceGEMState *s)
 static bool gem_phy_is_lan8841(CadenceGEMState *s)
 {
     return (s->phy_id & 0xfffffff0U) == PHY_ID_LAN8841;
+}
+
+typedef struct LAN8841MMDRegister {
+    uint8_t devad;
+    uint16_t reg;
+    uint16_t reset;
+    uint16_t write_mask;
+} LAN8841MMDRegister;
+
+/*
+ * Keep this table append-only: its indices are part of the migration ABI.
+ * The profile includes every MMD register touched by the Linux LAN8841
+ * initialization path, plus three consecutive WOL registers used to exercise
+ * the portal's post-increment modes.
+ */
+static const LAN8841MMDRegister lan8841_mmd_registers[] = {
+    {  0,  17, 0x0000, 0xffff },
+    {  1, 198, 0x0000, 0xffff },
+    {  2, LAN8841_MMD2_COMMON_CTRL,    0x0012, 0x001f },
+    {  2, LAN8841_MMD2_STRAP_STATUS,   0x00a1, 0x0000 },
+    {  2, LAN8841_MMD2_STRAP_OVERRIDE, 0x4001, 0x7f13 },
+    {  2, LAN8841_MMD2_STRAP_MODE,     0x4001, 0x0000 },
+    {  2,  17, 0x0000, 0xffff },
+    {  2,  18, 0x0000, 0xffff },
+    {  2,  19, 0x0000, 0xffff },
+    {  2, LAN8841_MMD2_RX_DLL_CTRL,    0x0d9b, 0xffff },
+    {  2, LAN8841_MMD2_TX_DLL_CTRL,    0x4d9b, 0xffff },
+    {  2, LAN8841_MMD2_PTP_CMD_CTRL,   0x0000,
+       LAN8841_PTP_ENABLE | LAN8841_PTP_MANUAL_CAPTURE },
+    {  2, 368, 0x0000, 0xffff },
+    {  2, 370, 0x0000, 0xffff },
+    {  2, 371, 0x0000, 0xffff },
+    {  2, 374, 0x2020, 0xffff },
+    {  2, 432, 0x0000, 0xffff },
+    {  2, 434, 0x0000, 0xffff },
+    {  2, 435, 0x0000, 0xffff },
+    {  2, 438, 0x2020, 0xffff },
+    {  3, LAN8841_MMD3_EEE_CAP,        0x0000, 0x0000 },
+    {  7, LAN8841_MMD7_EEE_ADV,        0x0006, 0x0006 },
+    {  7, LAN8841_MMD7_EEE_LP,         0x0000, 0x0000 },
+    { 28,   1, 0x0000, 0xffff },
+    { 28,  13, 0x0000, 0xffff },
+    { 28,  14, 0x0000, 0xffff },
+    { 28,  69, 0x0000, 0xffff },
+    { 28,  70, 0x0000, 0xffff },
+};
+
+static bool gem_lan8841_mmd_devad_supported(unsigned int devad)
+{
+    return devad == 0 || devad == 1 || devad == 2 || devad == 3 ||
+           devad == 7 || devad == 28;
+}
+
+static int gem_lan8841_mmd_slot(unsigned int devad, unsigned int reg)
+{
+    size_t i;
+
+    for (i = 0; i < ARRAY_SIZE(lan8841_mmd_registers); i++) {
+        if (lan8841_mmd_registers[i].devad == devad &&
+            lan8841_mmd_registers[i].reg == reg) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static void gem_lan8841_ptp_reset(CadenceGEMState *s)
+{
+    size_t i;
+
+    for (i = 0; i < ARRAY_SIZE(lan8841_mmd_registers); i++) {
+        if (lan8841_mmd_registers[i].devad == 2 &&
+            lan8841_mmd_registers[i].reg >= LAN8841_MMD2_PTP_CMD_CTRL) {
+            s->phy_mmd_regs[i] = lan8841_mmd_registers[i].reset;
+        }
+    }
+}
+
+static uint16_t gem_lan8841_mmd_read(CadenceGEMState *s)
+{
+    uint16_t control = s->phy_regs[LAN8841_REG_MMD_CTRL];
+    unsigned int function = control >> 14;
+    unsigned int devad = control & LAN8841_MMD_CTRL_DEVAD_MASK;
+    uint16_t address = s->phy_mmd_addr[devad];
+    uint16_t value;
+    int slot;
+
+    if (function == LAN8841_MMD_FUNCTION_ADDRESS) {
+        value = address;
+    } else {
+        slot = gem_lan8841_mmd_slot(devad, address);
+        value = slot >= 0 ? s->phy_mmd_regs[slot] :
+            (gem_lan8841_mmd_devad_supported(devad) ? 0 : 0xffff);
+        if (function == LAN8841_MMD_FUNCTION_DATA_INC) {
+            s->phy_mmd_addr[devad]++;
+        }
+    }
+
+    s->phy_regs[LAN8841_REG_MMD_DATA] = value;
+    return value;
+}
+
+static void gem_lan8841_mmd_write(CadenceGEMState *s, uint16_t value)
+{
+    uint16_t control = s->phy_regs[LAN8841_REG_MMD_CTRL];
+    unsigned int function = control >> 14;
+    unsigned int devad = control & LAN8841_MMD_CTRL_DEVAD_MASK;
+    uint16_t address = s->phy_mmd_addr[devad];
+    int slot;
+
+    s->phy_regs[LAN8841_REG_MMD_DATA] = value;
+    if (function == LAN8841_MMD_FUNCTION_ADDRESS) {
+        s->phy_mmd_addr[devad] = value;
+        return;
+    }
+
+    slot = gem_lan8841_mmd_slot(devad, address);
+    if (slot >= 0) {
+        if (devad == 2 && address == LAN8841_MMD2_PTP_CMD_CTRL) {
+            if (value & LAN8841_PTP_RESET) {
+                gem_lan8841_ptp_reset(s);
+            } else {
+                s->phy_mmd_regs[slot] =
+                    (s->phy_mmd_regs[slot] &
+                     ~LAN8841_PTP_MANUAL_CAPTURE) |
+                    (value & LAN8841_PTP_MANUAL_CAPTURE);
+                if (value & LAN8841_PTP_DISABLE) {
+                    s->phy_mmd_regs[slot] &= ~LAN8841_PTP_ENABLE;
+                } else if (value & LAN8841_PTP_ENABLE) {
+                    s->phy_mmd_regs[slot] |= LAN8841_PTP_ENABLE;
+                }
+            }
+        } else {
+            uint16_t mask = lan8841_mmd_registers[slot].write_mask;
+
+            s->phy_mmd_regs[slot] =
+                (s->phy_mmd_regs[slot] & ~mask) | (value & mask);
+        }
+    }
+
+    if (function == LAN8841_MMD_FUNCTION_DATA_INC ||
+        function == LAN8841_MMD_FUNCTION_WRITE_INC) {
+        s->phy_mmd_addr[devad]++;
+    }
+}
+
+static void gem_lan8841_mmd_reset(CadenceGEMState *s, bool software_reset)
+{
+    uint16_t strap_override = 0;
+    uint16_t xtal_control = 0;
+    uint16_t ldo_control = 0;
+    int strap_slot = gem_lan8841_mmd_slot(2,
+                                          LAN8841_MMD2_STRAP_OVERRIDE);
+    int xtal_slot = gem_lan8841_mmd_slot(28, 1);
+    int ldo_slot = gem_lan8841_mmd_slot(28, 14);
+    size_t i;
+
+    QEMU_BUILD_BUG_ON(ARRAY_SIZE(lan8841_mmd_registers) >
+                      CADENCE_GEM_PHY_MMD_REGS);
+    if (software_reset) {
+        strap_override = s->phy_mmd_regs[strap_slot];
+        xtal_control = s->phy_mmd_regs[xtal_slot];
+        ldo_control = s->phy_mmd_regs[ldo_slot];
+    }
+    memset(s->phy_mmd_addr, 0, sizeof(s->phy_mmd_addr));
+    memset(s->phy_mmd_regs, 0, sizeof(s->phy_mmd_regs));
+    s->phy_regs[LAN8841_REG_MMD_CTRL] = 0;
+    s->phy_regs[LAN8841_REG_MMD_DATA] = 0;
+
+    for (i = 0; i < ARRAY_SIZE(lan8841_mmd_registers); i++) {
+        s->phy_mmd_regs[i] = lan8841_mmd_registers[i].reset;
+    }
+
+    /* These controls are explicitly not affected by a PHY software reset. */
+    if (software_reset) {
+        s->phy_mmd_regs[strap_slot] = strap_override;
+        s->phy_mmd_regs[xtal_slot] = xtal_control;
+        s->phy_mmd_regs[ldo_slot] = ldo_control;
+    }
 }
 
 static void gem_phy_update_irq(CadenceGEMState *s)
@@ -1555,8 +1757,15 @@ static void gem_transmit(CadenceGEMState *s)
     }
 }
 
-static void gem_phy_reset(CadenceGEMState *s)
+static void gem_phy_reset(CadenceGEMState *s, bool software_reset)
 {
+    uint16_t output_control_nasr = 0;
+
+    if (software_reset && gem_phy_is_lan8841(s)) {
+        output_control_nasr =
+            s->phy_regs[LAN8841_REG_OUTPUT_CTRL] & 0x003f;
+    }
+
     memset(&s->phy_regs[0], 0, sizeof(s->phy_regs));
     s->phy_regs[PHY_REG_CONTROL] = 0x1140;
     s->phy_regs[PHY_REG_STATUS] = 0x7969;
@@ -1578,10 +1787,11 @@ static void gem_phy_reset(CadenceGEMState *s)
     s->phy_regs[PHY_REG_EXT_PHYSPCFC_ST] = 0x848B;
 
     if (gem_phy_is_lan8841(s)) {
+        gem_lan8841_mmd_reset(s, software_reset);
         s->phy_regs[LAN8841_REG_LED_MODE_SELECT] = 0x8021;
         s->phy_regs[LAN8841_REG_LED_BEHAVIOR] = 0x1000;
         s->phy_regs[LAN8841_REG_INT_EN] = 0;
-        s->phy_regs[LAN8841_REG_OUTPUT_CTRL] = 0;
+        s->phy_regs[LAN8841_REG_OUTPUT_CTRL] = output_control_nasr;
         s->phy_regs[LAN8841_REG_LED_MODE] = BIT(14);
         s->phy_regs[LAN8841_REG_INT_ST] = 0;
     }
@@ -1634,7 +1844,7 @@ static void gem_reset(DeviceState *d)
         s->sar_active[i] = false;
     }
 
-    gem_phy_reset(s);
+    gem_phy_reset(s, false);
 
     gem_update_int_status(s);
 }
@@ -1642,6 +1852,10 @@ static void gem_reset(DeviceState *d)
 static uint16_t gem_phy_read(CadenceGEMState *s, unsigned reg_num)
 {
     uint16_t value = s->phy_regs[reg_num];
+
+    if (gem_phy_is_lan8841(s) && reg_num == LAN8841_REG_MMD_DATA) {
+        value = gem_lan8841_mmd_read(s);
+    }
 
     DB_PRINT("reg: %d value: 0x%04x\n", reg_num, value);
 
@@ -1658,6 +1872,16 @@ static void gem_phy_write(CadenceGEMState *s, unsigned reg_num, uint16_t val)
     DB_PRINT("reg: %d value: 0x%04x\n", reg_num, val);
 
     if (gem_phy_is_lan8841(s)) {
+        if (reg_num == LAN8841_REG_MMD_CTRL) {
+            s->phy_regs[reg_num] = val &
+                (LAN8841_MMD_CTRL_FUNCTION_MASK |
+                 LAN8841_MMD_CTRL_DEVAD_MASK);
+            return;
+        }
+        if (reg_num == LAN8841_REG_MMD_DATA) {
+            gem_lan8841_mmd_write(s, val);
+            return;
+        }
         if (reg_num == LAN8841_REG_INT_EN) {
             s->phy_regs[reg_num] = val & LAN8841_INT_ENABLE_MASK;
             gem_phy_update_irq(s);
@@ -1672,7 +1896,7 @@ static void gem_phy_write(CadenceGEMState *s, unsigned reg_num, uint16_t val)
     case PHY_REG_CONTROL:
         if (val & PHY_REG_CONTROL_RST) {
             /* Phy reset */
-            gem_phy_reset(s);
+            gem_phy_reset(s, true);
             val &= ~(PHY_REG_CONTROL_RST | PHY_REG_CONTROL_LOOP);
             s->phy_loop = 0;
         }
@@ -1983,6 +2207,17 @@ static void gem_init(Object *obj)
     qdev_init_gpio_out_named(dev, &s->phy_irq, CADENCE_GEM_PHY_IRQ, 1);
 }
 
+static int gem_pre_load(void *opaque)
+{
+    CadenceGEMState *s = opaque;
+
+    s->phy_mmd_subsection_loaded = false;
+    if (gem_phy_is_lan8841(s)) {
+        gem_lan8841_mmd_reset(s, false);
+    }
+    return 0;
+}
+
 static int gem_post_load(void *opaque, int version_id)
 {
     CadenceGEMState *s = opaque;
@@ -1995,15 +2230,58 @@ static int gem_post_load(void *opaque, int version_id)
     /* NetClientState.link_down is not migrated; recover it from the PHY. */
     qemu_get_queue(s->nic)->link_down =
         !(s->phy_regs[PHY_REG_STATUS] & PHY_REG_STATUS_LINK);
+
+    /*
+     * Older streams only have the Clause 22 data-register mirror.  It is
+     * ambiguous after a data transfer, but it is the best reconstruction of
+     * the selected DEVAD's address pointer and matches address-mode streams.
+     */
+    if (gem_phy_is_lan8841(s) && !s->phy_mmd_subsection_loaded) {
+        unsigned int devad = s->phy_regs[LAN8841_REG_MMD_CTRL] &
+            LAN8841_MMD_CTRL_DEVAD_MASK;
+
+        s->phy_mmd_addr[devad] = s->phy_regs[LAN8841_REG_MMD_DATA];
+    }
+
     gem_update_int_status(s);
     gem_phy_update_irq(s);
     return 0;
 }
 
+static bool gem_lan8841_mmd_needed(void *opaque)
+{
+    CadenceGEMState *s = opaque;
+
+    return gem_phy_is_lan8841(s);
+}
+
+static int gem_lan8841_mmd_post_load(void *opaque, int version_id)
+{
+    CadenceGEMState *s = opaque;
+
+    s->phy_mmd_subsection_loaded = true;
+    return 0;
+}
+
+static const VMStateDescription vmstate_cadence_gem_lan8841_mmd = {
+    .name = "cadence_gem/lan8841-mmd",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = gem_lan8841_mmd_needed,
+    .post_load = gem_lan8841_mmd_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT16_ARRAY(phy_mmd_addr, CadenceGEMState, 32),
+        VMSTATE_UINT16_ARRAY(phy_mmd_regs, CadenceGEMState,
+                             CADENCE_GEM_PHY_MMD_REGS),
+        VMSTATE_END_OF_LIST(),
+    },
+};
+
 static const VMStateDescription vmstate_cadence_gem = {
     .name = "cadence_gem",
     .version_id = 5,
     .minimum_version_id = 4,
+    .pre_load = gem_pre_load,
     .post_load = gem_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, CadenceGEMState, CADENCE_GEM_MAXREG),
@@ -2015,7 +2293,11 @@ static const VMStateDescription vmstate_cadence_gem = {
                              MAX_PRIORITY_QUEUES),
         VMSTATE_BOOL_ARRAY(sar_active, CadenceGEMState, 4),
         VMSTATE_END_OF_LIST(),
-    }
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_cadence_gem_lan8841_mmd,
+        NULL,
+    },
 };
 
 static const Property gem_properties[] = {

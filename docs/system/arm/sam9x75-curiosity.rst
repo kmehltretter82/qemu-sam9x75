@@ -19,6 +19,8 @@ The implementation and tests are pinned to the following inputs:
   ``37b51cecee93146f97cb1082461bfc1051059f8bf2a42e9c4205d7dc4f6400ce``.
 * SAM9X7 Series data sheet DS60001813E.
 * SAM9X7 Series silicon errata DS80001082H.
+* LAN8841 data sheet DS00004726A and LAN8841 register-definition
+  application note AN4783/DS00004783A.
 * Macronix MX30LF1G28AD/MX30LF2G28AD/MX30LF4G28AD data sheet PM2579,
   revision 1.3, August 2022.
 * AT91Bootstrap v4.0.13, commit
@@ -455,6 +457,35 @@ Support matrix
        phylink carrier transitions without an interrupt storm, and were
        followed by three successful pings and a second TCP/UDP session.
 
+       Clause 22 registers 13/14 implement the LAN8841 MMD indirect-access
+       portal rather than acting as unrelated storage.  All four address/data
+       functions, independent 16-bit DEVAD pointers, post-increment wrapping,
+       reset and migration are covered.  The bounded register profile includes
+       the Curiosity LAN Kit's RGMII/MAGJACK/LED/CLK125 straps, DLL controls,
+       EEE capability and advertisement, and every register used by the Linux
+       initialization and errata paths.  PHY software reset preserves the
+       documented NASR strap-override, crystal, LDO and LED-polarity controls;
+       a SoC reset restores the board profile.  The PTP command register
+       implements enable and manual-capture selection plus self-clearing
+       disable/reset commands; reset restores the modeled PTP register bank.
+       Unmodeled registers in a supported DEVAD read as zero and ignore writes,
+       while unsupported DEVADs read as ``0xffff``.  These are deterministic
+       model conventions pending direct silicon characterization.
+
+       On the exact Linux4Microchip 2026.04 image, post-probe MMD2 strap reads
+       are ``0x0012``, ``0x00a1``, ``0x4001`` and ``0x4001`` instead of the
+       formerly echoed addresses 0--3.  The MAGJACK bit now makes the driver
+       execute its shorted-center-tap workaround, observed as ``0xbffc`` and
+       ``0x00af`` in MMD28.69/70.  PTP enable remains set, the RX/TX version
+       registers contain the driver's ``0xff00`` value, MMD3.20 reports no
+       modeled EEE capability, and the virtual partner reports no LPI ability.
+       Consequently ``ethtool --show-eee eth0`` returns ``Operation not
+       supported`` rather than fabricating an active EEE link.
+       A current-binary rerun retained those values through a complete 10/10
+       guest and 1/1 host TCP/UDP integrity session with DHCP, three ICMP
+       replies, zero network error/drop increments and an empty diagnostic
+       log.
+
        J12 defaults closed and supplies the LAN8840's required 25 MHz clock;
        opening it makes MDIO inaccessible and prevents external RGMII
        traffic.  The daughter card's AT24C01 EEPROM is independently attached
@@ -484,10 +515,12 @@ Support matrix
        pack exposes five priority-queue masks with ``0x000008e6`` valid bits,
        so the generic Q1-only ``0x00000ce6`` behavior must not simply be copied
        to every queue.  Clause 22 registers 16--21 and 28--31 still inherit
-       generic-PHY values in places where LAN8841 differs.  The Clause 22 MMD
-       portal in registers 13/14, RGMII strap/delay and EEE registers, complete
-       PHY reset-value fidelity, checksum corner cases, filtering and PTP/TSN
-       remain.
+       generic-PHY values in places where LAN8841 differs.  The LED-polarity
+       strap bits and MMD3 EEE capability reset value need physical reads; the
+       published register table and the PHY's advertised feature set are not
+       internally consistent for the latter.  Complete PHY reset-value
+       fidelity, checksum corner cases, filtering and functional PTP/TSN and
+       EEE low-power-idle behavior remain.
    * - USB host and device
      - Initial
      - UHPHS exposes the documented 1 MiB OHCI and EHCI windows, three

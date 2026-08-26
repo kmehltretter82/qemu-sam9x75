@@ -683,6 +683,17 @@
 #define GEM_MDIO_PHY(addr)      ((addr) << 23)
 #define GEM_MDIO_REG(reg)       ((reg) << 18)
 
+#define LAN8841_PHY_ADDR        1
+#define LAN8841_BMCR            0
+#define LAN8841_BMCR_RESET      BIT(15)
+#define LAN8841_MMD_CTRL        13
+#define LAN8841_MMD_DATA        14
+#define LAN8841_MMD_DEVAD_MASK  0x001f
+#define LAN8841_MMD_FN_ADDR     0x0000
+#define LAN8841_MMD_FN_DATA     0x4000
+#define LAN8841_MMD_FN_DATA_INC 0x8000
+#define LAN8841_MMD_FN_WR_INC   0xc000
+
 #define TWI_CR                  0x00
 #define TWI_MMR                 0x04
 #define TWI_SMR                 0x08
@@ -2749,6 +2760,45 @@ static void gem_mdio_write(QTestState *qts, unsigned int phy,
                        GEM_MDIO_REG(reg) | value;
 
     qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_PHYMNTNC, command);
+}
+
+static void gem_lan8841_mmd_control(QTestState *qts, unsigned int devad,
+                                    uint16_t function)
+{
+    g_assert_cmpuint(devad, <=, LAN8841_MMD_DEVAD_MASK);
+    gem_mdio_write(qts, LAN8841_PHY_ADDR, LAN8841_MMD_CTRL,
+                   function | devad);
+}
+
+static void gem_lan8841_mmd_set_address(QTestState *qts,
+                                        unsigned int devad,
+                                        uint16_t address)
+{
+    gem_lan8841_mmd_control(qts, devad, LAN8841_MMD_FN_ADDR);
+    gem_mdio_write(qts, LAN8841_PHY_ADDR, LAN8841_MMD_DATA, address);
+}
+
+static uint16_t gem_lan8841_mmd_address(QTestState *qts,
+                                        unsigned int devad)
+{
+    gem_lan8841_mmd_control(qts, devad, LAN8841_MMD_FN_ADDR);
+    return gem_mdio_read(qts, LAN8841_PHY_ADDR, LAN8841_MMD_DATA);
+}
+
+static uint16_t gem_lan8841_mmd_read(QTestState *qts, unsigned int devad,
+                                     uint16_t address)
+{
+    gem_lan8841_mmd_set_address(qts, devad, address);
+    gem_lan8841_mmd_control(qts, devad, LAN8841_MMD_FN_DATA);
+    return gem_mdio_read(qts, LAN8841_PHY_ADDR, LAN8841_MMD_DATA);
+}
+
+static void gem_lan8841_mmd_write(QTestState *qts, unsigned int devad,
+                                  uint16_t address, uint16_t value)
+{
+    gem_lan8841_mmd_set_address(qts, devad, address);
+    gem_lan8841_mmd_control(qts, devad, LAN8841_MMD_FN_DATA);
+    gem_mdio_write(qts, LAN8841_PHY_ADDR, LAN8841_MMD_DATA, value);
 }
 
 static void twi_enable_master(QTestState *qts, uint64_t flexcom_base,
@@ -5149,6 +5199,327 @@ static void test_gem_registers_mdio_dma_and_irqs(void)
     g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR2) & BIT(0));
 
     qtest_quit(qts);
+}
+
+static void test_gem_lan8841_mmd_portal_functions(void)
+{
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE " -nic user,id=lan8841-mmd-portal");
+
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL, GEM_NWCTRL_MPE);
+
+    /* Only the Clause 22 function and DEVAD fields are implemented. */
+    gem_mdio_write(qts, LAN8841_PHY_ADDR, LAN8841_MMD_CTRL, 0xffff);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_CTRL), ==, 0xc01f);
+
+    /* Function 00 selects and reports the DEVAD's address pointer. */
+    gem_lan8841_mmd_set_address(qts, 2, 17);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 17);
+
+    /* Function 01 reads and writes without advancing the pointer. */
+    gem_lan8841_mmd_control(qts, 2, LAN8841_MMD_FN_DATA);
+    gem_mdio_write(qts, LAN8841_PHY_ADDR, LAN8841_MMD_DATA, 0x1111);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 0x1111);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 0x1111);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 2), ==, 17);
+
+    /* Function 10 post-increments after both writes and reads. */
+    gem_lan8841_mmd_control(qts, 2, LAN8841_MMD_FN_DATA_INC);
+    gem_mdio_write(qts, LAN8841_PHY_ADDR, LAN8841_MMD_DATA, 0x2222);
+    gem_mdio_write(qts, LAN8841_PHY_ADDR, LAN8841_MMD_DATA, 0x3333);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 2), ==, 19);
+
+    gem_lan8841_mmd_set_address(qts, 2, 17);
+    gem_lan8841_mmd_control(qts, 2, LAN8841_MMD_FN_DATA_INC);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 0x2222);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 0x3333);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 2), ==, 19);
+
+    /* Function 11 advances writes, but never advances reads. */
+    gem_lan8841_mmd_set_address(qts, 2, 17);
+    gem_lan8841_mmd_control(qts, 2, LAN8841_MMD_FN_WR_INC);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 0x2222);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 0x2222);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 2), ==, 17);
+    gem_lan8841_mmd_control(qts, 2, LAN8841_MMD_FN_WR_INC);
+    gem_mdio_write(qts, LAN8841_PHY_ADDR, LAN8841_MMD_DATA, 0x4444);
+    gem_mdio_write(qts, LAN8841_PHY_ADDR, LAN8841_MMD_DATA, 0x5555);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 2), ==, 19);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 17), ==, 0x4444);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 18), ==, 0x5555);
+
+    /* Each DEVAD owns an independent pointer. */
+    gem_lan8841_mmd_set_address(qts, 2, 17);
+    gem_lan8841_mmd_set_address(qts, 7, 60);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 2), ==, 17);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 7), ==, 60);
+    gem_lan8841_mmd_control(qts, 7, LAN8841_MMD_FN_DATA_INC);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 0x0006);
+    gem_lan8841_mmd_control(qts, 2, LAN8841_MMD_FN_DATA_INC);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 0x4444);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 2), ==, 18);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 7), ==, 61);
+
+    /* Access precedes a modulo-65536 post-increment. */
+    gem_lan8841_mmd_set_address(qts, 2, 0xffff);
+    gem_lan8841_mmd_control(qts, 2, LAN8841_MMD_FN_DATA_INC);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 0);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 2), ==, 0);
+    gem_lan8841_mmd_control(qts, 2, LAN8841_MMD_FN_DATA_INC);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 0x0012);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 2), ==, 1);
+
+    gem_lan8841_mmd_set_address(qts, 2, 0xffff);
+    gem_lan8841_mmd_control(qts, 2, LAN8841_MMD_FN_WR_INC);
+    gem_mdio_write(qts, LAN8841_PHY_ADDR, LAN8841_MMD_DATA, 0xbeef);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 2), ==, 0);
+
+    /* Unknown supported registers are deterministic and not writable. */
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 511), ==, 0);
+    gem_lan8841_mmd_write(qts, 2, 511, 0xa55a);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 511), ==, 0);
+
+    /* An unsupported DEVAD reports no device, but its pointer still works. */
+    gem_lan8841_mmd_set_address(qts, 6, 17);
+    gem_lan8841_mmd_control(qts, 6, LAN8841_MMD_FN_DATA);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 0xffff);
+    gem_mdio_write(qts, LAN8841_PHY_ADDR, LAN8841_MMD_DATA, 0xa55a);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 0xffff);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 6), ==, 17);
+    gem_lan8841_mmd_control(qts, 6, LAN8841_MMD_FN_DATA_INC);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 0xffff);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 6), ==, 18);
+
+    qtest_quit(qts);
+}
+
+static void test_gem_lan8841_mmd_profile_and_reset(void)
+{
+    static const struct {
+        uint8_t devad;
+        uint16_t address;
+        uint16_t value;
+    } reset_profile[] = {
+        { 0, 17, 0x0000 },
+        { 1, 198, 0x0000 },
+        { 2, 0, 0x0012 },
+        { 2, 1, 0x00a1 },
+        { 2, 2, 0x4001 },
+        { 2, 3, 0x4001 },
+        { 2, 17, 0x0000 },
+        { 2, 18, 0x0000 },
+        { 2, 19, 0x0000 },
+        { 2, 76, 0x0d9b },
+        { 2, 77, 0x4d9b },
+        { 2, 256, 0x0000 },
+        { 2, 368, 0x0000 },
+        { 2, 370, 0x0000 },
+        { 2, 371, 0x0000 },
+        { 2, 374, 0x2020 },
+        { 2, 432, 0x0000 },
+        { 2, 434, 0x0000 },
+        { 2, 435, 0x0000 },
+        { 2, 438, 0x2020 },
+        { 3, 20, 0x0000 },
+        { 7, 60, 0x0006 },
+        { 7, 61, 0x0000 },
+        { 28, 1, 0x0000 },
+        { 28, 13, 0x0000 },
+        { 28, 14, 0x0000 },
+        { 28, 69, 0x0000 },
+        { 28, 70, 0x0000 },
+    };
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE " -nic user,id=lan8841-mmd-profile");
+    size_t i;
+
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL, GEM_NWCTRL_MPE);
+
+    for (i = 0; i < ARRAY_SIZE(reset_profile); i++) {
+        g_assert_cmphex(gem_lan8841_mmd_read(qts,
+                                            reset_profile[i].devad,
+                                            reset_profile[i].address),
+                        ==, reset_profile[i].value);
+    }
+
+    /* Strap status, EEE capability and partner ability are read-only. */
+    gem_lan8841_mmd_write(qts, 2, 1, 0xffff);
+    gem_lan8841_mmd_write(qts, 2, 3, 0xffff);
+    gem_lan8841_mmd_write(qts, 3, 20, 0xffff);
+    gem_lan8841_mmd_write(qts, 7, 61, 0xffff);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 1), ==, 0x00a1);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 3), ==, 0x4001);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 3, 20), ==, 0x0000);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 7, 61), ==, 0x0000);
+
+    gem_lan8841_mmd_write(qts, 2, 0, 0xffff);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 0), ==, 0x001f);
+    gem_lan8841_mmd_write(qts, 2, 2, 0xffff);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 2), ==, 0x7f13);
+    gem_lan8841_mmd_write(qts, 2, 2, 0x0000);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 2), ==, 0x0000);
+    gem_lan8841_mmd_write(qts, 7, 60, 0xffff);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 7, 60), ==, 0x0006);
+
+    /* These are the writable registers used by Linux's init/errata path. */
+    gem_lan8841_mmd_write(qts, 2, 76, 0x0d9b);
+    gem_lan8841_mmd_write(qts, 2, 77, 0x4d9b);
+    gem_lan8841_mmd_write(qts, 2, 368, 0x1234);
+    gem_lan8841_mmd_write(qts, 2, 370, 0x1234);
+    gem_lan8841_mmd_write(qts, 2, 371, 0x1234);
+    gem_lan8841_mmd_write(qts, 2, 374, 0xff00);
+    gem_lan8841_mmd_write(qts, 2, 432, 0x1234);
+    gem_lan8841_mmd_write(qts, 2, 434, 0x1234);
+    gem_lan8841_mmd_write(qts, 2, 435, 0x1234);
+    gem_lan8841_mmd_write(qts, 2, 438, 0xff00);
+    gem_lan8841_mmd_write(qts, 28, 1, 0x0040);
+    gem_lan8841_mmd_write(qts, 28, 13, 0x0001);
+    gem_lan8841_mmd_write(qts, 28, 69, 0xbffc);
+    gem_lan8841_mmd_write(qts, 28, 70, 0x00af);
+    gem_lan8841_mmd_write(qts, 28, 14, 0x1000);
+    gem_lan8841_mmd_write(qts, 1, 198, 0x5a5a);
+    gem_lan8841_mmd_write(qts, 1, 198, 0x0000);
+    gem_lan8841_mmd_write(qts, 0, 17, 0x000a);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 368), ==, 0x1234);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 370), ==, 0x1234);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 371), ==, 0x1234);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 374), ==, 0xff00);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 432), ==, 0x1234);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 434), ==, 0x1234);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 435), ==, 0x1234);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 438), ==, 0xff00);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 28, 1), ==, 0x0040);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 28, 13), ==, 0x0001);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 28, 69), ==, 0xbffc);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 28, 70), ==, 0x00af);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 28, 14), ==, 0x1000);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 1, 198), ==, 0x0000);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 0, 17), ==, 0x000a);
+
+    /* PTP action bits self-clear; enable and capture selection persist. */
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 256), ==, 0);
+    gem_lan8841_mmd_write(qts, 2, 256, 0x1a00 | BIT(2));
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 256), ==, 0x1a04);
+    /* Zero clears the R/W capture selection, but not the W1S enable. */
+    gem_lan8841_mmd_write(qts, 2, 256, 0);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 256), ==, BIT(2));
+    gem_lan8841_mmd_write(qts, 2, 256, BIT(2));
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 256), ==, BIT(2));
+    gem_lan8841_mmd_write(qts, 2, 256, 0);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 256), ==, BIT(2));
+    gem_lan8841_mmd_write(qts, 2, 256, BIT(1));
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 256), ==, 0);
+    gem_lan8841_mmd_write(qts, 2, 256, 0x1600 | BIT(2));
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 256), ==, 0x1604);
+    gem_lan8841_mmd_write(qts, 2, 256, BIT(0));
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 256), ==, 0);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 368), ==, 0);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 374), ==, 0x2020);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 432), ==, 0);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 438), ==, 0x2020);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 28, 69), ==, 0xbffc);
+
+    /* A PHY software reset restores pointers but preserves NASR controls. */
+    gem_lan8841_mmd_write(qts, 2, 17, 0xa55a);
+    gem_lan8841_mmd_write(qts, 2, 2, 0x4011);
+    gem_lan8841_mmd_write(qts, 28, 1, 0x0040);
+    gem_lan8841_mmd_write(qts, 28, 14, 0x1000);
+    gem_mdio_write(qts, LAN8841_PHY_ADDR, 25, 0xffff);
+    gem_lan8841_mmd_set_address(qts, 2, 123);
+    gem_lan8841_mmd_set_address(qts, 7, 456);
+    gem_lan8841_mmd_control(qts, 7, LAN8841_MMD_FN_WR_INC);
+    gem_mdio_write(qts, LAN8841_PHY_ADDR, LAN8841_BMCR,
+                   LAN8841_BMCR_RESET);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_CTRL), ==, 0);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 2), ==, 0);
+    g_assert_cmphex(gem_lan8841_mmd_address(qts, 7), ==, 0);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 2, 2), ==, 0x4011);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 28, 1), ==, 0x0040);
+    g_assert_cmphex(gem_lan8841_mmd_read(qts, 28, 14), ==, 0x1000);
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR, 25), ==, 0x003f);
+    for (i = 0; i < ARRAY_SIZE(reset_profile); i++) {
+        if ((reset_profile[i].devad == 2 &&
+             reset_profile[i].address == 2) ||
+            (reset_profile[i].devad == 28 &&
+             (reset_profile[i].address == 1 ||
+              reset_profile[i].address == 14))) {
+            continue;
+        }
+        g_assert_cmphex(gem_lan8841_mmd_read(qts,
+                                            reset_profile[i].devad,
+                                            reset_profile[i].address),
+                        ==, reset_profile[i].value);
+    }
+
+    /* A SoC reset restores even the NASR fields to the board profile. */
+    qtest_system_reset(qts);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL, GEM_NWCTRL_MPE);
+    for (i = 0; i < ARRAY_SIZE(reset_profile); i++) {
+        g_assert_cmphex(gem_lan8841_mmd_read(qts,
+                                            reset_profile[i].devad,
+                                            reset_profile[i].address),
+                        ==, reset_profile[i].value);
+    }
+    g_assert_cmphex(gem_mdio_read(qts, LAN8841_PHY_ADDR, 25), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_gem_lan8841_mmd_migration(void)
+{
+    const char *args =
+        SAM9X75_MACHINE " -nic user,id=lan8841-mmd-migration";
+    QTestState *from = qtest_init(args);
+    QTestState *to = qtest_initf("%s -incoming defer", args);
+
+    qtest_writel(from, SAM9X7_GMAC_BASE + GEM_NWCTRL, GEM_NWCTRL_MPE);
+    gem_lan8841_mmd_write(from, 2, 17, 0x1111);
+    gem_lan8841_mmd_write(from, 2, 18, 0x2222);
+    gem_lan8841_mmd_write(from, 28, 69, 0xbffc);
+
+    gem_lan8841_mmd_set_address(from, 7, 60);
+    gem_lan8841_mmd_control(from, 7, LAN8841_MMD_FN_DATA_INC);
+    g_assert_cmphex(gem_mdio_read(from, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 0x0006);
+    gem_lan8841_mmd_set_address(from, 2, 17);
+    gem_lan8841_mmd_control(from, 2, LAN8841_MMD_FN_WR_INC);
+    g_assert_cmphex(gem_mdio_read(from, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_CTRL), ==, 0xc002);
+
+    sam9x75_migrate(from, to);
+
+    /* Function 11 and both DEVAD pointers resume at the exact access. */
+    g_assert_cmphex(gem_mdio_read(to, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_CTRL), ==, 0xc002);
+    g_assert_cmphex(gem_mdio_read(to, LAN8841_PHY_ADDR,
+                                  LAN8841_MMD_DATA), ==, 0x1111);
+    g_assert_cmphex(gem_lan8841_mmd_address(to, 2), ==, 17);
+    gem_lan8841_mmd_control(to, 2, LAN8841_MMD_FN_WR_INC);
+    gem_mdio_write(to, LAN8841_PHY_ADDR, LAN8841_MMD_DATA, 0x3333);
+    g_assert_cmphex(gem_lan8841_mmd_address(to, 2), ==, 18);
+    g_assert_cmphex(gem_lan8841_mmd_read(to, 2, 17), ==, 0x3333);
+    g_assert_cmphex(gem_lan8841_mmd_read(to, 2, 18), ==, 0x2222);
+    g_assert_cmphex(gem_lan8841_mmd_address(to, 7), ==, 61);
+    g_assert_cmphex(gem_lan8841_mmd_read(to, 28, 69), ==, 0xbffc);
+
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
 static void test_gem_lan8841_interrupt_line(void)
@@ -22805,6 +23176,12 @@ int main(int argc, char **argv)
                    test_aic_fiq_mask_and_write_protection);
     qtest_add_func("sam9x75/gem/registers-mdio-dma-and-irqs",
                    test_gem_registers_mdio_dma_and_irqs);
+    qtest_add_func("sam9x75/gem/lan8841-mmd-portal-functions",
+                   test_gem_lan8841_mmd_portal_functions);
+    qtest_add_func("sam9x75/gem/lan8841-mmd-profile-and-reset",
+                   test_gem_lan8841_mmd_profile_and_reset);
+    qtest_add_func("sam9x75/gem/lan8841-mmd-migration",
+                   test_gem_lan8841_mmd_migration);
     qtest_add_func("sam9x75/gem/lan8841-interrupt-line",
                    test_gem_lan8841_interrupt_line);
     qtest_add_func("sam9x75/gem/lan8841-interrupt-migration",
