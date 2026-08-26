@@ -11390,6 +11390,11 @@ static void sha_load_ir(QTestState *qts, uint32_t command,
 
 static void test_sha_hmac_check_and_manual_padding(void)
 {
+    static const uint8_t sha1_empty[20] = {
+        0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d,
+        0x32, 0x55, 0xbf, 0xef, 0x95, 0x60, 0x18, 0x90,
+        0xaf, 0xd8, 0x07, 0x09,
+    };
     static const uint8_t sha256_abc[32] = {
         0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
         0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
@@ -11403,6 +11408,7 @@ static void test_sha_hmac_check_and_manual_padding(void)
         0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32, 0xcf, 0xf7,
     };
     static const uint8_t hmac_message[] = "Hi There";
+    uint8_t empty_padded[64] = { 0x80 };
     uint8_t ipad[64];
     uint8_t opad[64];
     uint8_t padded[64] = { 'a', 'b', 'c', 0x80 };
@@ -11417,6 +11423,20 @@ static void test_sha_hmac_check_and_manual_padding(void)
 
     pmc_write_pcr(qts, 41, PMC_PCR_EN);
     duration = sha_duration(qts, SHA_ALGO_SHA256);
+
+    /* Linux finalizes an empty SHA-1 request as one padded CPU block. */
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_SWRST);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_IER, SHA_INT_DATRDY);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_FIRST);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MR,
+                 SHA_MR_SMOD_AUTO | SHA_MR_ALGO(SHA_ALGO_SHA1));
+    sha_write_bytes(qts, SHA_IDATAR(0), empty_padded,
+                    sizeof(empty_padded));
+    qtest_clock_step(qts, sha_duration(qts, SHA_ALGO_SHA1));
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(9));
+    sha_read_digest(qts, digest, sizeof(sha1_empty));
+    g_assert_cmpmem(digest, sizeof(sha1_empty), sha1_empty,
+                    sizeof(sha1_empty));
 
     memset(ipad, 0x36, sizeof(ipad));
     memset(opad, 0x5c, sizeof(opad));
