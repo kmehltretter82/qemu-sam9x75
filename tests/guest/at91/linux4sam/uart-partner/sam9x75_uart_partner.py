@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Full-duplex UART partner/exerciser for SAM9X75 Linux4SAM guests.
 
-The ``peer`` role runs on the QEMU host (AF_UNIX) or on a workstation
-connected to a physical board (pyserial).  The ``guest`` role runs inside
-Linux4SAM and uses only Python's standard library to open a Linux tty.
+The ``peer`` role runs on the QEMU host (AF_UNIX), on a workstation
+connected to a physical board (pyserial), or against a POSIX tty using only
+Python's standard library.  The ``guest`` role runs inside Linux4SAM and
+opens a Linux tty with the same standard-library transport.
 """
 
 # SPDX-License-Identifier: GPL-2.0-or-later
@@ -381,7 +382,7 @@ class UnixServerStream:
 
 
 class PosixTTYStream:
-    """Standard-library raw tty transport for the Linux4SAM guest role."""
+    """Standard-library raw POSIX tty transport."""
 
     def __init__(self, path, baud, rtscts=False):
         self.path = path
@@ -1158,6 +1159,10 @@ def build_parser():
     transport = peer.add_mutually_exclusive_group(required=True)
     transport.add_argument("--unix-listen", metavar="PATH",
                            help="listen for a QEMU socket chardev")
+    transport.add_argument(
+        "--tty", metavar="DEVICE",
+        help="open a POSIX tty without optional pyserial",
+    )
     transport.add_argument("--serial", metavar="DEVICE",
                            help="open a physical adapter using pyserial")
     peer.add_argument("--sessions", type=int, default=1,
@@ -1251,12 +1256,16 @@ def main(argv=None):
         args.transport_label = "tty:%s" % args.device
     elif args.unix_listen:
         args.transport_label = "unix-listen:%s" % args.unix_listen
+    elif args.tty:
+        args.transport_label = "tty:%s" % args.tty
     else:
         args.transport_label = "serial:%s" % args.serial
     stream = None
     try:
         if args.role == "peer" and args.unix_listen:
             stream = UnixServerStream(args.unix_listen)
+        elif args.role == "peer" and args.tty:
+            stream = PosixTTYStream(args.tty, args.baud)
         elif args.role == "peer":
             stream = PySerialStream(
                 args.serial, args.baud,

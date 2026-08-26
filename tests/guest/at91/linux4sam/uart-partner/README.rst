@@ -206,6 +206,222 @@ deliberately hides that detach event.  The generic QEMU ``usb-serial`` device
 is unmigratable, so the migration barrier below does not apply to this
 topology.
 
+QEMU UDPHS gadget-serial self-loop
+----------------------------------
+
+An optional cable bridge can connect the SAM9X75 UDPHS device controller to
+Port B of its own UHPHS host controller.  This is deliberately not part of
+the default machine: it represents attaching a cable between two board
+connectors.  Unlike ``usb-serial`` above, Linux owns both ends of this link.
+The gadget side uses the real ``atmel_usba_udc`` and ``g_serial`` drivers;
+the host side enumerates that gadget with ``cdc_acm``::
+
+  /dev/ttyGS0 -> UDPHS -> at91-udphs-gadget -> UHPHS -> /dev/ttyACM0
+
+The unchanged Linux4Microchip 2026.04 device tree already enables
+``gadget@500000``.  Its exact kernel has ``atmel_usba_udc.ko`` and
+``g_serial.ko``, built-in AT91 EHCI/OHCI and built-in CDC ACM support.  Add
+the bridge to a normal Linux4SAM invocation; using Port 2 avoids the shared
+Port A transceiver which UDPHS takes away from UHPHS while device mode is
+enabled::
+
+  -device at91-udphs-gadget,id=udphs-loop,udphs=/machine/soc/udphs,bus=usb-bus.0,port=2
+
+The script may initially be supplied with the read-only USB-storage payload
+shown in the preceding section.  Copy it to the root filesystem and unmount
+that payload before enabling UDPHS: the storage device uses high-speed Port A
+(``port=1``), which the hardware mux intentionally disconnects when UDPHS
+takes the shared transceiver.  The self-loop remains on independent Port B
+(``port=2``)::
+
+  cp /mnt/payload/sam9x75_uart_partner.py /root/
+  sync
+  umount /mnt/payload
+
+Alternatively, put the script in the root filesystem before boot.  Start
+QEMU with ``-d unimp,guest_errors`` and a disk-backed ``-D`` path so the
+diagnostic log can be checked after shutdown.
+
+Inside the guest, mount ``proc`` and ``sysfs`` when using ``init=/bin/sh``,
+load the UDC before its legacy gadget function, and wait for enumeration::
+
+  mount -t proc proc /proc 2>/dev/null || true
+  mount -t sysfs sysfs /sys 2>/dev/null || true
+  modprobe atmel_usba_udc
+  test -n "$(ls -A /sys/class/udc)"
+  modprobe g_serial
+
+  n=0
+  while test ! -e /sys/class/tty/ttyGS0/device && test "$n" -lt 30; do
+      sleep 1
+      n=$((n + 1))
+  done
+  test -c /dev/ttyGS0
+
+Do not rely on ``ttyACM0`` when another ACM device is present.  Find the
+host-side tty by walking its USB parents and requiring gadget serial's
+``0525:a4a7`` identity.  This also records the USB device node used for the
+speed and topology checks::
+
+  discover_gadget_acm()
+  {
+      matches=0
+      match_tty=
+      match_node=
+      for tty in /sys/class/tty/ttyACM*; do
+          test -e "$tty/device" || continue
+          node=$(readlink -f "$tty/device")
+          usb_node=
+          while test "$node" != /; do
+              if test -r "$node/idVendor" && test -r "$node/idProduct" && \
+                 test "$(cat "$node/idVendor")" = 0525 && \
+                 test "$(cat "$node/idProduct")" = a4a7; then
+                  usb_node=$node
+                  break
+              fi
+              node=${node%/*}
+              test -n "$node" || node=/
+          done
+          if test -n "$usb_node"; then
+              matches=$((matches + 1))
+              match_tty=$tty
+              match_node=$usb_node
+          fi
+      done
+      test "$matches" = 1 || return 1
+      printf '%s %s\n' "$match_tty" "$match_node"
+  }
+
+  n=0
+  until HOST_INFO=$(discover_gadget_acm); do
+      test "$n" -lt 30 || break
+      sleep 1
+      n=$((n + 1))
+  done
+  test -n "$HOST_INFO"
+  set -- $HOST_INFO
+  HOST_TTY=/dev/${1##*/}
+  GADGET_USB_NODE=$2
+  test -c "$HOST_TTY"
+  test "$(cat "$GADGET_USB_NODE/speed")" = 480
+  test "${GADGET_USB_NODE##*/}" = 1-2
+
+The final ``1-2`` assertion is for the exact single-controller topology and
+the explicit ``port=2`` above; use the discovered node rather than that bus
+number if another launch changes USB bus enumeration.  Capture both shared
+UHPHS source 22 and UDPHS source 23 after the two ttys exist::
+
+  irq_count()
+  {
+      awk -v source="$1" \
+          '$0 ~ "atmel-aic5[[:space:]]+" source "[[:space:]]" { print $2 }' \
+          /proc/interrupts
+  }
+  UHPHS_BEFORE=$(irq_count 22)
+  UDPHS_BEFORE=$(irq_count 23)
+  test -n "$UHPHS_BEFORE" && test -n "$UDPHS_BEFORE"
+  DMESG_LINES=$(dmesg | wc -l)
+
+Run the dependency-free POSIX-tty peer on the host-controller endpoint, then
+run the normal guest role on the gadget endpoint.  ``--tty`` is intentionally
+different from ``--serial``: the former uses only Python's standard library;
+the latter selects pyserial and its physical-adapter modem-line controls::
+
+  python3 /root/sam9x75_uart_partner.py peer \
+      --tty "$HOST_TTY" --timeout 900 \
+      --json /root/sam9x75-udphs-acm-peer.json &
+  PEER_PID=$!
+  python3 /root/sam9x75_uart_partner.py guest \
+      --device /dev/ttyGS0 --session 0x202608260104 --timeout 900 \
+      --json /root/sam9x75-udphs-acm-gadget.json
+  GADGET_STATUS=$?
+  wait "$PEER_PID"
+  PEER_STATUS=$?
+  test "$GADGET_STATUS" = 0 && test "$PEER_STATUS" = 0
+
+Both TAP plans and both JSON reports are required.  They prove deterministic
+full-duplex data, CRC, direction and sequence integrity across control
+enumeration, the CDC interrupt endpoint, bulk endpoints, the UDPHS data path
+and the UHPHS schedule.  Check that traffic reached both controllers::
+
+  UHPHS_AFTER=$(irq_count 22)
+  UDPHS_AFTER=$(irq_count 23)
+  test "$UHPHS_AFTER" -gt "$UHPHS_BEFORE"
+  test "$UDPHS_AFTER" -gt "$UDPHS_BEFORE"
+  dmesg | tail -n +$((DMESG_LINES + 1)) > /root/udphs-acm-dmesg-new.txt
+  ! grep -Ei 'usb.*(error|fail|timeout|stall)|dma.*error' \
+      /root/udphs-acm-dmesg-new.txt
+
+The exact Linux4Microchip 2026.04 self-loop gate passed TAP plan ``1..7`` at
+both endpoints.  Each side validated 27 DATA frames and 27 acknowledgements,
+including the 65,536-byte boundary, with 210,478 received wire bytes and no
+CRC, framing, discard, duplicate or protocol error.  The shared UHPHS IRQ
+advanced by 6,361, the UDPHS UDC IRQ by 3,903, Linux reported no error IRQ,
+and QEMU's ``unimp,guest_errors`` log remained empty.
+
+After the guest and peer processes have closed both ttys, a second session
+checks a deliberate pull-up disconnect and fresh enumeration.  Unload only
+the gadget function, wait for the matching ``ttyACM`` to disappear, reload
+it, repeat identity-based tty discovery, and rerun both roles with a new
+nonzero session such as ``0x202608260105``::
+
+  rmmod g_serial
+  n=0
+  while test -e "$HOST_TTY" && test "$n" -lt 30; do
+      sleep 1
+      n=$((n + 1))
+  done
+  test ! -e "$HOST_TTY"
+  modprobe g_serial
+
+Do not reuse the old host tty name: Linux may allocate a different
+``ttyACM`` number.  Rediscover ``0525:a4a7`` and start two fresh processes::
+
+  HOST_INFO=
+  n=0
+  until HOST_INFO=$(discover_gadget_acm); do
+      test "$n" -lt 30 || break
+      sleep 1
+      n=$((n + 1))
+  done
+  test -n "$HOST_INFO"
+  set -- $HOST_INFO
+  HOST_TTY=/dev/${1##*/}
+  GADGET_USB_NODE=$2
+  test -c "$HOST_TTY" && test -c /dev/ttyGS0
+
+  python3 /root/sam9x75_uart_partner.py peer \
+      --tty "$HOST_TTY" --timeout 900 \
+      --json /root/sam9x75-udphs-acm-reload-peer.json &
+  PEER_PID=$!
+  python3 /root/sam9x75_uart_partner.py guest \
+      --device /dev/ttyGS0 --session 0x202608260105 --timeout 900 \
+      --json /root/sam9x75-udphs-acm-reload-gadget.json
+  GADGET_STATUS=$?
+  wait "$PEER_PID"
+  PEER_STATUS=$?
+  test "$GADGET_STATUS" = 0 && test "$PEER_STATUS" = 0
+  test "$(irq_count 22)" -gt "$UHPHS_AFTER"
+  test "$(irq_count 23)" -gt "$UDPHS_AFTER"
+
+An expected disconnect message is not an error.  Require the second pair of
+TAP/JSON reports, no unexpected reset or DMA error, and an empty QEMU
+``unimp,guest_errors`` log after a clean shutdown.
+
+This first gate is bounded data-path and reconnect coverage.  SOF timing,
+suspend/resume, isochronous transfers and migration with in-flight USB
+packets remain separate tests.  For quiescent migration, both destination
+QEMUs must include the identical optional bridge and the endpoints must be
+stopped at the protocol barrier before the source is handed over.
+
+The same topology can later be compared with the physical Curiosity board.
+Have the hardware operator identify the connector wired to UHPHS Port B and
+the UDPHS device connector from the board schematic, then join those two
+data ports with one known-good cable.  Do not join two host ports or introduce
+a second VBUS source.  Run the same modules, sysfs discovery, two tty roles,
+session IDs and interrupt/dmesg oracle.  Record the negotiated speed and
+connector mapping, and compare both JSON byte counts and hashes with QEMU.
+
 Migration barrier
 -----------------
 
@@ -300,4 +516,5 @@ The tests cover incremental framing at all boundary sizes, CRC recovery,
 deterministic directions, simultaneous full-duplex traffic, fragmentation,
 backpressure, reset resynchronization from an interrupted maximum-size frame,
 the quiesce/resume barrier, and safe RTS restore/readback with a fake
-PySerial-like endpoint.
+PySerial-like endpoint.  They also cover ``peer --tty`` parser isolation and
+binary I/O in both directions through a real host PTY without pyserial.

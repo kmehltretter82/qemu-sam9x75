@@ -8,7 +8,9 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import pathlib
+import pty
 import select
 import socket
 import sys
@@ -77,6 +79,64 @@ def endpoint_args(role, **overrides):
 
 
 class ProtocolUnitTests(unittest.TestCase):
+    def test_peer_tty_cli_is_distinct_from_pyserial_transport(self):
+        parser = uart.build_parser()
+        args = parser.parse_args([
+            "peer", "--tty", "/dev/ttyACM0", "--sessions", "2",
+        ])
+        uart.validate_args(parser, args)
+        self.assertEqual(args.tty, "/dev/ttyACM0")
+        self.assertIsNone(args.serial)
+        self.assertIsNone(args.unix_listen)
+        self.assertEqual(args.sessions, 2)
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parser.parse_args([
+                    "peer", "--tty", "/dev/ttyACM0",
+                    "--serial", "/dev/ttyUSB0",
+                ])
+
+    def test_peer_tty_rejects_pyserial_only_manual_rts(self):
+        parser = uart.build_parser()
+        args = parser.parse_args([
+            "peer", "--tty", "/dev/ttyACM0",
+            "--rts-pause-after-bytes", "1",
+        ])
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                uart.validate_args(parser, args)
+
+    def test_posix_tty_stream_transfers_binary_data_in_both_directions(self):
+        master, slave = pty.openpty()
+        path = os.ttyname(slave)
+        stream = None
+        try:
+            stream = uart.PosixTTYStream(path, 115200)
+            os.close(slave)
+            slave = -1
+
+            master_to_stream = b"\x00peer-to-gadget\xff\r\n"
+            os.write(master, master_to_stream)
+            self.assertEqual(
+                stream.read(len(master_to_stream), 1.0), master_to_stream,
+            )
+
+            stream_to_master = b"\xffgadget-to-peer\x00\n\r"
+            stream.write(stream_to_master)
+            readable, _, _ = select.select([master], [], [], 1.0)
+            self.assertTrue(readable)
+            self.assertEqual(os.read(master, 4096), stream_to_master)
+
+            with self.assertRaises(uart.StreamTimeout):
+                stream.read(1, 0.01)
+        finally:
+            if stream is not None:
+                stream.close()
+            if slave >= 0:
+                os.close(slave)
+            os.close(master)
+
     def test_manual_rts_pause_attests_lines_and_queue(self):
         class FakeSerial:
             def __init__(self):
