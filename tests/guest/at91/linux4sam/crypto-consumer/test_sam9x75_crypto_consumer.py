@@ -9,6 +9,7 @@ import os
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 import sam9x75_crypto_consumer as consumer
 
@@ -125,6 +126,41 @@ IPI0:       99       100  Rescheduling interrupts
         )
 
 
+class PhaseInterruptTests(unittest.TestCase):
+    @mock.patch.object(consumer, "run_parallel", return_value=7)
+    @mock.patch.object(consumer, "read_text")
+    def test_each_family_requires_its_own_interrupt_delta(
+            self, read_text, run_parallel):
+        read_text.side_effect = (
+            " 22: 0 atmel-aic5 20 Level at_xdmac\n"
+            " 40: 0 atmel-aic5 41 Level atmel-sha\n",
+            " 22: 5 atmel-aic5 20 Level at_xdmac\n"
+            " 40: 2 atmel-aic5 41 Level atmel-sha\n",
+            " 22: 5 atmel-aic5 20 Level at_xdmac\n"
+            " 39: 0 atmel-aic5 39 Level atmel-aes\n",
+            " 22: 5 atmel-aic5 20 Level at_xdmac\n"
+            " 39: 0 atmel-aic5 39 Level atmel-aes\n",
+        )
+
+        sha_total, sha_evidence = consumer.run_monitored_phase(
+            "sha", lambda _job: 1, ("sha-job",), 1, False,
+            "/proc/interrupts",
+        )
+        aes_total, aes_evidence = consumer.run_monitored_phase(
+            "aes", lambda _job: 1, ("aes-job",), 1, False,
+            "/proc/interrupts",
+        )
+
+        self.assertEqual((sha_total, aes_total), (7, 7))
+        self.assertEqual(sha_evidence["missing_required_interrupts"], [])
+        self.assertEqual(sha_evidence["interrupts_delta"]["atmel-sha"], 2)
+        self.assertEqual(
+            aes_evidence["missing_required_interrupts"], ["at_xdmac"],
+        )
+        self.assertEqual(aes_evidence["interrupts_delta"]["at_xdmac"], 0)
+        self.assertEqual(run_parallel.call_count, 2)
+
+
 class MatrixTests(unittest.TestCase):
     def test_hash_matrix_covers_padding_and_dma_boundaries(self):
         jobs = consumer.build_hash_jobs(65536)
@@ -134,11 +170,21 @@ class MatrixTests(unittest.TestCase):
         self.assertTrue({0, 1, 55, 56, 63, 64, 65, 4095, 4096, 4097,
                          65536}.issubset(lengths))
         self.assertTrue(all(not job.key for job in jobs))
+        for algorithm in ("sha384", "sha512"):
+            with self.subTest(algorithm=algorithm):
+                algorithm_lengths = {
+                    job.length for job in jobs
+                    if job.algorithm == algorithm
+                }
+                self.assertTrue({111, 112}.issubset(algorithm_lengths))
 
         hmac_jobs = consumer.build_hash_jobs(4097, keyed=True)
         self.assertEqual({job.algorithm for job in hmac_jobs},
                          set(consumer.HMAC_DRIVERS))
         self.assertTrue(all(job.key for job in hmac_jobs))
+        self.assertTrue({111, 112}.issubset({
+            job.length for job in hmac_jobs if job.algorithm == "sha512"
+        }))
         self.assertNotIn(
             0, {job.length for job in consumer.build_hash_jobs(
                 4097, include_empty=False,
@@ -182,6 +228,36 @@ class MatrixTests(unittest.TestCase):
         jobs = consumer.build_cipher_jobs(4096, {"tdes"})
         self.assertTrue(jobs)
         self.assertTrue(all(job.case.name.startswith("tdes-") for job in jobs))
+
+
+class GateProfileTests(unittest.TestCase):
+    def test_release_profile_requires_the_documented_full_gate(self):
+        parser = consumer.build_parser()
+        release_args = parser.parse_args([])
+        self.assertEqual(consumer.gate_metadata(release_args), {
+            "gate_profile": "release",
+            "skip_empty": False,
+            "require_interrupts": True,
+        })
+
+        diagnostic_argv = (
+            ("--iterations", "3"),
+            ("--workers", "2"),
+            ("--max-bytes", "4097"),
+            ("--engines", "sha,hmac,aes"),
+            ("--skip-empty",),
+            ("--no-require-interrupts",),
+        )
+        for argv in diagnostic_argv:
+            with self.subTest(argv=argv):
+                args = parser.parse_args(argv)
+                self.assertEqual(consumer.gate_profile(args), "diagnostic")
+
+        stronger_args = parser.parse_args((
+            "--iterations", "5", "--workers", "4",
+            "--max-bytes", "65537",
+        ))
+        self.assertEqual(consumer.gate_profile(stronger_args), "release")
 
 
 class OracleTests(unittest.TestCase):

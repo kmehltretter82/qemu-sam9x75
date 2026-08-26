@@ -13,14 +13,17 @@ directly.
 Every result has an independent userspace oracle.  SHA and HMAC are compared
 with Python's ``hashlib`` and ``hmac``.  AES and TDES encryption are compared
 byte-for-byte with OpenSSL, then decrypted through AF_ALG and compared with
-the original input.  Sizes straddle hash-padding, cache-page and DMA
-boundaries; scatter/gather requests use deliberately awkward fragments and
-multiple requests are in flight concurrently.  The fixture finally requires
-the direct ``atmel-sha`` completion interrupt to advance for SHA/HMAC, and
-the shared ``at_xdmac`` completion interrupt to advance for AES/TDES DMA.
-The three peripheral counters and XDMAC counter are all recorded.  Exact
+the original input.  Sizes straddle the 55/56-byte and 111/112-byte SHA
+padding transitions, cache-page boundaries and DMA thresholds;
+scatter/gather requests use deliberately awkward fragments and multiple
+requests are in flight concurrently.  The fixture samples interrupts around
+each selected family separately.  It requires the direct ``atmel-sha``
+completion interrupt to advance independently for SHA and HMAC, and the shared
+``at_xdmac`` completion interrupt to advance independently for AES and TDES
+DMA.  The three peripheral counters and XDMAC counter are all recorded.  Exact
 driver-name binding is the primary proof that software fallback did not
-satisfy the gate; the engine-specific IRQ deltas add data-path evidence.
+satisfy the gate; the phase-scoped IRQ deltas add data-path evidence without
+letting one selected crypto family satisfy another family's interrupt gate.
 
 The deterministic keys are test vectors, printed nowhere and unrelated to
 the board's OTP or private-key bus.  The fixture does not access OTPC.
@@ -56,14 +59,23 @@ guest wait, so a timeout implemented only inside the guest is not sufficient::
       ./run-linux4microchip-crypto-vm
 
 The command emits TAP 6/6 plus a JSON record.  The default matrix covers all
-five SHA widths, HMAC-SHA256/SHA512, AES ECB/CBC/CTR with 128/192/256-bit
-keys, and 24-byte three-key TDES through the driver's ECB/CBC registrations.
+five SHA widths, including both SHA-2 padding transitions, HMAC-SHA256/SHA512,
+AES-128 ECB, AES-128/192/256 CBC, AES-256 CTR, and 24-byte three-key TDES
+through the driver's ECB/CBC registrations.
 Increase ``--iterations`` for a longer queue/DMA stress run; request sizes
 and expected bytes remain deterministic.
 For diagnosis, ``--engines sha`` or a comma-separated subset of
 ``sha,hmac,aes,tdes`` isolates one hardware queue without weakening the
 default release gate.  ``--skip-empty`` is a narrower diagnostic switch; the
 default keeps the zero-length SHA/HMAC cases required by the Crypto API.
+
+The JSON ``gate_profile`` is ``release`` only when all four families are
+selected, interrupt checks and empty messages remain enabled, and
+``--iterations``, ``--workers`` and ``--max-bytes`` are at least 4, 3 and
+65536 respectively.  Every weaker invocation is labeled ``diagnostic``.  The
+report also records ``skip_empty`` and ``require_interrupts`` explicitly, plus
+the before/after/delta counters for each selected family and the backward-useful
+overall counters.
 
 Archive the JSON report, ``/proc/interrupts`` and the QEMU
 ``-d unimp,guest_errors`` log.  A normal successful run must leave that QEMU
@@ -94,5 +106,5 @@ The consumer deliberately starts with skcipher and hash APIs.  GCM/other
 AEAD control messages, XTS, the AES/SHA protocol path, CBC-MAC, private-key
 bus, tamper/fault injection and migration with an active kernel request need
 separate fixtures.  Passing this gate establishes userspace-to-driver
-functional and DMA/interrupt coverage; it does not settle hardware timing or
-version-register values.
+functional coverage and phase-scoped DMA/interrupt evidence; it does not
+settle hardware timing or version-register values.

@@ -26,6 +26,9 @@ import time
 
 REPORT_SCHEMA = "sam9x75-crypto-consumer-report-v1"
 DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+RELEASE_MIN_ITERATIONS = 4
+RELEASE_MIN_WORKERS = 3
+RELEASE_MIN_MAX_BYTES = 65536
 
 HASH_DRIVERS = {
     "sha1": ("atmel-sha1", 20),
@@ -300,7 +303,7 @@ def cipher_cases(max_bytes):
 def build_hash_jobs(max_bytes, keyed=False, include_empty=True):
     algorithms = HMAC_DRIVERS if keyed else HASH_DRIVERS
     lengths = (
-        0, 1, 3, 55, 56, 63, 64, 65, 127, 128, 129,
+        0, 1, 3, 55, 56, 63, 64, 65, 111, 112, 127, 128, 129,
         4095, 4096, 4097, 65536,
     )
     jobs = []
@@ -413,6 +416,27 @@ def run_parallel(function, jobs, workers, progress=False):
     return total
 
 
+def run_monitored_phase(engine, function, jobs, workers, progress,
+                        proc_interrupts):
+    """Run one engine family and return phase-scoped IRQ evidence."""
+
+    engines = frozenset((engine,))
+    labels = interrupt_labels(engines)
+    before = parse_interrupts(read_text(proc_interrupts), labels)
+    total = run_parallel(function, jobs, workers, progress)
+    after = parse_interrupts(read_text(proc_interrupts), labels)
+    delta = interrupt_delta(before, after)
+    required = required_interrupt_labels(engines)
+    missing = sorted(label for label in required if delta[label] <= 0)
+    return total, {
+        "required_interrupts": sorted(required),
+        "missing_required_interrupts": missing,
+        "interrupts_before": before,
+        "interrupts_after": after,
+        "interrupts_delta": delta,
+    }
+
+
 def atomic_write_json(path, value):
     path = pathlib.Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -515,6 +539,28 @@ def parse_engines(value):
     return engines
 
 
+def gate_profile(args):
+    """Classify whether an invocation satisfies the documented release gate."""
+
+    if (args.engines == ENGINE_CHOICES and
+            args.iterations >= RELEASE_MIN_ITERATIONS and
+            args.workers >= RELEASE_MIN_WORKERS and
+            args.max_bytes >= RELEASE_MIN_MAX_BYTES and
+            not args.skip_empty and args.require_interrupts):
+        return "release"
+    return "diagnostic"
+
+
+def gate_metadata(args):
+    """Return report fields that make diagnostic weakening explicit."""
+
+    return {
+        "gate_profile": gate_profile(args),
+        "skip_empty": args.skip_empty,
+        "require_interrupts": args.require_interrupts,
+    }
+
+
 def run_consumer(args):
     if not hasattr(socket, "AF_ALG") or not hasattr(socket.socket,
                                                     "sendmsg_afalg"):
@@ -542,46 +588,60 @@ def run_consumer(args):
             ", ".join(failed_selftests)
         )
 
-    labels = interrupt_labels(args.engines)
-    irq_before = parse_interrupts(read_text(args.proc_interrupts), labels)
-    started = time.monotonic()
-
     hash_jobs = (build_hash_jobs(args.max_bytes, keyed=False,
                                  include_empty=not args.skip_empty)
                  if "sha" in args.engines else ())
     hmac_jobs = (build_hash_jobs(args.max_bytes, keyed=True,
                                  include_empty=not args.skip_empty)
                  if "hmac" in args.engines else ())
-    cipher_jobs = build_cipher_jobs(args.max_bytes, args.engines)
+    aes_jobs = (build_cipher_jobs(args.max_bytes, {"aes"})
+                if "aes" in args.engines else ())
+    tdes_jobs = (build_cipher_jobs(args.max_bytes, {"tdes"})
+                 if "tdes" in args.engines else ())
 
-    if args.progress and hash_jobs:
-        print("# starting SHA vectors", flush=True)
-    hash_bytes = run_parallel(
-        lambda job: run_hash_job(job, args.iterations),
-        hash_jobs, args.workers, args.progress,
+    labels = interrupt_labels(args.engines)
+    irq_before = parse_interrupts(read_text(args.proc_interrupts), labels)
+    started = time.monotonic()
+    phase_interrupts = {}
+    phase_bytes = {}
+
+    phases = (
+        ("sha", "SHA", hash_jobs,
+         lambda job: run_hash_job(job, args.iterations)),
+        ("hmac", "HMAC", hmac_jobs,
+         lambda job: run_hash_job(job, args.iterations)),
+        ("aes", "AES", aes_jobs,
+         lambda job: run_cipher_job(job, args.iterations, args.openssl)),
+        ("tdes", "TDES", tdes_jobs,
+         lambda job: run_cipher_job(job, args.iterations, args.openssl)),
     )
-    if args.progress and hmac_jobs:
-        print("# starting HMAC vectors", flush=True)
-    hmac_bytes = run_parallel(
-        lambda job: run_hash_job(job, args.iterations),
-        hmac_jobs, args.workers, args.progress,
-    )
-    if args.progress and cipher_jobs:
-        print("# starting AES/TDES vectors", flush=True)
-    cipher_bytes = run_parallel(
-        lambda job: run_cipher_job(job, args.iterations, args.openssl),
-        cipher_jobs, args.workers, args.progress,
-    )
+    for engine, description, jobs, function in phases:
+        if not jobs:
+            continue
+        if args.progress:
+            print("# starting %s vectors" % description, flush=True)
+        phase_bytes[engine], phase_interrupts[engine] = run_monitored_phase(
+            engine, function, jobs, args.workers, args.progress,
+            args.proc_interrupts,
+        )
+
+    hash_bytes = phase_bytes.get("sha", 0)
+    hmac_bytes = phase_bytes.get("hmac", 0)
+    cipher_bytes = (phase_bytes.get("aes", 0) +
+                    phase_bytes.get("tdes", 0))
+    cipher_jobs = aes_jobs + tdes_jobs
 
     irq_after = parse_interrupts(read_text(args.proc_interrupts), labels)
     irq_deltas = interrupt_delta(irq_before, irq_after)
     missing_irq_paths = sorted(
-        label for label in required_interrupt_labels(args.engines)
-        if irq_deltas[label] <= 0
+        "%s:%s" % (engine, label)
+        for engine, evidence in phase_interrupts.items()
+        for label in evidence["missing_required_interrupts"]
     )
     if args.require_interrupts and missing_irq_paths:
         raise ConsumerError(
-            "hardware requests completed without required interrupt(s): " +
+            "hardware requests completed without required phase "
+            "interrupt(s): " +
             ", ".join(missing_irq_paths)
         )
 
@@ -600,6 +660,7 @@ def run_consumer(args):
         "workers": args.workers,
         "engines": sorted(args.engines),
         "max_bytes": args.max_bytes,
+        **gate_metadata(args),
         "elapsed_seconds": round(time.monotonic() - started, 6),
         "jobs": {
             "hash": len(hash_jobs),
@@ -618,6 +679,7 @@ def run_consumer(args):
         "interrupts_before": irq_before,
         "interrupts_after": irq_after,
         "interrupts_delta": irq_deltas,
+        "interrupts_by_phase": phase_interrupts,
     }
     if args.json:
         atomic_write_json(args.json, report)
@@ -642,11 +704,13 @@ def run_consumer(args):
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--iterations", type=int, default=4,
+    parser.add_argument("--iterations", type=int,
+                        default=RELEASE_MIN_ITERATIONS,
                         help="hardware repetitions of every oracle vector")
-    parser.add_argument("--workers", type=int, default=3,
+    parser.add_argument("--workers", type=int, default=RELEASE_MIN_WORKERS,
                         help="concurrent AF_ALG requests")
-    parser.add_argument("--max-bytes", type=int, default=65536,
+    parser.add_argument("--max-bytes", type=int,
+                        default=RELEASE_MIN_MAX_BYTES,
                         help="largest request size in bytes")
     parser.add_argument(
         "--engines", type=parse_engines, default=ENGINE_CHOICES,
