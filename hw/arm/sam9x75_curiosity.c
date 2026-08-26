@@ -277,6 +277,11 @@ static void sam9x75_curiosity_init(MachineState *machine)
     qdev_prop_set_bit(DEVICE(&soc->gmac), "phy-clocked",
                       board->ethernet_25mhz);
     qemu_macaddr_default_if_unset(&soc->gmac.conf.macaddr);
+    /* The LAN8840 card routes its active-low, externally pulled-up INT_N. */
+    qdev_connect_gpio_out_named(DEVICE(&soc->gmac),
+                                CADENCE_GEM_PHY_IRQ, 0,
+                                qemu_irq_invert(qdev_get_gpio_in(
+                                    DEVICE(&soc->pio[3]), 5)));
     if (board->otpc_drive) {
         object_property_set_str(OBJECT(&soc->otpc), "drive",
                                 board->otpc_drive, &error_fatal);

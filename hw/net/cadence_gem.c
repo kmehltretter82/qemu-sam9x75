@@ -382,6 +382,19 @@ REG32(TYPE2_COMPARE_0_WORD_1, 0x704)
 #define PHY_REG_EXT_PHYSPCFC_ST   27
 #define PHY_REG_CABLE_DIAG   28
 
+#define PHY_ID_LAN8841               0x00221650
+#define LAN8841_REG_LED_MODE_SELECT   22
+#define LAN8841_REG_LED_BEHAVIOR      23
+#define LAN8841_REG_INT_EN            24
+#define LAN8841_REG_OUTPUT_CTRL       25
+#define LAN8841_REG_LED_MODE          26
+#define LAN8841_REG_INT_ST            27
+#define LAN8841_INT_LINK_UP           BIT(0)
+#define LAN8841_INT_LINK_DOWN         BIT(2)
+#define LAN8841_INT_PTP               BIT(9)
+#define LAN8841_INT_ENABLE_MASK       0x0fff
+#define LAN8841_INT_READ_CLEAR_MASK   0x0cff
+
 #define PHY_REG_CONTROL_RST       0x8000
 #define PHY_REG_CONTROL_LOOP      0x4000
 #define PHY_REG_CONTROL_ANEG      0x1000
@@ -727,6 +740,20 @@ static void gem_init_register_masks(CadenceGEMState *s)
     }
 }
 
+static bool gem_phy_is_lan8841(CadenceGEMState *s)
+{
+    return (s->phy_id & 0xfffffff0U) == PHY_ID_LAN8841;
+}
+
+static void gem_phy_update_irq(CadenceGEMState *s)
+{
+    bool asserted = gem_phy_is_lan8841(s) &&
+        (s->phy_regs[LAN8841_REG_INT_ST] &
+         s->phy_regs[LAN8841_REG_INT_EN]);
+
+    qemu_set_irq(s->phy_irq, asserted);
+}
+
 /*
  * phy_update_link:
  * Make the emulated PHY link state match the QEMU "interface" state.
@@ -735,6 +762,8 @@ static void phy_update_link(CadenceGEMState *s)
 {
     bool link_down = !s->phy_clocked ||
                      qemu_get_queue(s->nic)->link_down;
+    bool old_link_down = !(s->phy_regs[PHY_REG_STATUS] &
+                           PHY_REG_STATUS_LINK);
 
     DB_PRINT("down %d\n", link_down);
 
@@ -750,6 +779,13 @@ static void phy_update_link(CadenceGEMState *s)
                                         PHY_REG_INT_ST_ANEGCMPL |
                                         PHY_REG_INT_ST_ENERGY);
     }
+
+    if (gem_phy_is_lan8841(s) && old_link_down != link_down) {
+        s->phy_regs[LAN8841_REG_INT_ST] |= link_down ?
+            LAN8841_INT_LINK_DOWN : LAN8841_INT_LINK_UP;
+    }
+
+    gem_phy_update_irq(s);
 }
 
 static bool gem_can_receive(NetClientState *nc)
@@ -1541,6 +1577,15 @@ static void gem_phy_reset(CadenceGEMState *s)
     s->phy_regs[PHY_REG_EXT_PHYSPCFC_CTL2] = 0x000A;
     s->phy_regs[PHY_REG_EXT_PHYSPCFC_ST] = 0x848B;
 
+    if (gem_phy_is_lan8841(s)) {
+        s->phy_regs[LAN8841_REG_LED_MODE_SELECT] = 0x8021;
+        s->phy_regs[LAN8841_REG_LED_BEHAVIOR] = 0x1000;
+        s->phy_regs[LAN8841_REG_INT_EN] = 0;
+        s->phy_regs[LAN8841_REG_OUTPUT_CTRL] = 0;
+        s->phy_regs[LAN8841_REG_LED_MODE] = BIT(14);
+        s->phy_regs[LAN8841_REG_INT_ST] = 0;
+    }
+
     phy_update_link(s);
 }
 
@@ -1596,13 +1641,32 @@ static void gem_reset(DeviceState *d)
 
 static uint16_t gem_phy_read(CadenceGEMState *s, unsigned reg_num)
 {
-    DB_PRINT("reg: %d value: 0x%04x\n", reg_num, s->phy_regs[reg_num]);
-    return s->phy_regs[reg_num];
+    uint16_t value = s->phy_regs[reg_num];
+
+    DB_PRINT("reg: %d value: 0x%04x\n", reg_num, value);
+
+    if (gem_phy_is_lan8841(s) && reg_num == LAN8841_REG_INT_ST) {
+        s->phy_regs[reg_num] &= ~LAN8841_INT_READ_CLEAR_MASK;
+        gem_phy_update_irq(s);
+    }
+
+    return value;
 }
 
 static void gem_phy_write(CadenceGEMState *s, unsigned reg_num, uint16_t val)
 {
     DB_PRINT("reg: %d value: 0x%04x\n", reg_num, val);
+
+    if (gem_phy_is_lan8841(s)) {
+        if (reg_num == LAN8841_REG_INT_EN) {
+            s->phy_regs[reg_num] = val & LAN8841_INT_ENABLE_MASK;
+            gem_phy_update_irq(s);
+            return;
+        }
+        if (reg_num == LAN8841_REG_INT_ST) {
+            return;
+        }
+    }
 
     switch (reg_num) {
     case PHY_REG_CONTROL:
@@ -1915,6 +1979,8 @@ static void gem_init(Object *obj)
                           "enet", sizeof(s->regs));
 
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
+    /* Logical assertion; board wiring supplies the PHY interrupt polarity. */
+    qdev_init_gpio_out_named(dev, &s->phy_irq, CADENCE_GEM_PHY_IRQ, 1);
 }
 
 static int gem_post_load(void *opaque, int version_id)
@@ -1926,7 +1992,11 @@ static int gem_post_load(void *opaque, int version_id)
         gem_import_v4_octets(s, R_OCTRXLO, R_OCTRXHI);
     }
 
+    /* NetClientState.link_down is not migrated; recover it from the PHY. */
+    qemu_get_queue(s->nic)->link_down =
+        !(s->phy_regs[PHY_REG_STATUS] & PHY_REG_STATUS_LINK);
     gem_update_int_status(s);
+    gem_phy_update_irq(s);
     return 0;
 }
 

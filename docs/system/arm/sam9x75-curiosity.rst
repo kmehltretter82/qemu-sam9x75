@@ -427,12 +427,35 @@ Support matrix
    * - GEM and LAN8840
      - Initial
      - GEM0 has six priority queues, DMA transmit/receive, AIC sources 24 and
-       60--64, a Clause 22 PHY at address 1 with the LAN8840 identifier, and a
-       station address provisioned through the SST26VF064BEUI.  Unmodified
-       U-Boot obtained a DHCP lease and exchanged packets in the earlier
-       fixed-decode validation.  The exact-head SD repeat re-proved ``eth0``
-       discovery but did not repeat packet traffic.  J12 defaults closed and
-       supplies the LAN8840's required 25 MHz reference clock;
+       60--64, a Clause 22 PHY at address 1 with the LAN8841 identifier, and a
+       station address provisioned through the SST26VF064BEUI.  The LAN8841
+       PHY on the LAN8840 card exposes its logical interrupt assertion from
+       GEM0; the board inverts it onto the externally pulled-up, active-low
+       INT_N net at PIOD5 used by the shipped overlay.  Link-up and link-down
+       sources latch independently of their register 24 enable bits, register
+       27 clears its edge sources on read, changing the mask immediately
+       updates INT_N, and the pending status and output survive migration.
+       QEMU also reconstructs the non-migrated network-client link state from
+       the migrated PHY status.  Although AN4783's Clause 22 summary labels
+       register 24 reserved, the LAN8841 data sheet describes the interrupt
+       enable register and the Linux driver programs it; its exact mask and
+       readback remain a hardware-validation item.
+
+       The unmodified Linux4Microchip 2026.04 overlay now binds the PHY on IRQ
+       34, configures RGMII-ID mode, negotiates 1 Gbit/s full duplex, receives
+       a DHCP lease and reaches QEMU's host alias by ICMP.  A deterministic
+       userspace peer runs two simultaneous full-duplex TCP streams, each with
+       256 KiB and 48 CRC-protected application frames in each direction,
+       followed by 32 bidirectional UDP packets carrying 9,049 payload bytes
+       each way.  The exact image completed all ten guest checks with no
+       retries, stale packets, corruption, network error/drop increments or
+       ``-d unimp,guest_errors`` output; the independent host peer also
+       completed its integrity gate.  QMP link-down and link-up events changed
+       the PIOD IRQ 34 count from zero to one to two, produced the matching
+       phylink carrier transitions without an interrupt storm, and were
+       followed by three successful pings and a second TCP/UDP session.
+
+       J12 defaults closed and supplies the LAN8840's required 25 MHz clock;
        opening it makes MDIO inaccessible and prevents external RGMII
        traffic.  The daughter card's AT24C01 EEPROM is independently attached
        to FLEXCOM7/TWI7 at address ``0x54``.  It powers up as 128 erased bytes,
@@ -460,8 +483,11 @@ Support matrix
        mask reset values also need an early bare-metal read: the SAM9X75 device
        pack exposes five priority-queue masks with ``0x000008e6`` valid bits,
        so the generic Q1-only ``0x00000ce6`` behavior must not simply be copied
-       to every queue.  LAN8840 MMD/RGMII delay registers, PHY reset-value
-       fidelity, checksum corner cases, filtering and PTP/TSN remain.
+       to every queue.  Clause 22 registers 16--21 and 28--31 still inherit
+       generic-PHY values in places where LAN8841 differs.  The Clause 22 MMD
+       portal in registers 13/14, RGMII strap/delay and EEE registers, complete
+       PHY reset-value fidelity, checksum corner cases, filtering and PTP/TSN
+       remain.
    * - USB host and device
      - Initial
      - UHPHS exposes the documented 1 MiB OHCI and EHCI windows, three
@@ -1261,10 +1287,11 @@ LED/button paths are achieved.  The exact-EBI SD AT91Bootstrap path, Linux
 embedded-initramfs shell and a derivative-image ext4 disk-root shell are now
 repeated.  Exact-EBI NAND AT91Bootstrap is also repeated with clean, two-bit
 and BCH8-limit eight-bit-error media; all three reached a byte-identical U-Boot
-prompt with an empty diagnostic log.  GEM/LAN8840 packet exchange remains
-pending against the exact-EBI model; GEM discovery alone was repeated.  The
-other remaining integration gates include full guest ``mmc_spi`` operation
-through J24, the remaining board jumper and mux behavior, genuine QSPI and
-NAND RomBOOT, USB, CAN, expansion buses, multimedia/security, whole-machine
-migration and finally hardware differential validation.  Normal supported
-boots must be clean with ``-d unimp,guest_errors``.
+prompt with an empty diagnostic log.  GEM/LAN8840 discovery, PHY-interrupt
+bring-up, DHCP, ICMP and deterministic full-duplex TCP/UDP packet exchange are
+achieved with the exact Linux4Microchip image and unchanged shipped overlay.
+The other remaining integration gates include full guest ``mmc_spi``
+operation through J24, the remaining board jumper and mux behavior, genuine
+QSPI and NAND RomBOOT, USB, CAN, expansion buses, multimedia/security,
+whole-machine migration and finally hardware differential validation.  Normal
+supported boots must be clean with ``-d unimp,guest_errors``.

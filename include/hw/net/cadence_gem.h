@@ -29,6 +29,8 @@
 #define TYPE_CADENCE_GEM "cadence_gem"
 OBJECT_DECLARE_SIMPLE_TYPE(CadenceGEMState, CADENCE_GEM)
 
+#define CADENCE_GEM_PHY_IRQ "phy-irq"
+
 #include "net/net.h"
 #include "hw/core/sysbus.h"
 
@@ -55,6 +57,7 @@ struct CadenceGEMState {
     NICState *nic;
     NICConf conf;
     qemu_irq irq[MAX_PRIORITY_QUEUES];
+    qemu_irq phy_irq;
 
     /* Static properties */
     uint8_t num_priority_queues;

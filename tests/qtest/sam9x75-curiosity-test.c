@@ -679,6 +679,7 @@
 #define GEM_NUM_QUEUES          6
 
 #define GEM_MDIO_READ           (BIT(30) | (2U << 28) | (2U << 16))
+#define GEM_MDIO_WRITE          (BIT(30) | (1U << 28) | (2U << 16))
 #define GEM_MDIO_PHY(addr)      ((addr) << 23)
 #define GEM_MDIO_REG(reg)       ((reg) << 18)
 
@@ -2739,6 +2740,15 @@ static uint16_t gem_mdio_read(QTestState *qts, unsigned int phy,
 
     qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_PHYMNTNC, command);
     return qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_PHYMNTNC);
+}
+
+static void gem_mdio_write(QTestState *qts, unsigned int phy,
+                           unsigned int reg, uint16_t value)
+{
+    uint32_t command = GEM_MDIO_WRITE | GEM_MDIO_PHY(phy) |
+                       GEM_MDIO_REG(reg) | value;
+
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_PHYMNTNC, command);
 }
 
 static void twi_enable_master(QTestState *qts, uint64_t flexcom_base,
@@ -5139,6 +5149,140 @@ static void test_gem_registers_mdio_dma_and_irqs(void)
     g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR2) & BIT(0));
 
     qtest_quit(qts);
+}
+
+static void test_gem_lan8841_interrupt_line(void)
+{
+    const uint32_t phy_irq_pin = BIT(5);
+    const uint16_t link_interrupts = BIT(2) | BIT(0);
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE " -nic user,id=lan8841-test");
+
+    pmc_write_pcr(qts, 44, PMC_PCR_EN);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL, GEM_NWCTRL_MPE);
+
+    /* Linux requests PD5 as a low-level IRQ without keeping its pull-up. */
+    qtest_writel(qts, SAM9X7_PIOD_BASE + PIO_PER, phy_irq_pin);
+    qtest_writel(qts, SAM9X7_PIOD_BASE + PIO_ODR, phy_irq_pin);
+    qtest_writel(qts, SAM9X7_PIOD_BASE + PIO_PUDR, phy_irq_pin);
+    qtest_writel(qts, SAM9X7_PIOD_BASE + PIO_AIMER, phy_irq_pin);
+    qtest_writel(qts, SAM9X7_PIOD_BASE + PIO_LSR, phy_irq_pin);
+    qtest_writel(qts, SAM9X7_PIOD_BASE + PIO_FELLSR, phy_irq_pin);
+    qtest_writel(qts, SAM9X7_PIOD_BASE + PIO_IER, phy_irq_pin);
+
+    /* The daughter card's external pull-up keeps INT_N deasserted. */
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                  phy_irq_pin);
+    g_assert_false(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_ISR) &
+                   phy_irq_pin);
+
+    /* A masked link event latches, then immediately asserts when enabled. */
+    gem_mdio_write(qts, 1, 24, link_interrupts | BIT(9));
+    g_assert_false(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                   phy_irq_pin);
+    gem_mdio_write(qts, 1, 24, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                  phy_irq_pin);
+    gem_mdio_write(qts, 1, 24, 0xffff);
+    g_assert_cmphex(gem_mdio_read(qts, 1, 24), ==, 0x0fff);
+    g_assert_false(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                   phy_irq_pin);
+
+    /* Reset link-up status is clear-on-read and releases the line. */
+    g_assert_cmphex(gem_mdio_read(qts, 1, 27) & link_interrupts, ==,
+                    BIT(0));
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                  phy_irq_pin);
+    g_assert_cmphex(gem_mdio_read(qts, 1, 27) & link_interrupts, ==, 0);
+    qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_ISR);
+    gem_mdio_write(qts, 1, 24, link_interrupts | BIT(9));
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                  phy_irq_pin);
+
+    qtest_qmp_assert_success(qts,
+        "{'execute':'set_link','arguments':{"
+        "'name':'lan8841-test','up':false}}");
+    g_assert_false(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                   phy_irq_pin);
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_ISR) &
+                  phy_irq_pin);
+    g_assert_cmphex(gem_mdio_read(qts, 1, 27) & link_interrupts, ==,
+                    BIT(2));
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                  phy_irq_pin);
+
+    /* Repeating the same link state does not manufacture another edge. */
+    qtest_qmp_assert_success(qts,
+        "{'execute':'set_link','arguments':{"
+        "'name':'lan8841-test','up':false}}");
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                  phy_irq_pin);
+    g_assert_cmphex(gem_mdio_read(qts, 1, 27) & link_interrupts, ==, 0);
+
+    qtest_qmp_assert_success(qts,
+        "{'execute':'set_link','arguments':{"
+        "'name':'lan8841-test','up':true}}");
+    g_assert_false(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                   phy_irq_pin);
+    /* Masking releases INT_N without discarding the latched status. */
+    gem_mdio_write(qts, 1, 24, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                  phy_irq_pin);
+    g_assert_cmphex(gem_mdio_read(qts, 1, 27) & link_interrupts, ==,
+                    BIT(0));
+    gem_mdio_write(qts, 1, 24, link_interrupts | BIT(9));
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                  phy_irq_pin);
+
+    qtest_quit(qts);
+}
+
+static void test_gem_lan8841_interrupt_migration(void)
+{
+    const uint32_t phy_irq_pin = BIT(5);
+    const uint16_t link_interrupts = BIT(2) | BIT(0);
+    const char *args =
+        SAM9X75_MACHINE " -nic user,id=lan8841-migration";
+    QTestState *from = qtest_init(args);
+    QTestState *to = qtest_initf("%s -incoming defer", args);
+
+    pmc_write_pcr(from, 44, PMC_PCR_EN);
+    qtest_writel(from, SAM9X7_GMAC_BASE + GEM_NWCTRL, GEM_NWCTRL_MPE);
+    qtest_writel(from, SAM9X7_PIOD_BASE + PIO_PUDR, phy_irq_pin);
+    qtest_writel(from, SAM9X7_PIOD_BASE + PIO_AIMER, phy_irq_pin);
+    qtest_writel(from, SAM9X7_PIOD_BASE + PIO_LSR, phy_irq_pin);
+    qtest_writel(from, SAM9X7_PIOD_BASE + PIO_FELLSR, phy_irq_pin);
+    qtest_writel(from, SAM9X7_PIOD_BASE + PIO_IER, phy_irq_pin);
+    gem_mdio_read(from, 1, 27);
+    gem_mdio_write(from, 1, 24, link_interrupts);
+    qtest_qmp_assert_success(from,
+        "{'execute':'set_link','arguments':{"
+        "'name':'lan8841-migration','up':false}}");
+    g_assert_false(qtest_readl(from, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                   phy_irq_pin);
+
+    sam9x75_migrate(from, to);
+
+    g_assert_false(qtest_readl(to, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                   phy_irq_pin);
+    g_assert_cmphex(gem_mdio_read(to, 1, 27) & link_interrupts, ==,
+                    BIT(2));
+    g_assert_true(qtest_readl(to, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                  phy_irq_pin);
+
+    /* Exercise the first link transition after restoring client state. */
+    qtest_qmp_assert_success(to,
+        "{'execute':'set_link','arguments':{"
+        "'name':'lan8841-migration','up':true}}");
+    g_assert_false(qtest_readl(to, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                   phy_irq_pin);
+    g_assert_cmphex(gem_mdio_read(to, 1, 27) & link_interrupts, ==,
+                    BIT(0));
+    g_assert_true(qtest_readl(to, SAM9X7_PIOD_BASE + PIO_PDSR) &
+                  phy_irq_pin);
+
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
 static void gem_transmit_test_frame(QTestState *qts,
@@ -22661,6 +22805,10 @@ int main(int argc, char **argv)
                    test_aic_fiq_mask_and_write_protection);
     qtest_add_func("sam9x75/gem/registers-mdio-dma-and-irqs",
                    test_gem_registers_mdio_dma_and_irqs);
+    qtest_add_func("sam9x75/gem/lan8841-interrupt-line",
+                   test_gem_lan8841_interrupt_line);
+    qtest_add_func("sam9x75/gem/lan8841-interrupt-migration",
+                   test_gem_lan8841_interrupt_migration);
     qtest_add_func("sam9x75/gem/statistics-generated-and-clear",
                    test_gem_statistics_generated_and_clear);
     qtest_add_func("sam9x75/gem/statistics-test-controls",
