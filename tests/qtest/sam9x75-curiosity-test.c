@@ -1015,14 +1015,21 @@
 #define PMC_MCKR                0x28
 #define PMC_RESERVED_LEGACY_MCKR 0x30
 #define PMC_USB                 0x38
+#define PMC_PCK0                0x40
+#define PMC_PCK1                0x44
 #define PMC_IER                 0x60
 #define PMC_IDR                 0x64
 #define PMC_SR                  0x68
 #define PMC_WPMR                0x80
 #define PMC_WPSR                0x84
 #define PMC_PCR                 0x88
+#define PMC_CSR0                0xa0
 #define PMC_CSR1                0xa4
+#define PMC_GCSR0               0xc0
 #define PMC_GCSR1               0xc4
+#define PMC_PLL_IER             0xe0
+#define PMC_PLL_IDR             0xe4
+#define PMC_PLL_IMR             0xe8
 #define PMC_PLL_ISR0            0xec
 #define PMC_RESERVED_LEGACY_PCR 0x10c
 
@@ -1050,8 +1057,12 @@
 #define PMC_MCFR_CCSS           BIT(24)
 #define PMC_SR_MOSCXTS          BIT(0)
 #define PMC_SR_MCKRDY           BIT(3)
+#define PMC_SR_PCKRDY0          BIT(8)
+#define PMC_SR_PCKRDY1          BIT(9)
 #define PMC_SR_MOSCSELS         BIT(16)
 #define PMC_SR_MOSCRCS          BIT(17)
+#define PMC_SR_GCLKRDY          BIT(24)
+#define PMC_SR_PLL_INT          BIT(25)
 #define PMC_PCR_EN              BIT(28)
 #define PMC_PCR_GCKEN           BIT(29)
 #define PMC_PCR_CMD             BIT(31)
@@ -5366,10 +5377,22 @@ static void test_board_ethernet_clock_jumper(void)
 #endif
 }
 
+static void pmc_enable_main_xtal(QTestState *qts)
+{
+    uint32_t mor = qtest_readl(qts, SAM9X7_PMC_BASE + PMC_MOR);
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MOR,
+                 PMC_MOR_KEY | PMC_MOR_MOSCXTEN |
+                 (mor & ~PMC_MOR_ALWAYS_ONE));
+}
+
 static void pmc_configure_pll(QTestState *qts, unsigned int id)
 {
     uint32_t selector = id | (0x3fU << 16);
 
+    if (id >= 1 && id <= 3) {
+        pmc_enable_main_xtal(qts);
+    }
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT, selector);
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_ACR, 0x00020010);
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_CTRL1,
@@ -5387,6 +5410,7 @@ static void pmc_configure_audio_pll(QTestState *qts)
 {
     const uint32_t selector = 2 | (0x3fU << 16);
 
+    pmc_enable_main_xtal(qts);
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT, selector);
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_ACR, 0x00020010);
     /* 24 MHz * (3 + 1 + 0.096) = 98.304 MHz. */
@@ -5407,6 +5431,94 @@ static void pmc_write_pcr(QTestState *qts, unsigned int id, uint32_t config)
                  PMC_PCR_CMD | id | config);
 }
 
+static uint32_t pmc_read_pcr(QTestState *qts, unsigned int id)
+{
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PCR, id);
+    return qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PCR);
+}
+
+typedef struct PmcPidRange {
+    unsigned int first;
+    unsigned int last;
+} PmcPidRange;
+
+typedef struct PmcGclkCapability {
+    unsigned int first;
+    unsigned int last;
+    uint16_t sources;
+} PmcGclkCapability;
+
+#define PMC_NUM_PIDS                70
+#define PMC_GCLK_COMMON_SOURCES     0x010f
+
+static const PmcPidRange pmc_pclk_capabilities[] = {
+    { 2, 20 },
+    { 22, 26 },
+    { 28, 30 },
+    { 32, 45 },
+    { 47, 49 },
+    { 52, 54 },
+    { 56, 56 },
+    { 58, 59 },
+    { 67, 67 },
+};
+
+static const PmcGclkCapability pmc_gclk_capabilities[] = {
+    { 5, 11, PMC_GCLK_COMMON_SOURCES },
+    { 12, 12, PMC_GCLK_COMMON_SOURCES | BIT(6) },
+    { 13, 16, PMC_GCLK_COMMON_SOURCES },
+    { 17, 17, PMC_GCLK_COMMON_SOURCES | BIT(6) },
+    { 19, 19, PMC_GCLK_COMMON_SOURCES | BIT(5) },
+    { 24, 26, PMC_GCLK_COMMON_SOURCES | BIT(6) },
+    { 29, 30, PMC_GCLK_COMMON_SOURCES | BIT(5) },
+    { 32, 33, PMC_GCLK_COMMON_SOURCES },
+    { 34, 35, PMC_GCLK_COMMON_SOURCES | BIT(6) },
+    { 37, 37, PMC_GCLK_COMMON_SOURCES },
+    { 42, 42, PMC_GCLK_COMMON_SOURCES | BIT(6) },
+    { 45, 45, PMC_GCLK_COMMON_SOURCES | BIT(6) },
+    { 47, 47, PMC_GCLK_COMMON_SOURCES },
+    { 55, 55, PMC_GCLK_COMMON_SOURCES },
+    { 58, 58, PMC_GCLK_COMMON_SOURCES | BIT(6) },
+    { 67, 67, PMC_GCLK_COMMON_SOURCES | BIT(6) },
+};
+
+static bool pmc_pid_has_pclk(unsigned int pid)
+{
+    unsigned int i;
+
+    for (i = 0; i < G_N_ELEMENTS(pmc_pclk_capabilities); i++) {
+        if (pid >= pmc_pclk_capabilities[i].first &&
+            pid <= pmc_pclk_capabilities[i].last) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static uint16_t pmc_pid_gclk_sources(unsigned int pid)
+{
+    unsigned int i;
+
+    for (i = 0; i < G_N_ELEMENTS(pmc_gclk_capabilities); i++) {
+        if (pid >= pmc_gclk_capabilities[i].first &&
+            pid <= pmc_gclk_capabilities[i].last) {
+            return pmc_gclk_capabilities[i].sources;
+        }
+    }
+    return 0;
+}
+
+static void pmc_set_pll_ctrl0(QTestState *qts, unsigned int id,
+                              uint32_t ctrl0)
+{
+    uint32_t selector = id | (0x3fU << 16);
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT, selector);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_CTRL0, ctrl0);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT,
+                 selector | PMC_PLL_UPDT_UPDATE);
+}
+
 static void pmc_set_upll_acr(QTestState *qts, uint32_t acr)
 {
     const uint32_t selector = 1 | (0x3fU << 16);
@@ -5422,6 +5534,7 @@ static void pmc_enable_upll(QTestState *qts)
     const uint32_t selector = 1 | (0x3fU << 16);
 
     /* 24 MHz * (39 + 1), followed by UPLL's fixed /2 = 480 MHz. */
+    pmc_enable_main_xtal(qts);
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_UPDT, selector);
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_ACR,
                  PMC_UPLL_ACR_CONFIG);
@@ -5445,6 +5558,420 @@ static void pmc_configure_usb_host(QTestState *qts)
     qtest_writel(qts, SAM9X7_PMC_BASE + PMC_SCER, PMC_SC_UHP);
 }
 
+static void test_pmc_peripheral_clock_capabilities(void)
+{
+    const uint32_t pclk_status[] = { 0x77dffffc, 0x0873bfff };
+    const uint32_t gclk_status[] = { 0x670bffe0, 0x0480a42f };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t selected;
+    unsigned int pid;
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_CSR0), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_CSR1), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_GCSR0), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_GCSR1), ==, 0);
+
+    /* Exercise every PCR-addressable PID, including interrupt-only 68/69. */
+    for (pid = 0; pid < PMC_NUM_PIDS; pid++) {
+        g_autofree char *pclk_path =
+            g_strdup_printf("/machine/soc/pmc/pclk[%u]", pid);
+        g_autofree char *gclk_path =
+            g_strdup_printf("/machine/soc/pmc/gclk[%u]", pid);
+
+        pmc_write_pcr(qts, pid, PMC_PCR_EN | PMC_PCR_GCKEN);
+        g_assert_cmpint(get_clock_period(qts, pclk_path) != 0, ==,
+                        pmc_pid_has_pclk(pid));
+        g_assert_cmpint(get_clock_period(qts, gclk_path) != 0, ==,
+                        pmc_pid_gclk_sources(pid) != 0);
+    }
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_CSR0), ==,
+                    pclk_status[0]);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_CSR1), ==,
+                    pclk_status[1]);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_GCSR0), ==,
+                    gclk_status[0]);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_GCSR1), ==,
+                    gclk_status[1]);
+    g_assert_true(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SR) &
+                  PMC_SR_GCLKRDY);
+
+    /* Out-of-range selectors are ignored rather than aliasing a valid PID. */
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PCR, 69);
+    selected = PMC_PCR_EN | PMC_PCR_GCKEN | 69;
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PCR), ==,
+                    selected);
+    pmc_write_pcr(qts, 70, PMC_PCR_EN | PMC_PCR_GCKEN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PCR), ==,
+                    selected);
+    pmc_write_pcr(qts, 127, PMC_PCR_EN | PMC_PCR_GCKEN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PCR), ==,
+                    selected);
+
+    for (pid = 0; pid < PMC_NUM_PIDS; pid++) {
+        pmc_write_pcr(qts, pid, 0);
+    }
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_CSR0), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_CSR1), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_GCSR0), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_GCSR1), ==, 0);
+    g_assert_false(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SR) &
+                   PMC_SR_GCLKRDY);
+
+    qtest_quit(qts);
+}
+
+static void test_pmc_source_eligibility_and_plladiv2(void)
+{
+    static const struct {
+        unsigned int css;
+        bool eligible;
+    } pck_sources[] = {
+        { 0, true },
+        { 1, true },
+        { 2, true },
+        { 3, true },
+        { 4, true },
+        { 5, true },
+        { 6, true },
+        { 7, false },
+        { 8, false },
+        { 31, false },
+    };
+    static const unsigned int gclk_css[] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 31,
+    };
+    static const uint32_t pck_reg[] = { PMC_PCK0, PMC_PCK1 };
+    static const uint32_t pck_ready[] = {
+        PMC_SR_PCKRDY0, PMC_SR_PCKRDY1,
+    };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint64_t div2_period;
+    uint32_t value;
+    unsigned int i;
+    unsigned int pck;
+    unsigned int pid;
+
+    /* ID4 is a gate on PLLA's core/4, not an independent PLL. */
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MOR,
+                 PMC_MOR_KEY | PMC_MOR_MOSCXTEN | PMC_MOR_MOSCSEL);
+    pmc_write_pcr(qts, 5, PMC_PCR_GCKEN | (8U << 8));
+    g_assert_cmpuint(get_clock_period(qts,
+                                     "/machine/soc/pmc/gclk[5]"), ==, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SR) &
+                  PMC_SR_GCLKRDY);
+    pmc_set_pll_ctrl0(qts, 4, PMC_PLL_CTRL0_ENPLLCK);
+    g_assert_false(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_ISR0) &
+                   BIT(4));
+
+    pmc_configure_pll(qts, 0);
+    /* The DIV2 child needs ENPLL on ID0, but not ID0's output gate. */
+    pmc_set_pll_ctrl0(qts, 0, PMC_PLL_CTRL0_ENPLL);
+    value = qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_ISR0);
+    g_assert_cmphex(value & (BIT(0) | BIT(4)), ==, BIT(0) | BIT(4));
+    div2_period = get_clock_period(qts, "/machine/soc/pmc/gclk[5]");
+    g_assert_cmpuint(div2_period, ==, CLOCK_PERIOD_FROM_HZ(400000000));
+
+    /* ID4's ENPLL and DIVPMC fields have no effect on the fixed divider. */
+    pmc_set_pll_ctrl0(qts, 4, PMC_PLL_CTRL0_ENPLLCK |
+                      PMC_PLL_CTRL0_ENPLL | 0xff);
+    g_assert_true(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_CTRL0) &
+                  PMC_PLL_CTRL0_ENPLL);
+    g_assert_cmpuint(get_clock_period(qts,
+                                     "/machine/soc/pmc/gclk[5]"), ==,
+                     div2_period);
+
+    /* PLLADIV2 has LOCK4 for polling, but no interrupt mask bits. */
+    aic_configure(qts, 1, AIC_SMR_LEVEL_HIGH | 1, 0x01010101);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_IER, BIT(4) | BIT(20));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_IMR), ==, 0);
+    g_assert_false(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SR) &
+                   PMC_SR_PLL_INT);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(1));
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_IER, BIT(0));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_IMR), ==,
+                    BIT(0));
+    g_assert_true(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SR) &
+                  PMC_SR_PLL_INT);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(1));
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PLL_IDR, BIT(0));
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(1));
+
+    pmc_set_pll_ctrl0(qts, 4, PMC_PLL_CTRL0_ENPLL);
+    value = qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_ISR0);
+    g_assert_cmphex(value & (BIT(4) | BIT(20)), ==, 0);
+    g_assert_cmpuint(get_clock_period(qts,
+                                     "/machine/soc/pmc/gclk[5]"), ==, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SR) &
+                  PMC_SR_GCLKRDY);
+    pmc_set_pll_ctrl0(qts, 4, PMC_PLL_CTRL0_ENPLLCK);
+
+    pmc_set_pll_ctrl0(qts, 0, PMC_PLL_CTRL0_ENPLLCK);
+    value = qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_ISR0);
+    g_assert_cmphex(value & (BIT(4) | BIT(20)), ==, 0);
+    g_assert_cmpuint(get_clock_period(qts,
+                                     "/machine/soc/pmc/gclk[5]"), ==, 0);
+    pmc_set_pll_ctrl0(qts, 0, PMC_PLL_CTRL0_ENPLL);
+    g_assert_true(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_ISR0) &
+                  BIT(4));
+    g_assert_cmpuint(get_clock_period(qts,
+                                     "/machine/soc/pmc/gclk[5]"), ==,
+                     div2_period);
+
+    /* Losing PLLA's selected source also drops both dependent lock bits. */
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MOR, PMC_MOR_KEY);
+    value = qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_ISR0);
+    g_assert_cmphex(value & (BIT(0) | BIT(4)), ==, 0);
+    g_assert_cmpuint(get_clock_period(qts,
+                                     "/machine/soc/pmc/gclk[5]"), ==, 0);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MOR,
+                 PMC_MOR_KEY | PMC_MOR_MOSCXTEN | PMC_MOR_MOSCSEL);
+    value = qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_ISR0);
+    g_assert_cmphex(value & (BIT(0) | BIT(4)), ==, BIT(0) | BIT(4));
+    g_assert_cmpuint(get_clock_period(qts,
+                                     "/machine/soc/pmc/gclk[5]"), ==,
+                     div2_period);
+
+    /* PLLA's direct PCK source remains gated while its DIV2 child runs. */
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_PCK0, 4);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_SCER, BIT(8));
+    g_assert_cmpuint(get_clock_period(qts,
+                                     "/machine/soc/pmc/pck[0]"), ==, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SR) &
+                  PMC_SR_PCKRDY0);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_SCDR, BIT(8));
+    g_assert_false(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SR) &
+                   PMC_SR_PCKRDY0);
+
+    pmc_write_pcr(qts, 5, 0);
+    g_assert_false(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SR) &
+                   PMC_SR_GCLKRDY);
+
+    /* Make every real source live before checking the routing matrices. */
+    pmc_set_pll_ctrl0(qts, 0,
+                      PMC_PLL_CTRL0_ENPLL | PMC_PLL_CTRL0_ENPLLCK);
+    pmc_enable_upll(qts);
+    pmc_configure_audio_pll(qts);
+    pmc_configure_pll(qts, 3);
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_SCER, BIT(8) | BIT(9));
+    for (pck = 0; pck < G_N_ELEMENTS(pck_reg); pck++) {
+        g_autofree char *path =
+            g_strdup_printf("/machine/soc/pmc/pck[%u]", pck);
+        uint32_t ready = pck_ready[pck];
+
+        for (i = 0; i < G_N_ELEMENTS(pck_sources); i++) {
+            qtest_writel(qts, SAM9X7_PMC_BASE + pck_reg[pck],
+                         pck_sources[i].css);
+            g_assert_cmpint(get_clock_period(qts, path) != 0, ==,
+                            pck_sources[i].eligible);
+            /* SAM9X7's erratum makes ready follow only SCER/SCDR. */
+            g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SR) &
+                            ready, ==, ready);
+        }
+        qtest_writel(qts, SAM9X7_PMC_BASE + PMC_SCDR, BIT(8 + pck));
+        g_assert_cmpuint(get_clock_period(qts, path), ==, 0);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SR) &
+                        ready, ==, 0);
+    }
+
+    for (pid = 0; pid < PMC_NUM_PIDS; pid++) {
+        g_autofree char *path =
+            g_strdup_printf("/machine/soc/pmc/gclk[%u]", pid);
+        uint16_t sources = pmc_pid_gclk_sources(pid);
+
+        for (i = 0; i < G_N_ELEMENTS(gclk_css); i++) {
+            unsigned int css = gclk_css[i];
+            bool eligible = css < 16 && (sources & BIT(css));
+
+            pmc_write_pcr(qts, pid, PMC_PCR_GCKEN | (css << 8));
+            g_assert_cmpint(get_clock_period(qts, path) != 0, ==,
+                            eligible);
+            /* GCLKRDY follows a GCLK-capable PID plus GCKEN only. */
+            g_assert_cmpint(!!(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SR) &
+                               PMC_SR_GCLKRDY), ==, sources != 0);
+            pmc_write_pcr(qts, pid, 0);
+            g_assert_false(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SR) &
+                           PMC_SR_GCLKRDY);
+        }
+    }
+
+    qtest_quit(qts);
+}
+
+static void test_pmc_migration_and_reset(void)
+{
+    enum {
+        PMC_MIG_MAINCK,
+        PMC_MIG_MCK,
+        PMC_MIG_PCK0,
+        PMC_MIG_PCK1,
+        PMC_MIG_AUDIO_GCLK,
+        PMC_MIG_DIV2_GCLK,
+        PMC_MIG_INVALID_PCLK,
+        PMC_MIG_INVALID_GCLK,
+        PMC_MIG_NUM_CLOCKS,
+    };
+    static const struct {
+        unsigned int pid;
+        uint32_t config;
+    } pcr_config[] = {
+        { 12, PMC_PCR_GCKEN | (6U << 8) | (1U << 20) },
+        { 67, PMC_PCR_GCKEN | (8U << 8) | (3U << 20) },
+        { 21, PMC_PCR_EN | PMC_PCR_GCKEN |
+              (6U << 8) | (5U << 20) },
+    };
+    static const char * const clock_path[PMC_MIG_NUM_CLOCKS] = {
+        [PMC_MIG_MAINCK] = "/machine/soc/pmc/mainck",
+        [PMC_MIG_MCK] = "/machine/soc/pmc/mck",
+        [PMC_MIG_PCK0] = "/machine/soc/pmc/pck[0]",
+        [PMC_MIG_PCK1] = "/machine/soc/pmc/pck[1]",
+        [PMC_MIG_AUDIO_GCLK] = "/machine/soc/pmc/gclk[12]",
+        [PMC_MIG_DIV2_GCLK] = "/machine/soc/pmc/gclk[67]",
+        [PMC_MIG_INVALID_PCLK] = "/machine/soc/pmc/pclk[21]",
+        [PMC_MIG_INVALID_GCLK] = "/machine/soc/pmc/gclk[21]",
+    };
+    static const uint32_t state_reg[] = {
+        PMC_MOR,
+        PMC_MCKR,
+        PMC_PCK0,
+        PMC_PCK1,
+        PMC_SCSR,
+        PMC_SR,
+        PMC_CSR0,
+        PMC_CSR1,
+        PMC_GCSR0,
+        PMC_GCSR1,
+        PMC_PLL_UPDT,
+        PMC_PLL_IMR,
+        PMC_PLL_ISR0,
+    };
+    const uint32_t pck_config = 4 | (3U << 8);
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    uint64_t clock_period[PMC_MIG_NUM_CLOCKS];
+    uint32_t pcr_readback[G_N_ELEMENTS(pcr_config)];
+    uint32_t reg_value[G_N_ELEMENTS(state_reg)];
+    uint32_t selected_pcr;
+    uint32_t value;
+    unsigned int i;
+
+    qtest_writel(from, SAM9X7_PMC_BASE + PMC_MOR,
+                 PMC_MOR_KEY | PMC_MOR_MOSCXTEN | PMC_MOR_MOSCSEL);
+    pmc_configure_pll(from, 0);
+    pmc_configure_audio_pll(from);
+    pmc_set_pll_ctrl0(from, 4, PMC_PLL_CTRL0_ENPLLCK | 0x5a);
+
+    qtest_writel(from, SAM9X7_PMC_BASE + PMC_PCK0, pck_config);
+    qtest_writel(from, SAM9X7_PMC_BASE + PMC_SCER, BIT(8));
+    for (i = 0; i < G_N_ELEMENTS(pcr_config); i++) {
+        pmc_write_pcr(from, pcr_config[i].pid, pcr_config[i].config);
+    }
+    qtest_writel(from, SAM9X7_PMC_BASE + PMC_PLL_IER, BIT(0));
+
+    selected_pcr = qtest_readl(from, SAM9X7_PMC_BASE + PMC_PCR);
+    for (i = 0; i < G_N_ELEMENTS(pcr_config); i++) {
+        pcr_readback[i] = pmc_read_pcr(from, pcr_config[i].pid);
+        g_assert_cmphex(pcr_readback[i], ==,
+                        pcr_config[i].config | pcr_config[i].pid);
+    }
+    /* Leave the invalid PID selected so that selector state migrates too. */
+    g_assert_cmpuint(pcr_config[G_N_ELEMENTS(pcr_config) - 1].pid, ==, 21);
+    g_assert_cmphex(pmc_read_pcr(from, 21), ==, selected_pcr);
+
+    for (i = 0; i < PMC_MIG_NUM_CLOCKS; i++) {
+        clock_period[i] = get_clock_period(from, clock_path[i]);
+    }
+    g_assert_cmpuint(clock_period[PMC_MIG_MAINCK], ==,
+                     CLOCK_PERIOD_FROM_HZ(24000000));
+    g_assert_cmpuint(clock_period[PMC_MIG_MCK], ==,
+                     CLOCK_PERIOD_FROM_HZ(24000000));
+    g_assert_cmpuint(clock_period[PMC_MIG_PCK0], ==,
+                     CLOCK_PERIOD_FROM_HZ(200000000));
+    g_assert_cmpuint(clock_period[PMC_MIG_PCK1], ==, 0);
+    g_assert_cmpuint(clock_period[PMC_MIG_AUDIO_GCLK], !=, 0);
+    g_assert_cmpuint(clock_period[PMC_MIG_DIV2_GCLK], ==,
+                     CLOCK_PERIOD_FROM_HZ(100000000));
+    g_assert_cmpuint(clock_period[PMC_MIG_INVALID_PCLK], ==, 0);
+    g_assert_cmpuint(clock_period[PMC_MIG_INVALID_GCLK], ==, 0);
+
+    g_assert_cmphex(qtest_readl(from, SAM9X7_PMC_BASE + PMC_SCSR), ==,
+                    BIT(8));
+    value = qtest_readl(from, SAM9X7_PMC_BASE + PMC_SR);
+    g_assert_cmphex(value & (PMC_SR_PCKRDY0 | PMC_SR_PCKRDY1 |
+                             PMC_SR_GCLKRDY | PMC_SR_PLL_INT), ==,
+                    PMC_SR_PCKRDY0 | PMC_SR_GCLKRDY | PMC_SR_PLL_INT);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_PMC_BASE + PMC_CSR0), ==, 0);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_PMC_BASE + PMC_CSR1), ==, 0);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_PMC_BASE + PMC_GCSR0), ==,
+                    BIT(12));
+    g_assert_cmphex(qtest_readl(from, SAM9X7_PMC_BASE + PMC_GCSR1), ==, 0);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_PMC_BASE + PMC_PLL_IMR), ==,
+                    BIT(0));
+    g_assert_cmphex(qtest_readl(from, SAM9X7_PMC_BASE + PMC_PLL_ISR0), ==,
+                    BIT(0) | BIT(2) | BIT(4));
+
+    for (i = 0; i < G_N_ELEMENTS(state_reg); i++) {
+        reg_value[i] = qtest_readl(from,
+                                   SAM9X7_PMC_BASE + state_reg[i]);
+    }
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_PCR), ==,
+                    selected_pcr);
+    for (i = 0; i < G_N_ELEMENTS(pcr_config); i++) {
+        g_assert_cmphex(pmc_read_pcr(to, pcr_config[i].pid), ==,
+                        pcr_readback[i]);
+    }
+    for (i = 0; i < G_N_ELEMENTS(state_reg); i++) {
+        g_assert_cmphex(qtest_readl(to,
+                                   SAM9X7_PMC_BASE + state_reg[i]), ==,
+                        reg_value[i]);
+    }
+    for (i = 0; i < PMC_MIG_NUM_CLOCKS; i++) {
+        g_assert_cmpuint(get_clock_period(to, clock_path[i]), ==,
+                         clock_period[i]);
+    }
+
+    qtest_system_reset(to);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_MOR), ==,
+                    PMC_MOR_MOSCRCEN | PMC_MOR_ALWAYS_ONE);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_MCKR), ==, 1);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_SR), ==,
+                    0x00030008);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_SCSR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_PCK0), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_PCK1), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_CSR0), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_CSR1), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_GCSR0), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_GCSR1), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_PLL_UPDT), ==,
+                    3U << 16);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_PLL_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_PLL_ISR0), ==,
+                    0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_PCR), ==, 0);
+    for (i = 0; i < G_N_ELEMENTS(pcr_config); i++) {
+        g_assert_cmphex(pmc_read_pcr(to, pcr_config[i].pid), ==,
+                        pcr_config[i].pid);
+    }
+    g_assert_cmpuint(get_clock_period(to, clock_path[PMC_MIG_MAINCK]), ==,
+                     CLOCK_PERIOD_FROM_HZ(12000000));
+    g_assert_cmpuint(get_clock_period(to, clock_path[PMC_MIG_MCK]), ==,
+                     CLOCK_PERIOD_FROM_HZ(12000000));
+    for (i = PMC_MIG_PCK0; i < PMC_MIG_NUM_CLOCKS; i++) {
+        g_assert_cmpuint(get_clock_period(to, clock_path[i]), ==, 0);
+    }
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
 static void test_pmc_clock_tree_and_protection(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -5454,8 +5981,7 @@ static void test_pmc_clock_tree_and_protection(void)
                     PMC_MOR_MOSCRCEN | PMC_MOR_ALWAYS_ONE);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_MCKR), ==, 1);
     value = qtest_readl(qts, SAM9X7_PMC_BASE + PMC_SR);
-    g_assert_cmphex(value & (PMC_SR_MCKRDY | PMC_SR_MOSCRCS), ==,
-                    PMC_SR_MCKRDY | PMC_SR_MOSCRCS);
+    g_assert_cmphex(value, ==, 0x00030008);
     g_assert_cmpuint(get_clock_period(qts, "/machine/soc/pmc/mainck"), ==,
                      CLOCK_PERIOD_FROM_HZ(12000000));
     g_assert_cmpuint(get_clock_period(qts, "/machine/soc/pmc/mck"), ==,
@@ -5465,6 +5991,12 @@ static void test_pmc_clock_tree_and_protection(void)
     g_assert_false(value & PMC_MCFR_RCMEAS);
     g_assert_cmphex(value & 0xffff, ==,
                     (12000000ULL * 16 / 32000) & 0xffff);
+
+    /* Reserved bit 1 and write-only ULP1 bit 2 do not read back. */
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MOR,
+                 PMC_MOR_KEY | PMC_MOR_MOSCRCEN | BIT(1) | BIT(2));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_MOR), ==,
+                    PMC_MOR_MOSCRCEN | PMC_MOR_ALWAYS_ONE);
 
     g_assert_cmphex(qtest_readl(qts, SAM9X7_PMC_BASE + PMC_PLL_ACR), ==,
                     PMC_PLL_ACR_RESET);
@@ -20605,6 +21137,12 @@ int main(int argc, char **argv)
                    test_pac1934_i2c_jumpers);
     qtest_add_func("sam9x75/pmc/clock-tree-and-protection",
                    test_pmc_clock_tree_and_protection);
+    qtest_add_func("sam9x75/pmc/peripheral-clock-capabilities",
+                   test_pmc_peripheral_clock_capabilities);
+    qtest_add_func("sam9x75/pmc/source-eligibility-and-plladiv2",
+                   test_pmc_source_eligibility_and_plladiv2);
+    qtest_add_func("sam9x75/pmc/migration-and-reset",
+                   test_pmc_migration_and_reset);
     qtest_add_func("sam9x75/pio/reset-gpio-mux-and-protection",
                    test_pio_reset_gpio_mux_and_protection);
     qtest_add_func("sam9x75/pio/interrupt-filter-and-clock-gating",

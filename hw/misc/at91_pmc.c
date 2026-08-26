@@ -80,13 +80,12 @@
 #define PMC_PLL_UPDT_STUPTIM_MASK   0x003f0000
 
 #define PMC_MOR_MOSCXTEN            BIT(0)
-#define PMC_MOR_MOSCXTBY            BIT(1)
 #define PMC_MOR_MOSCRCEN            BIT(3)
 #define PMC_MOR_KEY_MASK            0x00ff0000
 #define PMC_MOR_KEY                 0x00370000
 #define PMC_MOR_MOSCSEL             BIT(24)
 #define PMC_MOR_ALWAYS_ONE          BIT(5)
-#define PMC_MOR_MASK                0x6700ff0f
+#define PMC_MOR_MASK                0x6700ff09
 
 #define PMC_MCFR_MAINF_MASK         0x0000ffff
 #define PMC_MCFR_MAINRDY            BIT(16)
@@ -142,10 +141,13 @@
                                      PMC_PCR_GCKDIV_MASK | \
                                      PMC_PCR_EN | PMC_PCR_GCKEN)
 
-/* Bit 4 is used by the SAM9X7 bootstrap when it configures PLLADIV2. */
-#define PMC_PLL_LOCK_MASK           0x0000001f
-#define PMC_PLL_UNLOCK_MASK         0x001f0000
-#define PMC_PLL_EVENT_MASK          (PMC_PLL_LOCK_MASK | PMC_PLL_UNLOCK_MASK)
+/* Bit 4 is polled by SAM9X7 software when it enables PLLADIV2. */
+#define PMC_PLL_STATUS_LOCK_MASK    0x0000001f
+#define PMC_PLL_STATUS_UNLOCK_MASK  0x000f0000
+#define PMC_PLL_STATUS_EVENT_MASK   (PMC_PLL_STATUS_LOCK_MASK | \
+                                     PMC_PLL_STATUS_UNLOCK_MASK)
+/* Only PLLs 0..3 have interrupt enable/mask bits in the SAM9X75 PMC. */
+#define PMC_PLL_IRQ_MASK            0x000f000f
 
 enum {
     PMC_PLLA,
@@ -154,6 +156,70 @@ enum {
     PMC_LVDS_PLL,
     PMC_PLLA_DIV2,
 };
+
+#define PMC_GCK_COMMON_SOURCES      0x000f
+
+static bool at91_pmc_has_pclk(unsigned int id)
+{
+    switch (id) {
+    case 2 ... 20:
+    case 22 ... 26:
+    case 28 ... 30:
+    case 32 ... 45:
+    case 47 ... 49:
+    case 52 ... 54:
+    case 56:
+    case 58 ... 59:
+    case 67:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static uint16_t at91_pmc_gck_sources(unsigned int id)
+{
+    uint16_t sources = PMC_GCK_COMMON_SOURCES | BIT(8);
+
+    switch (id) {
+    case 5 ... 17:
+    case 24 ... 26:
+    case 29 ... 30:
+    case 32 ... 35:
+    case 37:
+    case 42:
+    case 45:
+    case 47:
+    case 55:
+    case 58:
+    case 67:
+        break;
+    case 19:
+        return sources | BIT(5);
+    default:
+        return 0;
+    }
+
+    switch (id) {
+    case 12:
+    case 17:
+    case 24 ... 26:
+    case 34 ... 35:
+    case 42:
+    case 45:
+    case 58:
+    case 67:
+        sources |= BIT(6);
+        break;
+    case 29 ... 30:
+        sources |= BIT(5);
+        break;
+    default:
+        break;
+    }
+
+    return sources;
+}
 
 static unsigned at91_pmc_clamp_hz(uint64_t hz)
 {
@@ -179,7 +245,8 @@ static uint64_t at91_pmc_pll_core_hz(AT91PMCState *s, unsigned int id)
     if (id == PMC_PLLA) {
         parent_hz = clock_get_hz(s->mainck);
     } else {
-        parent_hz = clock_get_hz(s->main_xtal);
+        parent_hz = (s->mor & PMC_MOR_MOSCXTEN) ?
+                    clock_get_hz(s->main_xtal) : 0;
     }
 
     frac_hz = (parent_hz * frac) >> 22;
@@ -192,9 +259,17 @@ static uint64_t at91_pmc_pll_hz(AT91PMCState *s, unsigned int id)
     uint64_t core_hz;
     unsigned int div;
 
-    if (!(ctrl0 & PMC_PLL_CTRL0_ENPLL) ||
-        !(ctrl0 & PMC_PLL_CTRL0_ENPLLCK)) {
-        return 0;
+    if (id == PMC_PLLA_DIV2) {
+        /* ID4 is a gated divider fed directly by the PLLA core. */
+        if (!(ctrl0 & PMC_PLL_CTRL0_ENPLLCK) ||
+            !(s->active_pll_ctrl0[PMC_PLLA] & PMC_PLL_CTRL0_ENPLL)) {
+            return 0;
+        }
+    } else {
+        if (!(ctrl0 & PMC_PLL_CTRL0_ENPLL) ||
+            !(ctrl0 & PMC_PLL_CTRL0_ENPLLCK)) {
+            return 0;
+        }
     }
 
     div = (ctrl0 & PMC_PLL_CTRL0_DIVPMC_MASK) + 1;
@@ -211,15 +286,15 @@ static uint64_t at91_pmc_pll_hz(AT91PMCState *s, unsigned int id)
     case PMC_LVDS_PLL:
         return core_hz / div;
     case PMC_PLLA_DIV2:
-        /* PLLA core divide-by-two followed by the DIV2 clock divider. */
-        return core_hz / (4 * div);
+        /* PLLA's fixed divide-by-two followed by PLLADIV2's fixed /2. */
+        return core_hz / 4;
     default:
         g_assert_not_reached();
     }
 }
 
-static uint64_t at91_pmc_gck_source_hz(AT91PMCState *s, unsigned int css,
-                                        const uint64_t pll_hz[])
+static uint64_t at91_pmc_source_hz(AT91PMCState *s, unsigned int css,
+                                   const uint64_t pll_hz[])
 {
     switch (css) {
     case 0:
@@ -245,6 +320,22 @@ static uint64_t at91_pmc_gck_source_hz(AT91PMCState *s, unsigned int css,
     }
 }
 
+static uint64_t at91_pmc_pck_source_hz(AT91PMCState *s, unsigned int css,
+                                       const uint64_t pll_hz[])
+{
+    return css <= 6 ? at91_pmc_source_hz(s, css, pll_hz) : 0;
+}
+
+static uint64_t at91_pmc_gck_source_hz(AT91PMCState *s, unsigned int id,
+                                       unsigned int css,
+                                       const uint64_t pll_hz[])
+{
+    uint16_t sources = at91_pmc_gck_sources(id);
+
+    return css < 16 && (sources & BIT(css)) ?
+           at91_pmc_source_hz(s, css, pll_hz) : 0;
+}
+
 static void at91_pmc_update_clocks(AT91PMCState *s)
 {
     static const unsigned int pres_div[] = { 1, 2, 4, 8, 16, 32, 64, 3 };
@@ -259,7 +350,7 @@ static void at91_pmc_update_clocks(AT91PMCState *s)
     unsigned int div;
 
     if ((s->mor & PMC_MOR_MOSCSEL) &&
-        (s->mor & (PMC_MOR_MOSCXTEN | PMC_MOR_MOSCXTBY))) {
+        (s->mor & PMC_MOR_MOSCXTEN)) {
         main_hz = clock_get_hz(s->main_xtal);
     } else if (s->mor & PMC_MOR_MOSCRCEN) {
         main_hz = 12000000;
@@ -329,7 +420,7 @@ static void at91_pmc_update_clocks(AT91PMCState *s)
     for (i = 0; i < AT91_PMC_NUM_PCKS; i++) {
         css = s->pck_reg[i] & 0x1f;
         div = extract32(s->pck_reg[i], 8, 8) + 1;
-        source_hz = at91_pmc_gck_source_hz(s, css, pll_hz);
+        source_hz = at91_pmc_pck_source_hz(s, css, pll_hz);
         if (!(s->scsr & BIT(i + 8))) {
             source_hz = 0;
         }
@@ -340,12 +431,13 @@ static void at91_pmc_update_clocks(AT91PMCState *s)
     for (i = 0; i < AT91_PMC_NUM_PIDS; i++) {
         uint32_t pcr = s->pcr[i];
 
-        source_hz = (pcr & PMC_PCR_EN) ? mck_hz : 0;
+        source_hz = (at91_pmc_has_pclk(i) &&
+                     (pcr & PMC_PCR_EN)) ? mck_hz : 0;
         clock_update_hz(s->pclk[i], at91_pmc_clamp_hz(source_hz));
 
         css = extract32(pcr, 8, 5);
         div = extract32(pcr, 20, 8) + 1;
-        source_hz = at91_pmc_gck_source_hz(s, css, pll_hz);
+        source_hz = at91_pmc_gck_source_hz(s, i, css, pll_hz);
         if (!(pcr & PMC_PCR_GCKEN)) {
             source_hz = 0;
         }
@@ -369,7 +461,7 @@ static void at91_pmc_measure_main(AT91PMCState *s)
     uint64_t mainf;
 
     if (s->mcfr & PMC_MCFR_CCSS) {
-        if (!(s->mor & (PMC_MOR_MOSCXTEN | PMC_MOR_MOSCXTBY))) {
+        if (!(s->mor & PMC_MOR_MOSCXTEN)) {
             return;
         }
         source_hz = clock_get_hz(s->main_xtal);
@@ -394,34 +486,42 @@ static void at91_pmc_measure_main(AT91PMCState *s)
 static uint32_t at91_pmc_get_sr(AT91PMCState *s)
 {
     uint32_t sr = 0;
+    bool any_gclk = false;
     unsigned int i;
 
-    if ((s->mor & (PMC_MOR_MOSCXTEN | PMC_MOR_MOSCXTBY)) &&
+    if ((s->mor & PMC_MOR_MOSCXTEN) &&
         clock_get_hz(s->main_xtal)) {
         sr |= PMC_SR_MOSCXTS;
     }
     if (clock_get_hz(s->mck)) {
         sr |= PMC_SR_MCKRDY;
     }
-    if (clock_get_hz(s->pck[0])) {
-        sr |= PMC_SR_PCKRDY0;
+    for (i = 0; i < AT91_PMC_NUM_PCKS; i++) {
+        /* DS80001082H 5.3: ready follows enable, not source/rate. */
+        if (s->scsr & BIT(i + 8)) {
+            sr |= PMC_SR_PCKRDY0 << i;
+        }
     }
-    if (clock_get_hz(s->pck[1])) {
-        sr |= PMC_SR_PCKRDY1;
-    }
-    if ((s->mor & PMC_MOR_MOSCSEL) && (sr & PMC_SR_MOSCXTS)) {
+    if (((s->mor & PMC_MOR_MOSCSEL) && (sr & PMC_SR_MOSCXTS)) ||
+        (!(s->mor & PMC_MOR_MOSCSEL) &&
+         (s->mor & PMC_MOR_MOSCRCEN))) {
         sr |= PMC_SR_MOSCSELS;
     }
     if (s->mor & PMC_MOR_MOSCRCEN) {
         sr |= PMC_SR_MOSCRCS;
     }
+    /* GCLKRDY has the same enable-only behavior under the erratum. */
     for (i = 0; i < AT91_PMC_NUM_PIDS; i++) {
-        if (clock_get_hz(s->gclk[i])) {
-            sr |= PMC_SR_GCLKRDY;
+        if (at91_pmc_gck_sources(i) &&
+            (s->pcr[i] & PMC_PCR_GCKEN)) {
+            any_gclk = true;
             break;
         }
     }
-    if (s->pll_isr0 & s->pll_imr & PMC_PLL_EVENT_MASK) {
+    if (any_gclk) {
+        sr |= PMC_SR_GCLKRDY;
+    }
+    if (s->pll_isr0 & s->pll_imr & PMC_PLL_IRQ_MASK) {
         sr |= PMC_SR_PLL_INT;
     }
 
@@ -432,38 +532,63 @@ static void at91_pmc_update_irq(AT91PMCState *s)
 {
     uint32_t sr = at91_pmc_get_sr(s);
     bool normal_irq = sr & s->imr & ~PMC_SR_PLL_INT;
-    bool pll_irq = s->pll_isr0 & s->pll_imr & PMC_PLL_EVENT_MASK;
+    bool pll_irq = s->pll_isr0 & s->pll_imr & PMC_PLL_IRQ_MASK;
 
     /* PLL_INT is affected by the documented SAM9X7 enable-bit erratum. */
     qemu_set_irq(s->irq, normal_irq || pll_irq);
 }
 
-static void at91_pmc_apply_pll(AT91PMCState *s)
+static void at91_pmc_update_pll_status(AT91PMCState *s, unsigned int id)
 {
-    unsigned int id = s->pll_updt & PMC_PLL_UPDT_ID_MASK;
-    bool was_locked;
+    bool was_locked = s->pll_isr0 & BIT(id);
     bool locked;
 
-    if (id >= AT91_PMC_NUM_PLLS) {
-        return;
+    if (id == PMC_PLLA_DIV2) {
+        locked = (s->active_pll_ctrl0[id] & PMC_PLL_CTRL0_ENPLLCK) &&
+                 (s->active_pll_ctrl0[PMC_PLLA] & PMC_PLL_CTRL0_ENPLL) &&
+                 at91_pmc_pll_core_hz(s, PMC_PLLA);
+    } else {
+        locked = (s->active_pll_ctrl0[id] & PMC_PLL_CTRL0_ENPLL) &&
+                 at91_pmc_pll_core_hz(s, id);
     }
 
-    was_locked = s->pll_isr0 & BIT(id);
-    s->active_pll_ctrl0[id] = s->pll_ctrl0[id];
-    s->active_pll_ctrl1[id] = s->pll_ctrl1[id];
-    s->active_pll_ssr[id] = s->pll_ssr[id];
-    s->active_pll_acr[id] = s->pll_acr[id];
-
-    locked = (s->active_pll_ctrl0[id] & PMC_PLL_CTRL0_ENPLL) &&
-             at91_pmc_pll_core_hz(s, id);
     if (locked) {
         s->pll_isr0 |= BIT(id);
         s->pll_isr0 &= ~BIT(id + 16);
     } else {
         s->pll_isr0 &= ~BIT(id);
-        if (was_locked) {
+        if (was_locked && id != PMC_PLLA_DIV2) {
             s->pll_isr0 |= BIT(id + 16);
         }
+    }
+}
+
+static void at91_pmc_update_all_pll_status(AT91PMCState *s)
+{
+    unsigned int id;
+
+    for (id = 0; id < AT91_PMC_NUM_PLLS; id++) {
+        at91_pmc_update_pll_status(s, id);
+    }
+}
+
+static void at91_pmc_apply_pll(AT91PMCState *s)
+{
+    unsigned int id = s->pll_updt & PMC_PLL_UPDT_ID_MASK;
+
+    if (id >= AT91_PMC_NUM_PLLS) {
+        return;
+    }
+
+    s->active_pll_ctrl0[id] = s->pll_ctrl0[id];
+    s->active_pll_ctrl1[id] = s->pll_ctrl1[id];
+    s->active_pll_ssr[id] = s->pll_ssr[id];
+    s->active_pll_acr[id] = s->pll_acr[id];
+
+    at91_pmc_update_pll_status(s, id);
+    if (id == PMC_PLLA) {
+        /* PLLADIV2's status follows its PLLA parent as well as its gate. */
+        at91_pmc_update_pll_status(s, PMC_PLLA_DIV2);
     }
 
     at91_pmc_update_clocks(s);
@@ -473,13 +598,27 @@ static void at91_pmc_apply_pll(AT91PMCState *s)
 static uint32_t at91_pmc_clock_status(AT91PMCState *s, bool generic,
                                       unsigned int word)
 {
+    static const uint32_t pclk_status_mask[] = {
+        0x77dffffc,
+        0x087bbfff,
+    };
+    static const uint32_t gclk_status_mask[] = {
+        0x670bffe0,
+        0x0480a42f,
+    };
+    const uint32_t *defined = generic ? gclk_status_mask :
+                                        pclk_status_mask;
     uint32_t status = 0;
     unsigned int first = word * 32;
     unsigned int last = MIN(first + 32, AT91_PMC_NUM_PIDS);
     unsigned int i;
 
     for (i = first; i < last; i++) {
-        if (s->pcr[i] & (generic ? PMC_PCR_GCKEN : PMC_PCR_EN)) {
+        bool available = generic ? at91_pmc_gck_sources(i) :
+                                   at91_pmc_has_pclk(i);
+
+        if (available && (defined[word] & BIT(i - first)) &&
+            (s->pcr[i] & (generic ? PMC_PCR_GCKEN : PMC_PCR_EN))) {
             status |= BIT(i - first);
         }
     }
@@ -588,7 +727,7 @@ static uint64_t at91_pmc_read(void *opaque, hwaddr offset, unsigned int size)
     case PMC_PLL_IMR:
         return s->pll_imr;
     case PMC_PLL_ISR0:
-        return s->pll_isr0;
+        return s->pll_isr0 & PMC_PLL_STATUS_EVENT_MASK;
     case PMC_PLL_ISR1:
         return s->pll_isr1;
     case PMC_SCER:
@@ -661,6 +800,7 @@ static void at91_pmc_write(void *opaque, hwaddr offset, uint64_t value,
         if ((value & PMC_MOR_KEY_MASK) == PMC_MOR_KEY) {
             s->mor = value & PMC_MOR_MASK & ~PMC_MOR_KEY_MASK;
             at91_pmc_update_clocks(s);
+            at91_pmc_update_all_pll_status(s);
             /* Stable oscillators and MAINCK changes trigger a measurement. */
             at91_pmc_measure_main(s);
         }
@@ -688,7 +828,8 @@ static void at91_pmc_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case PMC_PCK0:
     case PMC_PCK1:
-        s->pck_reg[(offset - PMC_PCK0) / 4] = value & PMC_PCK_MASK;
+        id = (offset - PMC_PCK0) / 4;
+        s->pck_reg[id] = value & PMC_PCK_MASK;
         at91_pmc_update_clocks(s);
         break;
     case PMC_IER:
@@ -728,10 +869,10 @@ static void at91_pmc_write(void *opaque, hwaddr offset, uint64_t value,
         s->mcklim = value & 0x0000ffff;
         break;
     case PMC_PLL_IER:
-        s->pll_imr |= value & PMC_PLL_EVENT_MASK;
+        s->pll_imr |= value & PMC_PLL_IRQ_MASK;
         break;
     case PMC_PLL_IDR:
-        s->pll_imr &= ~(value & PMC_PLL_EVENT_MASK);
+        s->pll_imr &= ~(value & PMC_PLL_IRQ_MASK);
         break;
     case PMC_SCSR:
     case PMC_SR:
@@ -773,6 +914,7 @@ static void at91_pmc_clock_changed(void *opaque, ClockEvent event)
     AT91PMCState *s = AT91_PMC(opaque);
 
     at91_pmc_update_clocks(s);
+    at91_pmc_update_all_pll_status(s);
     at91_pmc_update_irq(s);
 }
 
@@ -876,7 +1018,15 @@ static int at91_pmc_post_load(void *opaque, int version_id)
 {
     AT91PMCState *s = AT91_PMC(opaque);
 
+    if (s->selected_pid >= AT91_PMC_NUM_PIDS) {
+        return -EINVAL;
+    }
+    s->mor &= PMC_MOR_MASK;
+    s->pll_imr &= PMC_PLL_IRQ_MASK;
+    s->pll_isr0 &= PMC_PLL_STATUS_EVENT_MASK;
+
     at91_pmc_update_clocks(s);
+    at91_pmc_update_all_pll_status(s);
     at91_pmc_update_irq(s);
     return 0;
 }
