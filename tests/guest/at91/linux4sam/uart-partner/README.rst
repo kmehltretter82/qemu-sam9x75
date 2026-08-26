@@ -86,6 +86,71 @@ The process exits nonzero on a framing, CRC, payload, direction, sequence or
 timeout failure.  Use ``peer --sessions 2`` and restart the guest exerciser
 after a reset to require two complete, separately identified sessions.
 
+QEMU USB-serial consumer
+------------------------
+
+The same fixture can drive QEMU's FT232BM-compatible ``usb-serial`` device.
+This is a protocol-aware external consumer for the SAM9X75 UHPHS host: the
+Linux4Microchip 2026.04 guest enumerates the full-speed device through the
+OHCI companion, binds ``ftdi_sio`` and exposes ``/dev/ttyUSB0``.  No device
+tree change is needed.
+
+From the QEMU source directory, prepare a disposable payload directory and
+start the peer in a separate terminal.  Keep the socket and JSON report on a
+disk-backed path::
+
+  USB_SERIAL_DIR="$PWD/t/usb-serial"
+  USB_SERIAL_SOCKET="$USB_SERIAL_DIR/usbserial.sock"
+  PAYLOAD_DIR="$USB_SERIAL_DIR/payload"
+  mkdir -p "$PAYLOAD_DIR"
+  cp tests/guest/at91/linux4sam/uart-partner/sam9x75_uart_partner.py \
+      "$PAYLOAD_DIR/"
+  python3 tests/guest/at91/linux4sam/uart-partner/sam9x75_uart_partner.py \
+      peer --unix-listen "$USB_SERIAL_SOCKET" --timeout 900 --progress \
+      --json "$USB_SERIAL_DIR/usbserial-peer.json"
+
+Add these arguments to the normal Linux4SAM firmware and SD-image launch.
+Port 1 supplies the script to the guest; the full-speed serial adapter on
+port 2 is automatically routed to the OHCI companion of ``usb-bus.0``::
+
+  -drive file=fat:rw:"$PAYLOAD_DIR",if=none,id=payload,format=raw \
+  -device usb-storage,id=payload,bus=usb-bus.0,port=1,drive=payload \
+  -chardev socket,id=usbser,path="$USB_SERIAL_SOCKET",server=off,reconnect-ms=1000 \
+  -device usb-serial,id=usbserial,bus=usb-bus.0,port=2,chardev=usbser,serial=SAM9X75FTDI
+
+With an ``init=/bin/sh`` Linux4SAM boot, mount the pseudo-filesystems and FAT
+payload, then run the guest endpoint::
+
+  mount -t proc proc /proc
+  mount -t sysfs sysfs /sys
+  mkdir -p /mnt/payload
+  mount -t vfat -o ro /dev/sda1 /mnt/payload
+  test -c /dev/ttyUSB0
+  lsusb -t
+  dmesg | grep -E 'FTDI|ttyUSB|QEMU USB SERIAL'
+  python3 /mnt/payload/sam9x75_uart_partner.py guest \
+      --device /dev/ttyUSB0 --timeout 600 --progress \
+      --json /tmp/sam9x75-usbserial-guest.json
+
+The exact Linux4Microchip 2026.04 gate completed TAP plan ``1..7`` without a
+failure at either endpoint.  Six exercised checks passed and the unrequested
+migration-barrier check was skipped.  The run covered 27 boundary frames in
+each direction, 210,478 received wire bytes per endpoint, and reported no
+framing, CRC, payload, sequence or timeout error.  ``lsusb -t`` showed
+``ftdi_sio`` at 12 Mbit/s.
+
+By default the peer exits and closes its AF_UNIX socket after the requested
+session count.  QEMU's ``usb-serial`` defaults to ``always-plugged=off``, so a
+closed chardev detaches the adapter and ``ttyUSB0`` may disappear immediately
+after successful TAP completion.  Treat the six exercised checks as the
+data-path result.  A disconnect or re-enumeration gate must deliberately keep
+or replace the peer connection and assert the corresponding Linux hotplug
+events.
+``always-plugged=on`` can retain the USB device when the peer closes, but it
+deliberately hides that detach event.  The generic QEMU ``usb-serial`` device
+is unmigratable, so the migration barrier below does not apply to this
+topology.
+
 Migration barrier
 -----------------
 

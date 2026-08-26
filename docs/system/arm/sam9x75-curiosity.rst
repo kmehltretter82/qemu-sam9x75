@@ -914,10 +914,36 @@ such as ``vcan0``::
     -nographic
 
 USB keyboard, storage and other standard QEMU USB devices can attach to the
-UHPHS host ports.  UDPHS is present, but a cable is not created automatically
-and QEMU does not yet expose it directly to a physical host.  For controller
-development, its raw-token bridge can be linked to an emulated USB host bus;
-this loopback example attaches it to UHPHS Port B::
+UHPHS host ports.  For an ext4 mass-storage test with the exact
+Linux4Microchip 2026.04 root filesystem, create and format a *disposable* raw
+image on the host::
+
+  USB_DISK="$PWD/sam9x75-usb-stress.raw"
+  qemu-img create -f raw "$USB_DISK" 128M
+  mke2fs -t ext4 -F -L SAM9USB "$USB_DISK"
+
+The Linux4Microchip image's BusyBox supplies neither ``mkfs.ext4`` nor an
+``mke2fs`` that accepts ``-t ext4``; host-side formatting is therefore
+required for this ext4 gate.  Attach the unpartitioned filesystem with::
+
+  -drive file="$USB_DISK",if=none,id=usbstress,format=raw \
+  -device usb-storage,id=usbstress,bus=usb-bus.0,port=1,drive=usbstress
+
+After checking the device name, the exact single-device topology can be
+mounted in Linux with ``mkdir -p /mnt/usb`` followed by
+``mount -t ext4 /dev/sda /mnt/usb``.  Unmount it cleanly before QEMU exits;
+because that root filesystem also lacks ``e2fsck``, run
+``e2fsck -fn "$USB_DISK"`` on the host only after the guest and QEMU have
+released the image.  Never use the boot image or a unique disk image as this
+disposable stress target.  A normal RAM/device migration does not transfer
+this raw backing file; arrange coordinated shared storage or explicit block
+migration before testing migration with a writable USB disk.  UHPHS accesses
+guest memory as a USB bus master; its traffic does not traverse XDMAC.
+
+UDPHS is present, but a cable is not created automatically and QEMU does not
+yet expose it directly to a physical host.  For controller development, its
+raw-token bridge can be linked to an emulated USB host bus; this loopback
+example attaches it to UHPHS Port B::
 
   qemu-system-arm \
     -M sam9x75-curiosity \
