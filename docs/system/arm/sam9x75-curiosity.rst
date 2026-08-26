@@ -373,14 +373,40 @@ Support matrix
        ``-d unimp,guest_errors`` logs.  The error cases execute
        AT91Bootstrap's syndrome expansion, Berlekamp-Massey processing,
        PMERRLOC programming and Chien search, and data-bit correction.
-       Ready/busy timing and pin signaling, the additional redundant parameter
-       pages, PMECC spare-area (``SPAREEN``) and manual ``USER`` phases,
-       PMECC/PMERRLOC timing and clock-gating fidelity, complete bad-block/OOB
-       behavior, unique-ID, Read Status Enhanced, cache, copyback, interleaved,
-       two-plane, protection, recovery-read and randomizer command effects,
-       I/O-strength and randomizer default-fuse programming,
-       invalid-feature-address readback, page-program order/NOP/endurance
-       constraints, storage-error handling and DMA remain missing.
+       Read, parameter-page, Get/Set Features, program, erase and reset
+       operations complete asynchronously on the virtual clock.  The model uses
+       the MX30LF4G28AD data-sheet maximum intervals: 25 us for reads, 1 us for
+       Get/Set Features, 700 us for ordinary program, 740 us when ``RANDEN`` is
+       set, and 6 ms for erase.  Reset takes 5 us while idle or when
+       interrupting a read or feature operation, 10 us when interrupting
+       program, and 500 us when interrupting erase.  Status
+       ready bits 5 and 6 stay clear until completion.  Program and erase media
+       changes are deferred until their timer expires and become model-visible
+       at completion.  ``70h`` Status and ``FFh`` Reset remain available while
+       busy.  ``78h`` Enhanced Status consumes three row cycles and selects the
+       single-plane program/erase result through row bit 6; ready bits 5 and 6
+       are shared across both planes.  As on the device, ``78h`` is rejected
+       during Reset.  Other command, address and data cycles are ignored while
+       busy.  Pending operations, captured addresses, status protocol and timer
+       deadlines migrate without a ready-line pulse.  On Curiosity, U5 R/B# and
+       its R32 pull-up form a resolved active-high ready signal on PIOD14,
+       matching the board device tree's ``GPIO_ACTIVE_HIGH`` ready GPIO.
+
+       The delays are fixed data-sheet maxima and have not yet been correlated
+       with this physical NAND.  QEMU asserts busy immediately and does not
+       model ``tWB``, power-on busy time, timing-mode-dependent latency,
+       electrical open-drain release/rise behavior or native SMC ``NWAIT``
+       access stretching.  ``FFh`` deterministically discards an interrupted
+       program or erase before any modeled media change; silicon may leave
+       partially modified media.  The additional redundant parameter pages,
+       PMECC spare-area (``SPAREEN``) and manual ``USER`` phases,
+       PMECC/PMERRLOC
+       timing and clock-gating fidelity, complete bad-block/OOB behavior,
+       unique-ID, cache, copyback, interleaved, two-plane, protection,
+       recovery-read and randomizer data-path effects, I/O-strength and
+       randomizer default-fuse programming, invalid-feature-address readback,
+       page-program order/NOP/endurance constraints, storage-error handling and
+       DMA remain missing.
    * - GEM and LAN8840
      - Initial
      - GEM0 has six priority queues, DMA transmit/receive, AIC sources 24 and
@@ -715,9 +741,11 @@ phase green merely by avoiding it in the device tree.
    drivers can use normal QEMU chardev, SSI, I2C and analog/digital endpoint
    abstractions.
 #. **Close storage and memory-controller fidelity.**  Complete SDHCI command,
-   error, media-change and migration behavior; complete NAND OOB, bad-block,
-   ready/busy timing and DMA; finish the PMECC ``SPAREEN`` and ``USER`` paths,
-   timing and clock-gating behavior; finish SMC
+   error, media-change and migration behavior; complete NAND OOB, bad-block and
+   DMA behavior, correlate the modeled ready/busy delays with silicon, add
+   timing-mode-dependent latency and model the native SMC ``NWAIT`` path;
+   finish the PMECC ``SPAREEN`` and ``USER`` paths, timing and clock-gating
+   behavior; finish SMC
    transaction timing, matrix and MPDDRC-visible behavior, including per-host
    remap and arbitration effects; and cover persistent QSPI protocol widths
    and errata.
@@ -885,11 +913,39 @@ and eight-bit-error media all produced the same U-Boot transcript, closing the
 BCH8 correction gate.  Like the SD command above, this deliberately bypasses
 the proprietary mask ROM.
 
+AT91Bootstrap polls the NAND status register and does not configure PD14, so
+the exact asynchronous-completion boot repeat exercises modeled busy intervals
+but not the board R/B# GPIO path.  The 2026-08-26 asynchronous-completion
+repeat produced byte-identical 1346-byte serial transcripts for clean,
+two-bit-error and eight-bit-error media, with empty ``unimp,guest_errors``
+logs in all three cases.
+
 Do not mechanically replay the exhaustive feature-register qtest on a physical
 board.  Keep ``80h``, ``90h`` and ``B0h`` checks read-only: those registers
 include OTP-protection or one-time default-programming controls.  Initial
 differential tests should use read-only defaults plus reversible timing and
 recovery-read changes unless the NAND device is explicitly sacrificial.
+
+The U5 R/B# transition has not yet been measured on this board revision.  Keep
+PD14 configured as an input and never request or reconfigure it while Linux MTD
+owns the line.  First confirm that R32 is 10 kohm to 3.3 V.  A safe comparison
+uses the NAND-net pad of R32 or another verified exposed point; the U5 C8 BGA
+ball is not probeable.  Capture power-on busy non-invasively.  During page reads
+and ``FFh`` reset, correlate falling and rising R/B# edges with both status bits
+5 and 6 and record ``tR`` and ``tRST``.  Measuring ``tWB`` additionally requires
+a safe NAND ``WE#``/``NWE`` reference for the confirm-command strobe.  With
+PIOD's PID44 clock enabled, verify PDSR, edge interrupt status and AIC source 44;
+normal Linux NAND polling need not expose a NAND GPIO interrupt in
+``/proc/interrupts``.  In controlled bare metal, disabling only PD14's internal
+pull-up must leave the external resistor holding the input high.
+
+Program and erase timing require independent boot media and an explicitly
+approved disposable block.  Repeated ``FFh`` while reset-busy and non-status
+commands while busy are model policies that also need comparison.  A safe
+``78h`` probe can verify its three address cycles and shared ready bits; forcing
+plane-specific failures needs sacrificial media.  Native SMC ``NWAIT`` testing
+is a separate recoverable bare-metal experiment: use mode 0 as the control and
+try modes 2/3 only with watchdog or JTAG recovery because an access may stall.
 
 A dump of the proprietary 80 KiB SAM9X7 RomBOOT can instead enter through the
 real reset vector::
