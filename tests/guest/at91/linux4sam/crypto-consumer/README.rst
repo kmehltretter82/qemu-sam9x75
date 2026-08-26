@@ -14,8 +14,15 @@ Every result has an independent userspace oracle.  SHA and HMAC are compared
 with Python's ``hashlib`` and ``hmac``.  AES and TDES encryption are compared
 byte-for-byte with OpenSSL, then decrypted through AF_ALG and compared with
 the original input.  Sizes straddle the 55/56-byte and 111/112-byte SHA
-padding transitions, cache-page boundaries and DMA thresholds;
-scatter/gather requests use deliberately awkward fragments and multiple
+padding transitions, cache-page boundaries and DMA thresholds.  Hash and
+cipher submissions use deliberately awkward, bounded userspace iovecs.  AF_ALG
+copies these transmit iovecs into its own page-backed scatterlist, so they test
+the gather syscall path without pretending to control the device's DMA segment
+layout.  Cipher output is received into anonymous page-aligned storage because
+AF_ALG pins that userspace mapping directly for its destination scatterlist.
+Bounded AES-CTR totals through 4097 bytes exercise the driver's alignment
+bounce path; the large 65536-byte vector is block-aligned and exercises
+multi-page DMA without exceeding that fixed bounce allocation.  Multiple
 requests are in flight concurrently.  The fixture samples interrupts around
 each selected family separately.  It requires the direct ``atmel-sha``
 completion interrupt to advance independently for SHA and HMAC, and the shared
@@ -58,24 +65,54 @@ guest wait, so a timeout implemented only inside the guest is not sufficient::
   timeout --foreground --signal=TERM --kill-after=30s 900s \
       ./run-linux4microchip-crypto-vm
 
-The command emits TAP 6/6 plus a JSON record.  The default matrix covers all
-five SHA widths, including both SHA-2 padding transitions, HMAC-SHA256/SHA512,
-AES-128 ECB, AES-128/192/256 CBC, AES-256 CTR, and 24-byte three-key TDES
-through the driver's ECB/CBC registrations.
+On a kernel with the concurrency fix described below, the command emits TAP
+6/6 plus a JSON record.  The default matrix covers all five SHA widths,
+including both SHA-2 padding transitions, HMAC-SHA256/SHA512, AES-128 ECB,
+AES-128/192/256 CBC, AES-256 CTR, and 24-byte three-key TDES through the
+driver's ECB/CBC registrations.
 Increase ``--iterations`` for a longer queue/DMA stress run; request sizes
 and expected bytes remain deterministic.
 For diagnosis, ``--engines sha`` or a comma-separated subset of
 ``sha,hmac,aes,tdes`` isolates one hardware queue without weakening the
 default release gate.  ``--skip-empty`` is a narrower diagnostic switch; the
 default keeps the zero-length SHA/HMAC cases required by the Crypto API.
+An intentionally unaligned 64-KiB cipher destination is not a valid release
+stress case: it can return ``ENOMEM`` because the Linux Atmel driver's fixed
+alignment bounce allocation is smaller than the request.  That result is a
+Linux buffer limit, not evidence of a QEMU DMA hang.
+
+Linux4Microchip atmel-sha concurrency bug
+-----------------------------------------
+
+The unmodified Linux4Microchip 2026.04 kernel can deadlock this fixture when
+two or more HMAC requests interleave.  A single worker completes, while the
+exact two-worker 64-KiB matrix reproducibly leaves both AF_ALG callers in
+``crypto_wait_req``.  At the stall the SHA engine is idle with ``WRDY`` set,
+DMA inactive, automatic padding still enabled, a stale nonzero ``SHA_MSR``,
+and ``SHA_BCR`` zero.
+
+This is a Linux ``drivers/crypto/atmel-sha.c`` state-restoration bug, not a
+condition QEMU should work around.  The data sheet requires software-padded
+requests to disable automatic padding by clearing both message-size and byte
+count.  On HMAC-capable parts, ``atmel_sha_write_ctrl()`` must write
+``SHA_MSR = 0`` followed by ``SHA_BCR = 0`` immediately before its final
+``SHA_MR`` write.  The writes apply to every generic SHA request because an
+ordinary SHA request may follow HMAC state, but must be guarded by
+``dd->caps.has_hmac`` for older revisions where those offsets are reserved.
+
+Do not reduce ``--workers`` in a release result.  ``--workers 1`` is useful
+only to isolate the QEMU data path while the kernel fix is being reviewed.
+The full concurrent gate remains intentionally capable of detecting the
+driver bug.  The proposed fix still needs the same stress run on physical
+SAM9X75 silicon before it is submitted upstream.
 
 The JSON ``gate_profile`` is ``release`` only when all four families are
 selected, interrupt checks and empty messages remain enabled, and
 ``--iterations``, ``--workers`` and ``--max-bytes`` are at least 4, 3 and
 65536 respectively.  Every weaker invocation is labeled ``diagnostic``.  The
-report also records ``skip_empty`` and ``require_interrupts`` explicitly, plus
-the before/after/delta counters for each selected family and the backward-useful
-overall counters.
+report also records ``skip_empty`` and ``require_interrupts`` explicitly,
+plus the before/after/delta counters for each selected family and the
+backward-useful overall counters.
 
 Archive the JSON report, ``/proc/interrupts`` and the QEMU
 ``-d unimp,guest_errors`` log.  A normal successful run must leave that QEMU

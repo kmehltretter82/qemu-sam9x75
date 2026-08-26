@@ -15,6 +15,7 @@ import dataclasses
 import hashlib
 import hmac
 import json
+import mmap
 import os
 import pathlib
 import socket
@@ -169,6 +170,25 @@ def recv_exact(sock, length):
     return bytes(output)
 
 
+def recv_exact_aligned(sock, length):
+    """Receive into page-aligned storage suitable for cipher DMA output."""
+
+    output = bytearray()
+    while len(output) < length:
+        remaining = length - len(output)
+        storage = mmap.mmap(-1, remaining)
+        view = memoryview(storage)
+        try:
+            received = sock.recv_into(view, remaining)
+            if not received:
+                raise ConsumerError("AF_ALG returned a truncated result")
+            output.extend(view[:received])
+        finally:
+            view.release()
+            storage.close()
+    return bytes(output)
+
+
 def sendmsg_exact(sock, buffers, *, flags=0):
     """Send one AF_ALG request record and reject a short submission."""
 
@@ -221,7 +241,7 @@ def afalg_cipher(driver, key, iv, data, encrypt=True):
                         submitted, len(data),
                     )
                 )
-            return recv_exact(operation, len(data))
+            return recv_exact_aligned(operation, len(data))
 
 
 def openssl_cipher(executable, name, key, iv, data, encrypt=True):
@@ -254,7 +274,7 @@ def cipher_cases(max_bytes):
         if length <= max_bytes
     )
     aes_stream_lengths = tuple(
-        length for length in (1, 15, 16, 17, 4095, 4096, 4097, 65537)
+        length for length in (1, 15, 16, 17, 4095, 4096, 4097, 65536)
         if length <= max_bytes
     )
     tdes_lengths = tuple(

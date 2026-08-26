@@ -3,6 +3,7 @@
 
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+import ctypes
 import hashlib
 import json
 import os
@@ -203,7 +204,9 @@ class MatrixTests(unittest.TestCase):
             {16, 24, 32},
         )
         ctr = next(case for case in cases if case.name == "aes-256-ctr")
-        self.assertIn(65537, ctr.lengths)
+        self.assertIn(65536, ctr.lengths)
+        self.assertIn(4097, ctr.lengths)
+        self.assertNotIn(65537, ctr.lengths)
         for job in consumer.build_cipher_jobs(65537):
             self.assertEqual(job.length, len(job.data))
             self.assertEqual(len(job.iv), job.case.iv_size)
@@ -270,6 +273,22 @@ class OracleTests(unittest.TestCase):
             self.calls.append((buffers, ancillary, flags))
             return self.result
 
+    class RecvIntoSocket:
+        def __init__(self, value, limits=()):
+            self.value = value
+            self.limits = list(limits)
+            self.addresses = []
+
+        def recv_into(self, target, length):
+            self.addresses.append(
+                ctypes.addressof(ctypes.c_char.from_buffer(target))
+            )
+            limit = self.limits.pop(0) if self.limits else length
+            count = min(len(self.value), length, limit)
+            target[:count] = self.value[:count]
+            self.value = self.value[count:]
+            return count
+
     def test_sendmsg_exact_makes_and_checks_empty_syscall(self):
         operation = self.SendmsgSocket(0)
         self.assertEqual(consumer.sendmsg_exact(operation, (b"",)), 0)
@@ -280,6 +299,26 @@ class OracleTests(unittest.TestCase):
         with self.assertRaisesRegex(consumer.ConsumerError,
                                     "accepted 2 of 3"):
             consumer.sendmsg_exact(operation, (b"a", b"bc"))
+
+    def test_cipher_receive_buffer_is_dma_aligned(self):
+        expected = consumer.deterministic_bytes("aligned-recv", 65536)
+        operation = self.RecvIntoSocket(expected)
+        self.assertEqual(
+            consumer.recv_exact_aligned(operation, len(expected)), expected,
+        )
+        self.assertTrue(operation.addresses)
+        self.assertTrue(all(address % 16 == 0
+                            for address in operation.addresses))
+
+    def test_cipher_receive_retries_from_fresh_aligned_buffer(self):
+        expected = consumer.deterministic_bytes("short-aligned-recv", 64)
+        operation = self.RecvIntoSocket(expected, (3, 13, 48))
+        self.assertEqual(
+            consumer.recv_exact_aligned(operation, len(expected)), expected,
+        )
+        self.assertEqual(len(operation.addresses), 3)
+        self.assertTrue(all(address % 16 == 0
+                            for address in operation.addresses))
 
     def test_openssl_aes_matches_nist_cbc_vector(self):
         key = bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
