@@ -31,6 +31,7 @@ struct AT91USARTState {
     qemu_irq rts;
     QEMUTimer *tx_timer;
     QEMUTimer *timeout_timer;
+    QEMUTimer *modem_status_poll;
 
     uint32_t mode;
     uint32_t interrupt_mask;
@@ -82,10 +83,17 @@ struct AT91USARTState {
     bool tx_fifo_locked;
     bool tx_break;
     bool cts_level;
+    bool cts_gpio_level;
     bool rts_enabled;
     bool fifo_rts_level;
     bool tx_request_level;
     bool rx_request_level;
+
+    /* Host chardev properties are rediscovered after reset and migration. */
+    bool tiocm_supported;
+    bool tiocm_set_failed;
+    bool tiocm_rts_valid;
+    bool tiocm_rts_level;
 };
 
 uint64_t at91_usart_flexcom_read(AT91USARTState *s, unsigned int size);

@@ -190,9 +190,12 @@ enum {
 #define US_WPMR_KEY_MASK        0xffffff00
 #define US_WPMR_KEY             0x55534100
 
+#define US_MODEM_POLL_NS        (NANOSECONDS_PER_SECOND / 100)
+
 static void at91_usart_update(AT91USARTState *s);
 static void at91_usart_start_tx(AT91USARTState *s);
 static void at91_usart_schedule_timeout(AT91USARTState *s);
+static bool at91_usart_refresh_tiocm(AT91USARTState *s, bool latch_change);
 
 static uint32_t at91_usart_expand_write(hwaddr offset, uint64_t value,
                                         unsigned int size)
@@ -398,11 +401,118 @@ static void at91_usart_refresh_fifo_rts(AT91USARTState *s)
     }
 }
 
+static void at91_usart_set_cts_level(AT91USARTState *s, bool level,
+                                     bool latch_change)
+{
+    if (s->cts_level == level) {
+        return;
+    }
+
+    s->cts_level = level;
+    if (latch_change) {
+        s->status |= US_INT_CTSIC;
+    }
+    if (!level) {
+        at91_usart_start_tx(s);
+    } else {
+        at91_usart_update(s);
+    }
+}
+
+static void at91_usart_tiocm_unavailable(AT91USARTState *s,
+                                         bool latch_change)
+{
+    s->tiocm_supported = false;
+    s->tiocm_set_failed = false;
+    s->tiocm_rts_valid = false;
+    timer_del(s->modem_status_poll);
+    at91_usart_set_cts_level(s, s->cts_gpio_level, latch_change);
+}
+
+static bool at91_usart_refresh_tiocm(AT91USARTState *s, bool latch_change)
+{
+    int flags = 0;
+
+    if (qemu_chr_fe_ioctl(&s->chr, CHR_IOCTL_SERIAL_GET_TIOCM,
+                          &flags) < 0) {
+        at91_usart_tiocm_unavailable(s, latch_change);
+        return false;
+    }
+
+    if (!s->tiocm_supported) {
+        s->tiocm_set_failed = false;
+        s->tiocm_rts_valid = false;
+    }
+    s->tiocm_supported = true;
+
+    /* CTS and RTS are active-low pins, unlike the asserted TIOCM bits. */
+    at91_usart_set_cts_level(s, !(flags & CHR_TIOCM_CTS), latch_change);
+    return true;
+}
+
+static bool at91_usart_modem_poll_needed(AT91USARTState *s)
+{
+    return s->tiocm_supported && s->flexcom_enabled &&
+           ((s->interrupt_mask & US_INT_CTSIC) ||
+            ((s->mode & US_MR_USART_MODE_MASK) == US_MR_USART_MODE_HWHS &&
+             s->transmitter_enabled));
+}
+
+static void at91_usart_schedule_modem_poll(AT91USARTState *s)
+{
+    if (!at91_usart_modem_poll_needed(s)) {
+        timer_del(s->modem_status_poll);
+    } else if (!timer_pending(s->modem_status_poll)) {
+        timer_mod_ns(s->modem_status_poll,
+                     qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                     US_MODEM_POLL_NS);
+    }
+}
+
+static void at91_usart_drive_tiocm_rts(AT91USARTState *s, bool level)
+{
+    int flags = 0;
+
+    if (!s->tiocm_supported || s->tiocm_set_failed ||
+        (s->tiocm_rts_valid && s->tiocm_rts_level == level)) {
+        return;
+    }
+    if (qemu_chr_fe_ioctl(&s->chr, CHR_IOCTL_SERIAL_GET_TIOCM,
+                          &flags) < 0) {
+        at91_usart_tiocm_unavailable(s, true);
+        return;
+    }
+
+    flags &= ~CHR_TIOCM_RTS;
+    if (!level) {
+        flags |= CHR_TIOCM_RTS;
+    }
+    if (qemu_chr_fe_ioctl(&s->chr, CHR_IOCTL_SERIAL_SET_TIOCM,
+                          &flags) < 0) {
+        /* Input modem status may still be usable on a read-only backend. */
+        s->tiocm_set_failed = true;
+        s->tiocm_rts_valid = false;
+        return;
+    }
+
+    s->tiocm_rts_level = level;
+    s->tiocm_rts_valid = true;
+}
+
+static void at91_usart_modem_status_poll(void *opaque)
+{
+    AT91USARTState *s = opaque;
+
+    at91_usart_refresh_tiocm(s, true);
+    at91_usart_update(s);
+}
+
 static void at91_usart_update(AT91USARTState *s)
 {
     bool active;
     bool tx;
     bool rx;
+    bool gpio_rts_level;
     bool rts_level;
 
     at91_usart_refresh_status(s);
@@ -434,7 +544,12 @@ static void at91_usart_update(AT91USARTState *s)
         rts_level = !s->rts_enabled;
         break;
     }
-    qemu_set_irq(s->rts, s->flexcom_enabled && rts_level);
+    gpio_rts_level = s->flexcom_enabled && rts_level;
+    qemu_set_irq(s->rts, gpio_rts_level);
+    /* A disconnected USART must not tell an external peer to transmit. */
+    at91_usart_drive_tiocm_rts(s,
+                               s->flexcom_enabled ? rts_level : true);
+    at91_usart_schedule_modem_poll(s);
 }
 
 static void at91_usart_update_tx_events(AT91USARTState *s,
@@ -616,6 +731,9 @@ static void at91_usart_tx_complete(void *opaque)
     } else if ((s->mode & US_MR_CHMODE_MASK) != US_MR_CHMODE_REMOTE) {
         qemu_chr_fe_write_all(&s->chr, &ch, 1);
     }
+    if ((s->mode & US_MR_USART_MODE_MASK) == US_MR_USART_MODE_HWHS) {
+        at91_usart_refresh_tiocm(s, true);
+    }
     at91_usart_start_tx(s);
 }
 
@@ -717,6 +835,7 @@ static uint32_t at91_usart_raw_read(AT91USARTState *s, hwaddr reg)
     case US_IMR:
         return s->interrupt_mask & at91_usart_interrupt_valid_mask(s);
     case US_CSR:
+        at91_usart_refresh_tiocm(s, true);
         at91_usart_refresh_status(s);
         value = s->status;
         s->status &= ~US_INT_CTSIC;
@@ -852,6 +971,8 @@ static void at91_usart_write_control(AT91USARTState *s, uint32_t value)
 {
     int break_enable;
     unsigned int usart_mode = s->mode & US_MR_USART_MODE_MASK;
+
+    at91_usart_refresh_tiocm(s, true);
 
     if (value & US_CR_RSTRX) {
         at91_usart_reset_receiver(s);
@@ -1027,7 +1148,8 @@ static void at91_usart_write(void *opaque, hwaddr offset, uint64_t value,
         s->mode = at91_usart_merge_write(s->mode, offset, value, size) &
                   US_MR_MODE_MASK;
         at91_usart_update_parameters(s);
-        at91_usart_schedule_tx(s);
+        at91_usart_refresh_tiocm(s, true);
+        at91_usart_start_tx(s);
         at91_usart_schedule_timeout(s);
         at91_usart_update(s);
         qemu_chr_fe_accept_input(&s->chr);
@@ -1041,6 +1163,9 @@ static void at91_usart_write(void *opaque, hwaddr offset, uint64_t value,
         at91_usart_update(s);
         break;
     case US_THR:
+        if ((s->mode & US_MR_USART_MODE_MASK) == US_MR_USART_MODE_HWHS) {
+            at91_usart_refresh_tiocm(s, true);
+        }
         if (at91_usart_multiple_data(s)) {
             for (i = 0; i < size; i++) {
                 at91_usart_write_thr(s, value >> (i * 8));
@@ -1221,6 +1346,7 @@ static void at91_usart_set_enabled(void *opaque, int n, int level)
         timer_del(s->tx_timer);
         timer_del(s->timeout_timer);
     } else {
+        at91_usart_refresh_tiocm(s, true);
         at91_usart_start_tx(s);
         if (!timer_pending(s->tx_timer)) {
             at91_usart_schedule_tx(s);
@@ -1237,13 +1363,9 @@ static void at91_usart_set_cts(void *opaque, int n, int level)
 {
     AT91USARTState *s = opaque;
 
-    if (s->cts_level != !!level) {
-        s->cts_level = level;
-        s->status |= US_INT_CTSIC;
-        if (!s->cts_level) {
-            at91_usart_start_tx(s);
-        }
-        at91_usart_update(s);
+    s->cts_gpio_level = !!level;
+    if (!s->tiocm_supported) {
+        at91_usart_set_cts_level(s, s->cts_gpio_level, true);
     }
 }
 
@@ -1270,6 +1392,7 @@ static void at91_usart_reset(DeviceState *dev)
 
     timer_del(s->tx_timer);
     timer_del(s->timeout_timer);
+    timer_del(s->modem_status_poll);
     s->mode = US_MR_RESET;
     s->interrupt_mask = 0;
     s->status = 0;
@@ -1320,8 +1443,12 @@ static void at91_usart_reset(DeviceState *dev)
     s->fifo_rts_level = false;
     s->tx_request_level = false;
     s->rx_request_level = false;
+    s->tiocm_supported = false;
+    s->tiocm_set_failed = false;
+    s->tiocm_rts_valid = false;
     qemu_set_irq(s->tx_request, 0);
     qemu_set_irq(s->rx_request, 0);
+    at91_usart_refresh_tiocm(s, false);
     at91_usart_update(s);
 }
 
@@ -1332,6 +1459,10 @@ static int at91_usart_post_load(void *opaque, int version_id)
     if (version_id < 2) {
         /* Version 1 had no independent FRTSC hysteresis latch. */
         s->fifo_rts_level = s->rts_enabled;
+    }
+    if (version_id < 3) {
+        /* Older streams used effective CTS as the named GPIO level. */
+        s->cts_gpio_level = s->cts_level;
     }
 
     s->mode &= US_MR_MODE_MASK;
@@ -1350,6 +1481,11 @@ static int at91_usart_post_load(void *opaque, int version_id)
     s->tx_count = MIN(s->tx_count, AT91_USART_FIFO_SIZE);
     s->tx_request_level = false;
     s->rx_request_level = false;
+    timer_del(s->modem_status_poll);
+    s->tiocm_supported = false;
+    s->tiocm_set_failed = false;
+    s->tiocm_rts_valid = false;
+    at91_usart_refresh_tiocm(s, false);
     at91_usart_update(s);
     if (!s->tx_shift_valid) {
         timer_del(s->tx_timer);
@@ -1368,7 +1504,7 @@ static int at91_usart_post_load(void *opaque, int version_id)
 
 static const VMStateDescription at91_usart_vmstate = {
     .name = TYPE_AT91_USART,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = at91_usart_post_load,
     .fields = (const VMStateField[]) {
@@ -1420,6 +1556,7 @@ static const VMStateDescription at91_usart_vmstate = {
         VMSTATE_BOOL(tx_fifo_locked, AT91USARTState),
         VMSTATE_BOOL(tx_break, AT91USARTState),
         VMSTATE_BOOL(cts_level, AT91USARTState),
+        VMSTATE_BOOL_V(cts_gpio_level, AT91USARTState, 3),
         VMSTATE_BOOL(rts_enabled, AT91USARTState),
         VMSTATE_BOOL_V(fifo_rts_level, AT91USARTState, 2),
         VMSTATE_CLOCK(pclk, AT91USARTState),
@@ -1429,6 +1566,26 @@ static const VMStateDescription at91_usart_vmstate = {
         VMSTATE_END_OF_LIST()
     },
 };
+
+static int at91_usart_be_change(void *opaque)
+{
+    AT91USARTState *s = opaque;
+    int break_enable = s->tx_break;
+
+    qemu_chr_fe_set_handlers(&s->chr, at91_usart_can_receive,
+                             at91_usart_receive, at91_usart_event,
+                             at91_usart_be_change, s, NULL, true);
+    at91_usart_update_parameters(s);
+    qemu_chr_fe_ioctl(&s->chr, CHR_IOCTL_SERIAL_SET_BREAK, &break_enable);
+
+    timer_del(s->modem_status_poll);
+    s->tiocm_supported = false;
+    s->tiocm_set_failed = false;
+    s->tiocm_rts_valid = false;
+    at91_usart_refresh_tiocm(s, true);
+    at91_usart_update(s);
+    return 0;
+}
 
 static void at91_usart_realize(DeviceState *dev, Error **errp)
 {
@@ -1440,8 +1597,9 @@ static void at91_usart_realize(DeviceState *dev, Error **errp)
         return;
     }
     qemu_chr_fe_set_handlers(&s->chr, at91_usart_can_receive,
-                             at91_usart_receive, at91_usart_event, NULL,
-                             s, NULL, true);
+                             at91_usart_receive, at91_usart_event,
+                             at91_usart_be_change, s, NULL, true);
+    at91_usart_refresh_tiocm(s, false);
 }
 
 static void at91_usart_init(Object *obj)
@@ -1467,6 +1625,8 @@ static void at91_usart_init(Object *obj)
                                at91_usart_tx_complete, s);
     s->timeout_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                     at91_usart_timeout, s);
+    s->modem_status_poll = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                        at91_usart_modem_status_poll, s);
 }
 
 static void at91_usart_finalize(Object *obj)
@@ -1475,6 +1635,7 @@ static void at91_usart_finalize(Object *obj)
 
     timer_free(s->tx_timer);
     timer_free(s->timeout_timer);
+    timer_free(s->modem_status_poll);
 }
 
 static const Property at91_usart_properties[] = {
