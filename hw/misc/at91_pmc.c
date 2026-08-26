@@ -1017,6 +1017,7 @@ static void at91_pmc_realize(DeviceState *dev, Error **errp)
 static int at91_pmc_post_load(void *opaque, int version_id)
 {
     AT91PMCState *s = AT91_PMC(opaque);
+    unsigned int i;
 
     if (s->selected_pid >= AT91_PMC_NUM_PIDS) {
         return -EINVAL;
@@ -1024,6 +1025,28 @@ static int at91_pmc_post_load(void *opaque, int version_id)
     s->mor &= PMC_MOR_MASK;
     s->pll_imr &= PMC_PLL_IRQ_MASK;
     s->pll_isr0 &= PMC_PLL_STATUS_EVENT_MASK;
+
+    /*
+     * The derived output Clock objects are part of the migration stream for
+     * compatibility.  Their consumers are not: a destination peripheral's
+     * input clock therefore still has its reset-period cache here.  If the
+     * migrated output already has the value computed from the restored PMC
+     * registers, clock_update() sees no change and does not propagate it.
+     * Invalidate only the local output caches before recomputing them so all
+     * connected peripheral inputs receive the restored clock tree.
+     */
+    clock_set(s->mainck, 0);
+    clock_set(s->cpu, 0);
+    clock_set(s->mck, 0);
+    clock_set(s->uhpck, 0);
+    clock_set(s->utmi, 0);
+    for (i = 0; i < AT91_PMC_NUM_PCKS; i++) {
+        clock_set(s->pck[i], 0);
+    }
+    for (i = 0; i < AT91_PMC_NUM_PIDS; i++) {
+        clock_set(s->pclk[i], 0);
+        clock_set(s->gclk[i], 0);
+    }
 
     at91_pmc_update_clocks(s);
     at91_pmc_update_all_pll_status(s);
