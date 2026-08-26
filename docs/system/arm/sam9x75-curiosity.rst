@@ -552,8 +552,25 @@ Support matrix
        migration.  TC0 uses PID/AIC source 17 and TC1 uses PID/AIC source 45.
        The TC0 instance covers the unmodified Linux clocksource and clockevent
        paths.  The common TCB model does not yet cover external TCLK/TIO
-       capture and waveform routing, up/down modes or QDEC.  ADC inputs, PWM
-       outputs and synchronous serial operation also remain.
+       capture and waveform routing, up/down modes or QDEC.  The SAM9X7 ADC is
+       mapped at ``0xf804c000`` with its eight physical inputs, PID/AIC source
+       19, peripheral and generic clocks, and XDMAC receive request 40.  It
+       models numeric and programmable channel sequences, software, external,
+       periodic and continuous triggers, conversion timing, enhanced
+       resolution, comparison, result/overrun status, interrupts, halfword
+       DMA, write protection, VDDCORE reset and migration.  Input and reference
+       voltages are injectable in microvolts through QOM properties.  Register
+       tests decode reserved locations, including the absent ``0xfc`` version
+       register, without guest-error logging.  The revised data sheet gives
+       ``ADC_ACR`` reset value ``0x1200`` while the 2026 device pack gives
+       ``0x0101``; the model provisionally follows the revised data sheet until
+       safe hardware readback settles the discrepancy.  Touchscreen sampling,
+       differential/sign modes, correction behavior and physical trigger
+       routing still need implementation or hardware comparison.  The current
+       Linux fallback compatible describes a SAMA5D2 ADC and exposes channels
+       8--11 that do not exist on SAM9X7; QEMU deliberately keeps the physical
+       eight-channel register map.  PWM outputs and synchronous serial
+       operation also remain.
    * - Audio
      - Initial
      - I2SMCC register state, clocking, mono/compact/TDM framing, interrupts,

@@ -477,6 +477,16 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->trng), 0,
                        qdev_get_gpio_in(DEVICE(&s->aic), 38));
 
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->adc), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->adc), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_ADC_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->adc), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 19));
+    qdev_connect_gpio_out_named(DEVICE(&s->adc), "rx-request", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 40));
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->aes), errp)) {
         return;
     }
@@ -898,6 +908,7 @@ static void sam9x7_init_vddcore_reset(SAM9X7State *s)
     sam9x7_vddcore_add(s, DEVICE(&s->tcb1));
     sam9x7_vddcore_add(s, DEVICE(&s->xdmac));
     sam9x7_vddcore_add(s, DEVICE(&s->trng));
+    sam9x7_vddcore_add(s, DEVICE(&s->adc));
     sam9x7_vddcore_add(s, DEVICE(&s->aes));
     sam9x7_vddcore_add(s, DEVICE(&s->sha));
     sam9x7_vddcore_add(s, DEVICE(&s->tdes));
@@ -1094,6 +1105,12 @@ static void sam9x7_init(Object *obj)
     object_initialize_child(obj, "trng", &s->trng, TYPE_AT91_TRNG);
     qdev_connect_clock_in(DEVICE(&s->trng), "pclk",
                           qdev_get_clock_out(DEVICE(&s->pmc), "pclk[38]"));
+
+    object_initialize_child(obj, "adc", &s->adc, TYPE_AT91_ADC);
+    qdev_connect_clock_in(DEVICE(&s->adc), "pclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "pclk[19]"));
+    qdev_connect_clock_in(DEVICE(&s->adc), "gclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "gclk[19]"));
 
     object_initialize_child(obj, "aes", &s->aes, TYPE_AT91_AES);
     qdev_connect_clock_in(DEVICE(&s->aes), "pclk",

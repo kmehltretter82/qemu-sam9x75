@@ -256,7 +256,8 @@ qtests_arm = \
   (config_all_devices.has_key('CONFIG_CAN_FLEXCAN') ? ['flexcan-test'] : []) + \
   (config_all_devices.has_key('CONFIG_STM32L4X5_SOC') and
    config_all_devices.has_key('CONFIG_DM163')? ['dm163-test'] : []) + \
-  (config_all_devices.has_key('CONFIG_SAM9X7') ? ['sam9x75-curiosity-test'] : []) + \
+  (config_all_devices.has_key('CONFIG_SAM9X7') ?
+   ['sam9x75-curiosity-test', 'sam9x7-adc-test'] : []) + \
   ['arm-cpu-features',
    'boot-serial-test']
 
@@ -410,6 +411,8 @@ qtests = {
   'pxe-test': files('boot-sector.c'),
   'sam9x75-curiosity-test': files('migration/migration-qmp.c',
                                   'migration/migration-util.c'),
+  'sam9x7-adc-test': files('migration/migration-qmp.c',
+                           'migration/migration-util.c'),
   'pnv-xive2-test': files('pnv-xive2-common.c', 'pnv-xive2-flush-sync.c',
                           'pnv-xive2-nvpg_bar.c'),
   'qos-test': [chardev, io, qos_test_ss.apply({}).sources()],

@@ -7,6 +7,7 @@
 #ifndef HW_ARM_SAM9X7_H
 #define HW_ARM_SAM9X7_H
 
+#include "hw/adc/at91_adc.h"
 #include "hw/audio/at91_classd.h"
 #include "hw/audio/at91_i2smcc.h"
 #include "hw/block/at91_nand.h"
@@ -113,6 +114,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_GMAC_BASE             0xf802c000
 #define SAM9X7_UDPHS_BASE            0xf803c000
 #define SAM9X7_UDPHS_SIZE            0x00000400
+#define SAM9X7_ADC_BASE              0xf804c000
 
 /* System peripherals. */
 #define SAM9X7_MATRIX_BASE           0xffffde00
@@ -151,6 +153,7 @@ struct SAM9X7State {
     AT91SHAState sha;
     AT91TDESState tdes;
     AT91TRNGState trng;
+    AT91ADCState adc;
     AT91CLASSDState classd;
     AT91I2SMCCState i2smcc;
     AT91DBGUState dbgu;

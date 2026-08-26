@@ -176,6 +176,7 @@ config SAM9X7
     bool
     default y
     depends on TCG && ARM
+    select AT91_ADC
     select AT91_AES
     select AT91_SHA
     select AT91_TDES

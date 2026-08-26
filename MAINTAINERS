@@ -1073,6 +1073,7 @@ F: include/hw/misc/mcp16502.h
 F: include/hw/sensor/pac1934.h
 F: docs/system/arm/sam9x75-curiosity.rst
 F: tests/guest/at91/linux4sam/
+F: tests/qtest/sam9x7-adc-test.c
 F: tests/qtest/sam9x75-curiosity-test.c
 
 SBSA-REF
