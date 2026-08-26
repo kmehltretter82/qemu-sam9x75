@@ -54,6 +54,8 @@ QEMU serial backends and SAM9X75 peripherals have this exact ordering:
   its USART child is disabled in the Linux4Microchip 2026.04 device tree.
 * ``serial2`` is FLEXCOM1 at ``0xf8020000``.  Its enabled USART child at
   ``0xf8020200`` is Linux4SAM ``ttyS1``.
+* ``serial6`` is FLEXCOM5.  ``serial3`` through ``serial5`` are the required
+  FLEXCOM2 through FLEXCOM4 positions if a QEMU FC5 chardev is added.
 
 Consequently, the null ``serial1`` is intentional and must not be omitted.
 The following runnable skeleton shows the AF_UNIX client connection; append
@@ -71,7 +73,10 @@ the firmware, storage and network arguments from the normal Linux4SAM launch::
       -serial chardev:fc1
 
 The QEMU chardev is the AF_UNIX client (``server=off``); the synthetic peer is
-the server.  Copy the script into the guest, make sure no getty owns
+the server.  AF_UNIX transports bytes only: they do not carry CTS, RTS or
+other modem-line state, so ``--rtscts`` and the manual RTS gate below are for
+a physical serial adapter, not this QEMU topology.  Copy the script into the
+guest, make sure no getty owns
 ``ttyS1``, and run::
 
   test -c /dev/ttyS1
@@ -85,6 +90,56 @@ the server.  Copy the script into the guest, make sure no getty owns
 The process exits nonzero on a framing, CRC, payload, direction, sequence or
 timeout failure.  Use ``peer --sessions 2`` and restart the guest exerciser
 after a reset to require two complete, separately identified sessions.
+
+QEMU four-wire serial partner
+-----------------------------
+
+For a true modem-line-capable QEMU peer, use two 3.3-V USB-to-UART adapters as
+a null-modem link.  This needs no SAM9X75 board.  Call the adapter opened by
+QEMU A and the adapter opened by the Python peer B.  Do not connect either
+adapter's supply pin::
+
+  A TX  -> B RX
+  B TX  -> A RX
+  A RTS -> B CTS
+  B RTS -> A CTS
+  A GND -> B GND
+
+The host drivers for both adapters must implement ``TIOCMGET`` and
+``TIOCMSET``.  An ordinary PTY and QEMU's socket chardev do not.  Start the
+peer on adapter B::
+
+  python3 sam9x75_uart_partner.py peer \
+      --serial /dev/ttyUSB1 --baud 115200 --timeout 900 \
+      --rts-pause-after-bytes 32768 --rts-pause-ms 250 \
+      --json qemu-four-wire-peer.json
+
+Attach adapter A to the already-enabled FLEXCOM1 USART.  The preceding null
+entry is FLEXCOM0 and is required to put this backend at ``serial2``::
+
+  qemu-system-arm \
+      -M sam9x75-curiosity \
+      -display none -monitor none \
+      -serial stdio \
+      -serial null \
+      -chardev serial,id=fc1,path=/dev/ttyUSB0 \
+      -serial chardev:fc1 \
+      ... normal Linux4SAM firmware, storage and network arguments ...
+
+Inside Linux4SAM, stop any getty and enable hardware flow control on the
+guest endpoint::
+
+  systemctl stop serial-getty@ttyS1.service 2>/dev/null || true
+  python3 /root/sam9x75_uart_partner.py guest \
+      --device /dev/ttyS1 --baud 115200 --rtscts --timeout 900 \
+      --json /tmp/sam9x75-uart-rtscts-guest.json
+
+The AT91 USART model consumes adapter A's CTS state and drives its RTS state;
+QEMU's host tty is kept out of automatic ``CRTSCTS`` mode so flow control is
+owned by the emulated controller.  The peer's manual pause drives B RTS low,
+which becomes A CTS and holds the guest's next transmit byte.  B CTS samples
+record the opposite, guest-RTS direction.  This topology is the pre-hardware
+gate for the same four-wire behavior later checked on the Curiosity board.
 
 QEMU USB-serial consumer
 ------------------------
@@ -176,22 +231,62 @@ sends ``RESUME``.  Omit that option for an in-process save/restore test.
 Physical SAM9X75 board
 ----------------------
 
-QEMU's ``serialN`` backend numbering does not apply to the physical board;
-Linux4SAM still exposes the enabled FLEXCOM1 USART as ``/dev/ttyS1``.  Cross
-its TX/RX pins to the RX/TX pins of a 3.3-V adapter (never an RS-232-voltage
-cable).  Run the standard-library guest role on the board as above.  Run the
-peer role on the workstation using optional ``pyserial``::
+Do not remux the Curiosity kit's FLEXCOM1 PC27/PC28 pins for CTS/RTS.  Those
+pins conflict with the board routing used by the shipping configuration.
+Keep the existing FLEXCOM1 ``/dev/ttyS1`` test as a two-wire TX/RX gate.
+
+A candidate independent four-wire path is FLEXCOM5 on the M.2 interface.  It
+still needs a board-specific device-tree/pinctrl overlay and physical
+continuity check before use.  Wire a 3.3-V TTL adapter (never an RS-232-level
+cable) as follows, with a common ground:
+
+* board PA16/FLEXCOM5 TX to adapter RX;
+* board PA15/FLEXCOM5 RX to adapter TX;
+* board PA14/FLEXCOM5 CTS from adapter RTS; and
+* board PA30/FLEXCOM5 RTS to adapter CTS.
+
+Do not assume a Linux tty number: identify the newly enabled FLEXCOM5 USART
+from its MMIO address in ``dmesg`` and pass that device explicitly.  QEMU's
+corresponding byte chardev position is ``serial6``, but QEMU AF_UNIX modem
+lines are not implemented and cannot validate this four-wire gate.
+
+Run the peer role on the workstation using optional ``pyserial``.  The
+following opt-in gate deasserts adapter RTS once, after 32,768 received wire
+bytes.  While RTS is low it sends the protocol ACK which releases the board's
+next transmission, holds the board's CTS inactive for 250 ms, and then
+restores RTS::
 
   python3 -m pip install pyserial
   python3 sam9x75_uart_partner.py peer \
       --serial /dev/ttyUSB0 --baud 115200 --sessions 2 --timeout 900 \
+      --rts-pause-after-bytes 32768 --rts-pause-ms 250 \
       --backpressure-every-bytes 32768 \
       --backpressure-ms 20 \
       --json sam9x75-uart-hardware.json
 
 For macOS the adapter is normally named ``/dev/cu.usbserial-*``.  The default
-line format is 115200 baud, 8 data bits, no parity, one stop bit and no flow
-control.  Reset the board and restart the guest role to exercise HELLO resync.
+line format is 115200 baud, 8 data bits, no parity and one stop bit.  Enable
+hardware handshaking on the board endpoint explicitly::
+
+  python3 /root/sam9x75_uart_partner.py guest \
+      --device /dev/ttyS_DEVICE_FOR_FLEXCOM5 --baud 115200 --rtscts \
+      --timeout 900 --json /tmp/sam9x75-uart-rtscts-guest.json
+
+The JSON peer report records RTS deassert/assert readback, adapter CTS samples
+and input-queue depths around the pause.  The peer deliberately leaves
+pyserial's automatic ``rtscts`` mode off because an OS-owned RTS line cannot
+also be toggled deterministically.  This gate therefore exercises the
+adapter-RTS to board-CTS direction; adapter CTS is observed but does not gate
+peer writes.  Queue growth during the low interval may include bytes already
+in hardware or driver queues, so it is diagnostic rather than a strict
+failure.  Successful protocol completion proves that the line transition did
+not lose or corrupt data, but it does not by itself prove electrical polarity
+or the exact instant at which silicon stopped transmitting.  Confirm those
+with a logic analyzer for the hardware sign-off.
+
+Without ``--rtscts`` and ``--rts-pause-after-bytes``, behavior remains the
+original two-wire test.  Reset the board and restart the guest role to
+exercise HELLO resync.
 
 Host-only protocol test
 -----------------------
@@ -204,4 +299,5 @@ No QEMU image, guest or serial device is required::
 The tests cover incremental framing at all boundary sizes, CRC recovery,
 deterministic directions, simultaneous full-duplex traffic, fragmentation,
 backpressure, reset resynchronization from an interrupted maximum-size frame,
-and the quiesce/resume barrier.
+the quiesce/resume barrier, and safe RTS restore/readback with a fake
+PySerial-like endpoint.

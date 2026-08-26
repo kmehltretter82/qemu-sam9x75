@@ -68,12 +68,75 @@ def endpoint_args(role, **overrides):
         "barrier_ready_file": None,
         "resume_file": None,
         "migration_reconnect_timeout": 0.0,
+        "rts_pause_after_bytes": 0,
+        "rts_pause_ms": 0,
+        "rtscts": False,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
 
 
 class ProtocolUnitTests(unittest.TestCase):
+    def test_manual_rts_pause_attests_lines_and_queue(self):
+        class FakeSerial:
+            def __init__(self):
+                self._rts = True
+                self.cts = True
+                self.in_waiting = 3
+                self.transitions = []
+
+            @property
+            def rts(self):
+                return self._rts
+
+            @rts.setter
+            def rts(self, value):
+                self._rts = bool(value)
+                self.transitions.append(self._rts)
+
+        fake = FakeSerial()
+        stream = uart.PySerialStream.__new__(uart.PySerialStream)
+        stream.serial = fake
+        stream.manual_rts = True
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            fake.in_waiting = 11
+
+        callback_rts = []
+        result = stream.manual_rts_pause(
+            125,
+            during_pause=lambda: callback_rts.append(fake.rts),
+            sleep_fn=sleep,
+        )
+        self.assertEqual(fake.transitions, [False, True])
+        self.assertEqual(callback_rts, [False])
+        self.assertEqual(sleeps, [0.125])
+        self.assertTrue(result["rts_deasserted_readback"])
+        self.assertTrue(result["rts_asserted_readback"])
+        self.assertEqual(result["queued_at_rts_low"], 3)
+        self.assertEqual(result["queued_before_resume"], 11)
+        self.assertTrue(result["remote_transmit_released_while_rts_low"])
+
+    def test_manual_rts_pause_restores_line_after_failure(self):
+        class FakeSerial:
+            rts = True
+            cts = True
+            in_waiting = 0
+
+        fake = FakeSerial()
+        stream = uart.PySerialStream.__new__(uart.PySerialStream)
+        stream.serial = fake
+        stream.manual_rts = True
+
+        def fail(_seconds):
+            raise RuntimeError("injected sleep failure")
+
+        with self.assertRaisesRegex(RuntimeError, "injected"):
+            stream.manual_rts_pause(1, sleep_fn=fail)
+        self.assertTrue(fake.rts)
+
     def test_incremental_round_trip_at_every_boundary(self):
         encoded = b"".join(
             uart.Frame(

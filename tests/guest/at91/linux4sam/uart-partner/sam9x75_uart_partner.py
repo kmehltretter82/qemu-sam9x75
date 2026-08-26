@@ -383,7 +383,7 @@ class UnixServerStream:
 class PosixTTYStream:
     """Standard-library raw tty transport for the Linux4SAM guest role."""
 
-    def __init__(self, path, baud):
+    def __init__(self, path, baud, rtscts=False):
         self.path = path
         self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         speed = getattr(termios, "B%d" % baud, None)
@@ -394,6 +394,12 @@ class PosixTTYStream:
         attributes[0] = 0
         attributes[1] = 0
         attributes[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+        if rtscts:
+            crtscts = getattr(termios, "CRTSCTS", None)
+            if crtscts is None:
+                os.close(self.fd)
+                raise RuntimeError("this host has no termios CRTSCTS flag")
+            attributes[2] |= crtscts
         attributes[3] = 0
         attributes[4] = speed
         attributes[5] = speed
@@ -430,7 +436,7 @@ class PosixTTYStream:
 class PySerialStream:
     """Optional pyserial transport for a workstation-to-board adapter."""
 
-    def __init__(self, path, baud):
+    def __init__(self, path, baud, manual_rts=False):
         try:
             import serial
         except ImportError as exc:
@@ -440,10 +446,52 @@ class PySerialStream:
             ) from exc
         self.serial = serial.Serial(
             path, baudrate=baud, bytesize=8, parity="N", stopbits=1,
-            timeout=0.25, write_timeout=5,
+            timeout=0.25, write_timeout=5, rtscts=False,
         )
+        self.manual_rts = manual_rts
+        if manual_rts:
+            self.serial.rts = True
+            if not self.serial.rts:
+                self.serial.close()
+                raise RuntimeError("serial adapter did not assert RTS")
         self.serial.reset_input_buffer()
         self.serial.reset_output_buffer()
+
+    def manual_rts_pause(self, duration_ms, during_pause=None,
+                         sleep_fn=time.sleep):
+        """Momentarily deassert the adapter RTS output, then restore it."""
+
+        if not self.manual_rts:
+            raise RuntimeError("manual RTS control was not enabled")
+        result = {
+            "duration_ms": duration_ms,
+            "cts_before": bool(self.serial.cts),
+            "queued_before": int(self.serial.in_waiting),
+        }
+        error = None
+        try:
+            self.serial.rts = False
+            result["rts_deasserted_readback"] = not bool(self.serial.rts)
+            if not result["rts_deasserted_readback"]:
+                raise RuntimeError("serial adapter did not deassert RTS")
+            result["cts_while_rts_low"] = bool(self.serial.cts)
+            result["queued_at_rts_low"] = int(self.serial.in_waiting)
+            if during_pause is not None:
+                during_pause()
+                result["remote_transmit_released_while_rts_low"] = True
+            sleep_fn(duration_ms / 1000.0)
+            result["queued_before_resume"] = int(self.serial.in_waiting)
+        except Exception as exc:
+            error = exc
+        finally:
+            self.serial.rts = True
+            result["rts_asserted_readback"] = bool(self.serial.rts)
+            result["cts_after"] = bool(self.serial.cts)
+        if not result["rts_asserted_readback"]:
+            raise RuntimeError("serial adapter did not restore RTS")
+        if error is not None:
+            raise error
+        return result
 
     def read(self, size, timeout):
         old_timeout = self.serial.timeout
@@ -559,6 +607,13 @@ class EndpointRunner:
         self.read_batches = 0
         self.transport_read_bytes = 0
         self.backpressure_pause_count = 0
+        self.rts_pause_requested = bool(
+            role == "peer" and args.rts_pause_after_bytes
+        )
+        self.rts_pause_completed = False
+        self.rts_pause_armed = False
+        self.rts_pause_trigger_bytes = 0
+        self.rts_pause_result = {}
         self.errors = []
         self.started_at = time.monotonic()
         self.finished_at = None
@@ -686,7 +741,8 @@ class EndpointRunner:
             )
         self.rx_next += 1
         self.rx_valid_total += 1
-        self._enqueue(Kind.ACK, frame.sequence)
+        if not self._run_manual_rts_pause(frame.sequence):
+            self._enqueue(Kind.ACK, frame.sequence)
         self._progress("data", frame.sequence)
 
     def _maybe_request_barrier(self):
@@ -835,6 +891,43 @@ class EndpointRunner:
             self._handle_control(frame)
         self._send_done_if_ready()
 
+    def _arm_manual_rts_pause(self, previous, current):
+        threshold = self.args.rts_pause_after_bytes
+        if (not self.rts_pause_requested or self.rts_pause_completed or
+                not previous < threshold <= current):
+            return
+        self.rts_pause_armed = True
+        self.rts_pause_trigger_bytes = current
+
+    def _run_manual_rts_pause(self, sequence):
+        if (self.role != "peer" or not self.rts_pause_armed or
+                sequence >= len(BOUNDARY_SIZES) - 1):
+            return False
+        pause = getattr(self.stream, "manual_rts_pause", None)
+        if pause is None:
+            raise ProtocolError(
+                "manual RTS pause needs a pyserial transport"
+            )
+        if not self.pump.wait_idle(10.0):
+            raise ProtocolError(
+                "UART writer did not drain before flow-control probe"
+            )
+
+        def acknowledge_while_rts_low():
+            self._enqueue(Kind.ACK, sequence)
+            if not self.pump.wait_idle(10.0):
+                raise ProtocolError(
+                    "UART writer did not send flow-control probe ACK"
+                )
+
+        self.rts_pause_result = pause(
+            self.args.rts_pause_ms,
+            during_pause=acknowledge_while_rts_low,
+        )
+        self.rts_pause_completed = True
+        self.rts_pause_armed = False
+        return True
+
     def _session_complete(self):
         return self.local_done and self.remote_done
 
@@ -876,6 +969,9 @@ class EndpointRunner:
                 self.read_batches += 1
                 previous_read_bytes = self.transport_read_bytes
                 self.transport_read_bytes += len(data)
+                self._arm_manual_rts_pause(
+                    previous_read_bytes, self.transport_read_bytes,
+                )
                 backpressure_crossings = byte_threshold_crossings(
                     previous_read_bytes,
                     self.transport_read_bytes,
@@ -912,7 +1008,8 @@ class EndpointRunner:
             self.decoder.header_errors == 0 and
             self.completed_sessions >= required_sessions and
             self.tx_acked_total == expected and
-            self.rx_valid_total == expected
+            self.rx_valid_total == expected and
+            (not self.rts_pause_requested or self.rts_pause_completed)
         )
         return {
             "schema": "sam9x75-uart-partner-report-v1",
@@ -945,6 +1042,14 @@ class EndpointRunner:
             "backpressure_sleep_ms": (
                 self.backpressure_pause_count * self.args.backpressure_ms
             ),
+            "guest_rtscts": bool(getattr(self.args, "rtscts", False)),
+            "manual_rts_pause_requested": self.rts_pause_requested,
+            "manual_rts_pause_completed": self.rts_pause_completed,
+            "manual_rts_pause_after_bytes": (
+                self.args.rts_pause_after_bytes
+            ),
+            "manual_rts_pause_trigger_bytes": self.rts_pause_trigger_bytes,
+            "manual_rts_pause": dict(self.rts_pause_result),
             "migration_barrier_requested": (
                 self.args.barrier_after is not None or self.barrier_seen
             ),
@@ -993,6 +1098,13 @@ def emit_tap(report):
          report["backpressure_pause_count"],
          report["backpressure_sleep_ms"])
     )
+    if report["manual_rts_pause_requested"]:
+        print(
+            "# manual-rts: after-bytes=%d trigger-bytes=%d completed=%s" %
+            (report["manual_rts_pause_after_bytes"],
+             report["manual_rts_pause_trigger_bytes"],
+             str(report["manual_rts_pause_completed"]).lower())
+        )
     for number, (passed, description, skip) in enumerate(checks, 1):
         status = "ok" if passed else "not ok"
         suffix = " # SKIP %s" % skip if skip else ""
@@ -1060,6 +1172,14 @@ def build_parser():
         "--migration-reconnect-timeout", type=float, default=0.0,
         help="require/switch to a destination QEMU connection on resume",
     )
+    peer.add_argument(
+        "--rts-pause-after-bytes", type=int, default=0, metavar="N",
+        help="with --serial, pause remote TX after N received wire bytes",
+    )
+    peer.add_argument(
+        "--rts-pause-ms", type=int, default=250, metavar="MS",
+        help="manual RTS deassertion time (default: 250 ms)",
+    )
     peer.set_defaults(session=0)
     common_arguments(peer)
 
@@ -1068,9 +1188,14 @@ def build_parser():
                        help="guest tty (default: /dev/ttyS1)")
     guest.add_argument("--session", type=lambda value: int(value, 0),
                        default=None, help="fixed uint64 session for replay")
+    guest.add_argument(
+        "--rtscts", action="store_true",
+        help="enable termios CRTSCTS on the guest tty",
+    )
     guest.set_defaults(sessions=1, barrier_after=None,
                        barrier_ready_file=None, resume_file=None,
-                       migration_reconnect_timeout=0.0)
+                       migration_reconnect_timeout=0.0,
+                       rts_pause_after_bytes=0, rts_pause_ms=0)
     common_arguments(guest)
     return parser
 
@@ -1099,6 +1224,12 @@ def validate_args(parser, args):
             parser.error("migration reconnect requires --unix-listen")
         if args.migration_reconnect_timeout and args.barrier_after is None:
             parser.error("migration reconnect requires --barrier-after")
+        if args.rts_pause_after_bytes < 0 or args.rts_pause_ms < 0:
+            parser.error("manual RTS pause values cannot be negative")
+        if args.rts_pause_after_bytes and not args.serial:
+            parser.error("manual RTS pause requires --serial")
+        if args.rts_pause_after_bytes and not args.rts_pause_ms:
+            parser.error("manual RTS pause requires positive --rts-pause-ms")
         for option, path in (
             ("--barrier-ready-file", args.barrier_ready_file),
             ("--resume-file", args.resume_file),
@@ -1127,9 +1258,12 @@ def main(argv=None):
         if args.role == "peer" and args.unix_listen:
             stream = UnixServerStream(args.unix_listen)
         elif args.role == "peer":
-            stream = PySerialStream(args.serial, args.baud)
+            stream = PySerialStream(
+                args.serial, args.baud,
+                manual_rts=bool(args.rts_pause_after_bytes),
+            )
         else:
-            stream = PosixTTYStream(args.device, args.baud)
+            stream = PosixTTYStream(args.device, args.baud, args.rtscts)
         report = EndpointRunner(stream, args.role, args).run()
     except Exception as exc:
         report = {
@@ -1161,6 +1295,14 @@ def main(argv=None):
             "backpressure_ms": args.backpressure_ms,
             "backpressure_pause_count": 0,
             "backpressure_sleep_ms": 0,
+            "guest_rtscts": bool(getattr(args, "rtscts", False)),
+            "manual_rts_pause_requested": bool(
+                args.rts_pause_after_bytes
+            ),
+            "manual_rts_pause_completed": False,
+            "manual_rts_pause_after_bytes": args.rts_pause_after_bytes,
+            "manual_rts_pause_trigger_bytes": 0,
+            "manual_rts_pause": {},
             "migration_barrier_requested": args.barrier_after is not None,
             "migration_barrier_ready": False,
             "migration_barrier_resumed": False,
