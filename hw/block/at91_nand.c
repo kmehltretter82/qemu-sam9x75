@@ -20,6 +20,7 @@
 #include "qemu/bswap.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
 #include "system/block-backend.h"
 
 #define AT91_NAND_MMIO_SIZE     0x10000000
@@ -32,6 +33,7 @@
 #define NAND_CMD_READ_START     0x30
 #define NAND_CMD_ERASE          0x60
 #define NAND_CMD_STATUS         0x70
+#define NAND_CMD_ENH_STATUS     0x78
 #define NAND_CMD_PROGRAM_START  0x80
 #define NAND_CMD_RANDOM_INPUT   0x85
 #define NAND_CMD_READ_ID        0x90
@@ -46,6 +48,18 @@
 #define NAND_STATUS_TRUE_READY  BIT(5)
 #define NAND_STATUS_READY       BIT(6)
 #define NAND_STATUS_WP          BIT(7)
+#define NAND_STATUS_PLANE_MASK  (BIT(0) | BIT(1) | BIT(3) | BIT(4))
+#define NAND_STATUS_SHARED_MASK (BIT(5) | BIT(6) | BIT(7))
+
+#define NAND_READ_TIME_NS       (25 * SCALE_US)
+#define NAND_PROGRAM_TIME_NS    (700 * SCALE_US)
+#define NAND_RANDOM_PROGRAM_TIME_NS (740 * SCALE_US)
+#define NAND_ERASE_TIME_NS      (6000 * SCALE_US)
+#define NAND_FEATURE_TIME_NS    (1 * SCALE_US)
+#define NAND_RESET_IDLE_NS      (5 * SCALE_US)
+#define NAND_RESET_READ_NS      (5 * SCALE_US)
+#define NAND_RESET_PROGRAM_NS   (10 * SCALE_US)
+#define NAND_RESET_ERASE_NS     (500 * SCALE_US)
 
 #define ONFI_PARAM_SIZE         256
 #define ONFI_PARAM_COPIES       8
@@ -56,6 +70,24 @@
 #define NAND_FEATURE_RECOVERY_READ      0x89
 #define NAND_FEATURE_ARRAY_MODE         0x90
 #define NAND_FEATURE_CONFIGURATION      0xb0
+#define NAND_FEATURE_RANDEN              BIT(1)
+
+enum {
+    NAND_OP_NONE,
+    NAND_OP_PAGE_READ,
+    NAND_OP_PARAMETER_READ,
+    NAND_OP_GET_FEATURES,
+    NAND_OP_SET_FEATURES,
+    NAND_OP_PAGE_PROGRAM,
+    NAND_OP_BLOCK_ERASE,
+    NAND_OP_RESET,
+};
+
+static unsigned int at91_nand_plane(uint32_t row)
+{
+    /* A 4 KiB page makes physical address A19 row-address bit 6. */
+    return (row >> 6) & 1;
+}
 
 static void at91_nand_clear_sparse_pages(AT91NANDState *s)
 {
@@ -338,12 +370,48 @@ static void at91_nand_prepare_features(AT91NANDState *s)
     s->data_len = 4;
 }
 
+static void at91_nand_set_ready(AT91NANDState *s, bool ready)
+{
+    if (ready) {
+        s->status |= NAND_STATUS_TRUE_READY | NAND_STATUS_READY;
+    } else {
+        s->status &= ~(NAND_STATUS_TRUE_READY | NAND_STATUS_READY);
+    }
+    qemu_set_irq(s->ready, ready);
+}
+
+static void at91_nand_start_operation(AT91NANDState *s, uint8_t operation,
+                                      int64_t delay_ns)
+{
+    g_assert(s->pending_operation == NAND_OP_NONE);
+    s->pending_page = 0;
+    s->pending_column = 0;
+    switch (operation) {
+    case NAND_OP_PAGE_READ:
+        s->pending_page = at91_nand_row(s, true);
+        s->pending_column = at91_nand_column(s);
+        break;
+    case NAND_OP_PAGE_PROGRAM:
+        s->pending_page = s->current_page == UINT32_MAX ?
+                          at91_nand_row(s, true) : s->current_page;
+        break;
+    case NAND_OP_BLOCK_ERASE:
+        s->pending_page = at91_nand_row(s, false);
+        break;
+    default:
+        break;
+    }
+    s->pending_operation = operation;
+    at91_nand_set_ready(s, false);
+    timer_mod(s->operation_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + delay_ns);
+}
+
 static void at91_nand_read_page(AT91NANDState *s)
 {
-    uint32_t page = at91_nand_row(s, true);
-    uint32_t column = at91_nand_column(s);
+    uint32_t page = s->pending_page;
+    uint32_t column = s->pending_column;
 
-    s->status &= ~NAND_STATUS_FAIL;
     if (!at91_nand_load_page(s, page, s->data)) {
         memset(s->data, 0xff, AT91_NAND_PAGE_TOTAL_SIZE);
         s->status |= NAND_STATUS_FAIL;
@@ -355,12 +423,8 @@ static void at91_nand_read_page(AT91NANDState *s)
 
 static void at91_nand_program_page(AT91NANDState *s)
 {
-    uint32_t page = s->current_page;
+    uint32_t page = s->pending_page;
     unsigned int i;
-
-    if (page == UINT32_MAX) {
-        page = at91_nand_row(s, true);
-    }
 
     s->status &= ~NAND_STATUS_FAIL;
     if (!at91_nand_load_page(s, page, s->data)) {
@@ -377,7 +441,7 @@ static void at91_nand_program_page(AT91NANDState *s)
 
 static void at91_nand_erase_block(AT91NANDState *s)
 {
-    uint32_t page = at91_nand_row(s, false);
+    uint32_t page = s->pending_page;
     uint32_t first = page & ~(AT91_NAND_PAGES_PER_BLOCK - 1);
     unsigned int i;
 
@@ -395,6 +459,78 @@ static void at91_nand_erase_block(AT91NANDState *s)
     }
 }
 
+static void at91_nand_complete_operation(void *opaque)
+{
+    AT91NANDState *s = opaque;
+    uint8_t operation = s->pending_operation;
+    uint8_t plane;
+
+    s->pending_operation = NAND_OP_NONE;
+    switch (operation) {
+    case NAND_OP_PAGE_READ:
+        at91_nand_read_page(s);
+        break;
+    case NAND_OP_PARAMETER_READ:
+        at91_nand_prepare_parameter_page(s);
+        break;
+    case NAND_OP_GET_FEATURES:
+        at91_nand_prepare_features(s);
+        break;
+    case NAND_OP_SET_FEATURES:
+        at91_nand_commit_features(s);
+        break;
+    case NAND_OP_PAGE_PROGRAM:
+        at91_nand_program_page(s);
+        plane = at91_nand_plane(s->pending_page);
+        memset(s->plane_status, 0, sizeof(s->plane_status));
+        s->plane_status[plane] = s->status & NAND_STATUS_PLANE_MASK;
+        break;
+    case NAND_OP_BLOCK_ERASE:
+        at91_nand_erase_block(s);
+        plane = at91_nand_plane(s->pending_page);
+        memset(s->plane_status, 0, sizeof(s->plane_status));
+        s->plane_status[plane] = s->status & NAND_STATUS_PLANE_MASK;
+        break;
+    case NAND_OP_RESET:
+        break;
+    default:
+        g_assert_not_reached();
+    }
+    at91_nand_set_ready(s, true);
+}
+
+static void at91_nand_sync_operation(AT91NANDState *s)
+{
+    /*
+     * A guest can poll the MMIO data port in one uninterrupted TCG slice.
+     * Complete an elapsed virtual-clock deadline on that access as well as
+     * from the timer callback, so the status loop observes the same deadline.
+     */
+    if (s->pending_operation != NAND_OP_NONE &&
+        timer_pending(s->operation_timer) &&
+        timer_expire_time_ns(s->operation_timer) <=
+        qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)) {
+        timer_del(s->operation_timer);
+        at91_nand_complete_operation(s);
+    }
+}
+
+static int64_t at91_nand_reset_time_ns(const AT91NANDState *s)
+{
+    switch (s->pending_operation) {
+    case NAND_OP_PAGE_READ:
+    case NAND_OP_PARAMETER_READ:
+    case NAND_OP_GET_FEATURES:
+        return NAND_RESET_READ_NS;
+    case NAND_OP_PAGE_PROGRAM:
+        return NAND_RESET_PROGRAM_NS;
+    case NAND_OP_BLOCK_ERASE:
+        return NAND_RESET_ERASE_NS;
+    default:
+        return NAND_RESET_IDLE_NS;
+    }
+}
+
 static bool at91_nand_data_output_command(uint8_t command)
 {
     switch (command) {
@@ -407,15 +543,44 @@ static bool at91_nand_data_output_command(uint8_t command)
     }
 }
 
+static bool at91_nand_status_command(uint8_t command)
+{
+    return command == NAND_CMD_STATUS || command == NAND_CMD_ENH_STATUS;
+}
+
+static bool at91_nand_command_or_suspended(const AT91NANDState *s,
+                                           uint8_t command)
+{
+    return s->command == command ||
+           (at91_nand_status_command(s->command) &&
+            s->previous_command == command);
+}
+
 static void at91_nand_command(AT91NANDState *s, uint8_t command)
 {
     uint8_t previous = s->command;
     uint8_t status_return = s->previous_command;
+    int64_t reset_time_ns;
+
+    if (s->pending_operation != NAND_OP_NONE &&
+        !at91_nand_status_command(command) && command != NAND_CMD_RESET) {
+        return;
+    }
+    if (s->pending_operation == NAND_OP_RESET &&
+        command == NAND_CMD_ENH_STATUS) {
+        return;
+    }
+    if (s->pending_operation == NAND_OP_RESET && command == NAND_CMD_RESET) {
+        return;
+    }
+    if (command != NAND_CMD_ENH_STATUS) {
+        s->enhanced_status_address_len = 0;
+    }
 
     switch (command) {
     case NAND_CMD_READ0:
         /* 00h re-enables data output after an intervening status read. */
-        if (previous == NAND_CMD_STATUS &&
+        if (at91_nand_status_command(previous) &&
             at91_nand_data_output_command(status_return)) {
             command = status_return;
             break;
@@ -460,7 +625,8 @@ static void at91_nand_command(AT91NANDState *s, uint8_t command)
         break;
     case NAND_CMD_READ_START:
         if (previous == NAND_CMD_READ0) {
-            at91_nand_read_page(s);
+            at91_nand_start_operation(s, NAND_OP_PAGE_READ,
+                                     NAND_READ_TIME_NS);
             command = NAND_CMD_READ0;
         }
         break;
@@ -473,29 +639,48 @@ static void at91_nand_command(AT91NANDState *s, uint8_t command)
         break;
     case NAND_CMD_PAGE_PROGRAM:
         if (previous == NAND_CMD_PROGRAM_START) {
-            at91_nand_program_page(s);
+            int64_t delay_ns =
+                (s->features[NAND_FEATURE_CONFIGURATION][0] &
+                 NAND_FEATURE_RANDEN) ? NAND_RANDOM_PROGRAM_TIME_NS :
+                                       NAND_PROGRAM_TIME_NS;
+
+            at91_nand_start_operation(s, NAND_OP_PAGE_PROGRAM,
+                                     delay_ns);
         }
         break;
     case NAND_CMD_ERASE_START:
         if (previous == NAND_CMD_ERASE) {
-            at91_nand_erase_block(s);
+            at91_nand_start_operation(s, NAND_OP_BLOCK_ERASE,
+                                     NAND_ERASE_TIME_NS);
         }
         break;
     case NAND_CMD_STATUS:
         break;
+    case NAND_CMD_ENH_STATUS:
+        s->enhanced_status_address_len = 0;
+        break;
     case NAND_CMD_RESET:
-        s->status = NAND_STATUS_TRUE_READY | NAND_STATUS_READY |
-                    NAND_STATUS_WP;
+        reset_time_ns = at91_nand_reset_time_ns(s);
+        timer_del(s->operation_timer);
+        s->pending_operation = NAND_OP_NONE;
+        s->status = NAND_STATUS_WP;
         s->address_len = 0;
+        memset(s->plane_status, 0, sizeof(s->plane_status));
         s->data_pos = 0;
         s->data_len = 0;
+        s->current_page = UINT32_MAX;
+        s->program_column = 0;
+        s->program_pos = 0;
+        memset(s->program, 0xff, sizeof(s->program));
+        at91_nand_start_operation(s, NAND_OP_RESET, reset_time_ns);
         break;
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
                       TYPE_AT91_NAND ": unknown command 0x%02x\n", command);
         break;
     }
-    if (command != NAND_CMD_STATUS || previous != NAND_CMD_STATUS) {
+    if (!at91_nand_status_command(command) ||
+        !at91_nand_status_command(previous)) {
         s->previous_command = previous;
     }
     s->command = command;
@@ -503,13 +688,36 @@ static void at91_nand_command(AT91NANDState *s, uint8_t command)
 
 static void at91_nand_address(AT91NANDState *s, uint8_t address)
 {
+    if (s->command == NAND_CMD_ENH_STATUS) {
+        if (s->enhanced_status_address_len <
+            ARRAY_SIZE(s->enhanced_status_address)) {
+            s->enhanced_status_address[s->enhanced_status_address_len++] =
+                address;
+        }
+        return;
+    }
+    if (s->pending_operation != NAND_OP_NONE) {
+        return;
+    }
     if (s->address_len < ARRAY_SIZE(s->address)) {
         s->address[s->address_len++] = address;
+    }
+    if (s->address_len == 1) {
+        if (s->command == NAND_CMD_READ_PARAM) {
+            at91_nand_start_operation(s, NAND_OP_PARAMETER_READ,
+                                     NAND_READ_TIME_NS);
+        } else if (s->command == NAND_CMD_GET_FEATURES) {
+            at91_nand_start_operation(s, NAND_OP_GET_FEATURES,
+                                     NAND_FEATURE_TIME_NS);
+        }
     }
 }
 
 static void at91_nand_data_write(AT91NANDState *s, uint8_t value)
 {
+    if (s->pending_operation != NAND_OP_NONE) {
+        return;
+    }
     if (s->command == NAND_CMD_PROGRAM_START) {
         if (s->program_pos == UINT32_MAX) {
             if (s->current_page == UINT32_MAX) {
@@ -535,7 +743,8 @@ static void at91_nand_data_write(AT91NANDState *s, uint8_t value)
         if (s->data_pos < 4) {
             s->data[s->data_pos++] = value;
             if (s->data_pos == 4) {
-                at91_nand_commit_features(s);
+                at91_nand_start_operation(s, NAND_OP_SET_FEATURES,
+                                         NAND_FEATURE_TIME_NS);
             }
         }
     }
@@ -543,21 +752,36 @@ static void at91_nand_data_write(AT91NANDState *s, uint8_t value)
 
 static uint8_t at91_nand_data_read(AT91NANDState *s)
 {
+    if (s->pending_operation != NAND_OP_NONE &&
+        !at91_nand_status_command(s->command)) {
+        return 0xff;
+    }
     switch (s->command) {
     case NAND_CMD_STATUS:
         return s->status;
+    case NAND_CMD_ENH_STATUS:
+        if (s->enhanced_status_address_len ==
+            ARRAY_SIZE(s->enhanced_status_address)) {
+            uint32_t row = s->enhanced_status_address[0] |
+                           s->enhanced_status_address[1] << 8 |
+                           s->enhanced_status_address[2] << 16;
+
+            return (s->status & NAND_STATUS_SHARED_MASK) |
+                   s->plane_status[at91_nand_plane(row)];
+        }
+        return 0xff;
     case NAND_CMD_READ_ID:
         if (!s->data_len) {
             at91_nand_prepare_id(s);
         }
         break;
     case NAND_CMD_READ_PARAM:
-        if (!s->data_len) {
+        if (!s->data_len && s->address_len) {
             at91_nand_prepare_parameter_page(s);
         }
         break;
     case NAND_CMD_GET_FEATURES:
-        if (!s->data_len) {
+        if (!s->data_len && s->address_len) {
             at91_nand_prepare_features(s);
         }
         break;
@@ -585,6 +809,7 @@ static uint64_t at91_nand_read(void *opaque, hwaddr offset,
     if (!s->selected) {
         return UINT64_MAX;
     }
+    at91_nand_sync_operation(s);
     if (offset & (AT91_NAND_ALE | AT91_NAND_CLE)) {
         return 0xff;
     }
@@ -599,6 +824,7 @@ static void at91_nand_write(void *opaque, hwaddr offset, uint64_t value,
     if (!s->selected) {
         return;
     }
+    at91_nand_sync_operation(s);
     if (offset & AT91_NAND_CLE) {
         at91_nand_command(s, value);
     } else if (offset & AT91_NAND_ALE) {
@@ -639,12 +865,20 @@ static void at91_nand_reset_hold(Object *obj, ResetType type)
         return;
     }
 
+    timer_del(s->operation_timer);
     s->command = NAND_CMD_READ0;
     s->previous_command = NAND_CMD_READ0;
     s->status = NAND_STATUS_TRUE_READY | NAND_STATUS_READY |
                 NAND_STATUS_WP;
+    s->pending_operation = NAND_OP_NONE;
+    s->pending_page = 0;
+    s->pending_column = 0;
     memset(s->address, 0, sizeof(s->address));
     s->address_len = 0;
+    memset(s->enhanced_status_address, 0,
+           sizeof(s->enhanced_status_address));
+    s->enhanced_status_address_len = 0;
+    memset(s->plane_status, 0, sizeof(s->plane_status));
     s->feature_address = 0;
     memset(s->features, 0, sizeof(s->features));
     s->current_page = 0;
@@ -654,6 +888,7 @@ static void at91_nand_reset_hold(Object *obj, ResetType type)
     s->program_pos = 0;
     memset(s->data, 0xff, sizeof(s->data));
     memset(s->program, 0xff, sizeof(s->program));
+    at91_nand_set_ready(s, true);
 }
 
 static void at91_nand_realize(DeviceState *dev, Error **errp)
@@ -687,6 +922,7 @@ static void at91_nand_finalize(Object *obj)
 {
     AT91NANDState *s = AT91_NAND(obj);
 
+    timer_free(s->operation_timer);
     if (s->sparse_pages) {
         at91_nand_clear_sparse_pages(s);
         g_free(s->sparse_pages);
@@ -856,10 +1092,143 @@ static const VMStateDescription at91_nand_sparse_oob_vmstate = {
     },
 };
 
+static bool at91_nand_operation_needed(void *opaque)
+{
+    AT91NANDState *s = opaque;
+
+    return s->pending_operation != NAND_OP_NONE;
+}
+
+static bool at91_nand_operation_post_load(void *opaque, int version_id,
+                                          Error **errp)
+{
+    AT91NANDState *s = opaque;
+
+    if (s->pending_operation <= NAND_OP_NONE ||
+        s->pending_operation > NAND_OP_RESET) {
+        error_setg(errp, "invalid pending NAND operation %u",
+                   s->pending_operation);
+        goto fail;
+    }
+    if (!timer_pending(s->operation_timer)) {
+        error_setg(errp, "pending NAND operation has no completion timer");
+        goto fail;
+    }
+    if (s->pending_page > 0x00ffffff ||
+        s->pending_column > UINT16_MAX) {
+        error_setg(errp,
+                   "invalid pending NAND address %" PRIu32 "/%" PRIu32,
+                   s->pending_page, s->pending_column);
+        goto fail;
+    }
+
+    return true;
+
+fail:
+    timer_del(s->operation_timer);
+    s->pending_operation = NAND_OP_NONE;
+    return false;
+}
+
+static const VMStateDescription at91_nand_operation_vmstate = {
+    .name = TYPE_AT91_NAND "/operation",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = at91_nand_operation_needed,
+    .post_load_errp = at91_nand_operation_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(pending_operation, AT91NANDState),
+        VMSTATE_UINT32(pending_page, AT91NANDState),
+        VMSTATE_UINT32(pending_column, AT91NANDState),
+        VMSTATE_TIMER_PTR(operation_timer, AT91NANDState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static bool at91_nand_enhanced_status_needed(void *opaque)
+{
+    AT91NANDState *s = opaque;
+
+    return s->command == NAND_CMD_ENH_STATUS ||
+           s->plane_status[0] || s->plane_status[1];
+}
+
+static bool at91_nand_enhanced_status_post_load(void *opaque,
+                                                int version_id,
+                                                Error **errp)
+{
+    AT91NANDState *s = opaque;
+
+    if (s->enhanced_status_address_len >
+        ARRAY_SIZE(s->enhanced_status_address) ||
+        (s->command != NAND_CMD_ENH_STATUS &&
+         s->enhanced_status_address_len) ||
+        (s->plane_status[0] & ~NAND_STATUS_PLANE_MASK) ||
+        (s->plane_status[1] & ~NAND_STATUS_PLANE_MASK)) {
+        error_setg(errp, "invalid NAND Enhanced Status state");
+        timer_del(s->operation_timer);
+        s->pending_operation = NAND_OP_NONE;
+        return false;
+    }
+    return true;
+}
+
+static const VMStateDescription at91_nand_enhanced_status_vmstate = {
+    .name = TYPE_AT91_NAND "/enhanced-status",
+    .version_id = 2,
+    .minimum_version_id = 1,
+    .needed = at91_nand_enhanced_status_needed,
+    .post_load_errp = at91_nand_enhanced_status_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_ARRAY(enhanced_status_address, AT91NANDState, 3),
+        VMSTATE_UINT8(enhanced_status_address_len, AT91NANDState),
+        VMSTATE_UINT8_ARRAY_V(plane_status, AT91NANDState, 2, 2),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static bool at91_nand_pre_load(void *opaque, Error **errp)
 {
-    at91_nand_clear_sparse_pages(opaque);
+    AT91NANDState *s = opaque;
+
+    at91_nand_clear_sparse_pages(s);
+    timer_del(s->operation_timer);
+    s->pending_operation = NAND_OP_NONE;
+    s->pending_page = 0;
+    s->pending_column = 0;
+    memset(s->enhanced_status_address, 0,
+           sizeof(s->enhanced_status_address));
+    s->enhanced_status_address_len = 0;
+    memset(s->plane_status, 0, sizeof(s->plane_status));
     return true;
+}
+
+static bool at91_nand_pending_operation_valid(const AT91NANDState *s)
+{
+    switch (s->pending_operation) {
+    case NAND_OP_NONE:
+        return true;
+    case NAND_OP_PAGE_READ:
+        return at91_nand_command_or_suspended(s, NAND_CMD_READ0);
+    case NAND_OP_PARAMETER_READ:
+        return s->address_len >= 1 &&
+               at91_nand_command_or_suspended(s, NAND_CMD_READ_PARAM);
+    case NAND_OP_GET_FEATURES:
+        return s->address_len >= 1 &&
+               at91_nand_command_or_suspended(s, NAND_CMD_GET_FEATURES);
+    case NAND_OP_SET_FEATURES:
+        return s->address_len >= 1 && s->data_pos == 4 &&
+               at91_nand_command_or_suspended(s, NAND_CMD_SET_FEATURES);
+    case NAND_OP_PAGE_PROGRAM:
+        return at91_nand_command_or_suspended(s, NAND_CMD_PAGE_PROGRAM);
+    case NAND_OP_BLOCK_ERASE:
+        return at91_nand_command_or_suspended(s, NAND_CMD_ERASE_START);
+    case NAND_OP_RESET:
+        return s->command != NAND_CMD_ENH_STATUS &&
+               at91_nand_command_or_suspended(s, NAND_CMD_RESET);
+    default:
+        return false;
+    }
 }
 
 static bool at91_nand_post_load(void *opaque, int version_id, Error **errp)
@@ -873,32 +1242,38 @@ static bool at91_nand_post_load(void *opaque, int version_id, Error **errp)
 
     if (s->address_len > ARRAY_SIZE(s->address)) {
         error_setg(errp, "invalid NAND address length %u", s->address_len);
-        return false;
+        goto fail;
     }
     if (s->data_pos > sizeof(s->data) || s->data_len > sizeof(s->data)) {
         error_setg(errp, "invalid NAND data cursor %" PRIu32 "/%" PRIu32,
                    s->data_pos, s->data_len);
-        return false;
+        goto fail;
     }
     if (s->command == NAND_CMD_SET_FEATURES && s->data_pos > 4) {
         error_setg(errp, "invalid NAND Set Features cursor %" PRIu32,
                    s->data_pos);
-        return false;
+        goto fail;
     }
     if (s->program_column > UINT16_MAX ||
         (s->program_pos != UINT32_MAX && s->program_pos > UINT16_MAX)) {
         error_setg(errp, "invalid NAND program cursor %" PRIu32 "/%" PRIu32,
                    s->program_column, s->program_pos);
-        return false;
+        goto fail;
     }
     if (s->current_page != UINT32_MAX && s->current_page > 0x00ffffff) {
         error_setg(errp, "invalid NAND current page %" PRIu32,
                    s->current_page);
-        return false;
+        goto fail;
     }
     if (s->raw_backend && at91_nand_has_sparse_pages(s)) {
         error_setg(errp, "raw NAND backend has unexpected sparse state");
-        return false;
+        goto fail;
+    }
+    if (!at91_nand_pending_operation_valid(s)) {
+        error_setg(errp,
+                   "inconsistent pending NAND operation %u for command 0x%02x",
+                   s->pending_operation, s->command);
+        goto fail;
     }
 
     /*
@@ -911,7 +1286,14 @@ static bool at91_nand_post_load(void *opaque, int version_id, Error **errp)
         memcpy(s->data, s->features[s->feature_address], s->data_pos);
     }
 
+    at91_nand_set_ready(s, s->pending_operation == NAND_OP_NONE);
     return true;
+
+fail:
+    timer_del(s->operation_timer);
+    s->pending_operation = NAND_OP_NONE;
+    at91_nand_set_ready(s, true);
+    return false;
 }
 
 /* External backend data is shared storage; device-owned sparse state moves. */
@@ -940,6 +1322,8 @@ static const VMStateDescription at91_nand_vmstate = {
         VMSTATE_END_OF_LIST()
     },
     .subsections = (const VMStateDescription * const []) {
+        &at91_nand_operation_vmstate,
+        &at91_nand_enhanced_status_vmstate,
         &at91_nand_sparse_full_vmstate,
         &at91_nand_sparse_oob_vmstate,
         NULL
@@ -960,6 +1344,10 @@ static void at91_nand_init(Object *obj)
     memory_region_init_io(&s->mmio, obj, &at91_nand_ops, s,
                           TYPE_AT91_NAND, AT91_NAND_MMIO_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->mmio);
+    s->operation_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                      at91_nand_complete_operation, s);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->ready,
+                             AT91_NAND_GPIO_READY, 1);
     qdev_init_gpio_in_named(DEVICE(obj), at91_nand_nce,
                             AT91_NAND_GPIO_NCE, 1);
 }

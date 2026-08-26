@@ -1472,6 +1472,7 @@
 #define PIO_PDR                 0x004
 #define PIO_PSR                 0x008
 #define PIO_OER                 0x010
+#define PIO_ODR                 0x014
 #define PIO_OSR                 0x018
 #define PIO_IFER                0x020
 #define PIO_IFSR                0x028
@@ -1551,6 +1552,7 @@
 #define NAND_CMD_READ_START     0x30
 #define NAND_CMD_ERASE          0x60
 #define NAND_CMD_STATUS         0x70
+#define NAND_CMD_ENH_STATUS     0x78
 #define NAND_CMD_PROGRAM_START  0x80
 #define NAND_CMD_RANDOM_INPUT   0x85
 #define NAND_CMD_READ_ID        0x90
@@ -1566,6 +1568,19 @@
 #define NAND_STATUS_WP          BIT(7)
 #define NAND_STATUS_IDLE        (NAND_STATUS_TRUE_READY | \
                                  NAND_STATUS_READY | NAND_STATUS_WP)
+#define NAND_STATUS_BUSY        NAND_STATUS_WP
+
+#define NAND_READ_TIME_NS       25000
+#define NAND_PROGRAM_TIME_NS    700000
+#define NAND_RANDOM_PROGRAM_TIME_NS 740000
+#define NAND_ERASE_TIME_NS      6000000
+#define NAND_FEATURE_TIME_NS    1000
+#define NAND_RESET_IDLE_NS      5000
+#define NAND_RESET_READ_NS      5000
+#define NAND_RESET_PROGRAM_NS   10000
+#define NAND_RESET_ERASE_NS     500000
+#define NAND_READY_PIN          BIT(14)
+#define NAND_READY_PIO_PID      44
 
 #define SMC_SETUP2              0x20
 #define SMC_PULSE2              0x24
@@ -14179,8 +14194,24 @@ static void nand_page_address(QTestState *qts, uint32_t column,
     nand_address(qts, page >> 16);
 }
 
-static void nand_program(QTestState *qts, uint32_t page, uint32_t column,
-                         const uint8_t *data, size_t length)
+static uint8_t nand_read_status(QTestState *qts)
+{
+    nand_command(qts, NAND_CMD_STATUS);
+    return qtest_readb(qts, NAND_DATA);
+}
+
+static uint8_t nand_read_enhanced_status(QTestState *qts, uint32_t page)
+{
+    nand_command(qts, NAND_CMD_ENH_STATUS);
+    nand_address(qts, page);
+    nand_address(qts, page >> 8);
+    nand_address(qts, page >> 16);
+    return qtest_readb(qts, NAND_DATA);
+}
+
+static void nand_begin_program(QTestState *qts, uint32_t page,
+                               uint32_t column, const uint8_t *data,
+                               size_t length)
 {
     size_t i;
 
@@ -14190,15 +14221,63 @@ static void nand_program(QTestState *qts, uint32_t page, uint32_t column,
         qtest_writeb(qts, NAND_DATA, data[i]);
     }
     nand_command(qts, NAND_CMD_PAGE_PROGRAM);
-    nand_command(qts, NAND_CMD_STATUS);
-    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
 }
 
-static void nand_start_read(QTestState *qts, uint32_t page, uint32_t column)
+static void nand_program(QTestState *qts, uint32_t page, uint32_t column,
+                         const uint8_t *data, size_t length)
+{
+    nand_begin_program(qts, page, column, data, length);
+    qtest_clock_step(qts, NAND_PROGRAM_TIME_NS);
+    g_assert_cmphex(nand_read_status(qts), ==, NAND_STATUS_IDLE);
+}
+
+static void nand_begin_read(QTestState *qts, uint32_t page, uint32_t column)
 {
     nand_command(qts, NAND_CMD_READ0);
     nand_page_address(qts, column, page);
     nand_command(qts, NAND_CMD_READ_START);
+}
+
+static void nand_start_read(QTestState *qts, uint32_t page, uint32_t column)
+{
+    nand_begin_read(qts, page, column);
+    qtest_clock_step(qts, NAND_READ_TIME_NS);
+}
+
+static void nand_begin_erase(QTestState *qts, uint32_t page)
+{
+    nand_command(qts, NAND_CMD_ERASE);
+    nand_address(qts, page);
+    nand_address(qts, page >> 8);
+    nand_address(qts, page >> 16);
+    nand_command(qts, NAND_CMD_ERASE_START);
+}
+
+static bool nand_ready(QTestState *qts)
+{
+    return qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_PDSR) & NAND_READY_PIN;
+}
+
+static void nand_enable_ready_observation(QTestState *qts)
+{
+    pmc_write_pcr(qts, NAND_READY_PIO_PID, PMC_PCR_EN);
+    qtest_writel(qts, SAM9X7_PIOD_BASE + PIO_PER, NAND_READY_PIN);
+    qtest_writel(qts, SAM9X7_PIOD_BASE + PIO_ODR, NAND_READY_PIN);
+    qtest_writel(qts, SAM9X7_PIOD_BASE + PIO_IER, NAND_READY_PIN);
+    qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_ISR);
+}
+
+static void nand_assert_ready_state(QTestState *qts, bool ready,
+                                    uint8_t status)
+{
+    g_assert_cmpint(nand_ready(qts), ==, ready);
+    g_assert_cmphex(nand_read_status(qts), ==, status);
+}
+
+static void nand_assert_ready_edge(QTestState *qts)
+{
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_ISR) &
+                  NAND_READY_PIN);
 }
 
 static void nand_set_features(QTestState *qts, uint8_t address,
@@ -14211,6 +14290,9 @@ static void nand_set_features(QTestState *qts, uint8_t address,
     for (i = 0; i < length; i++) {
         qtest_writeb(qts, NAND_DATA, data[i]);
     }
+    if (length == 4) {
+        qtest_clock_step(qts, NAND_FEATURE_TIME_NS);
+    }
 }
 
 static void nand_get_features(QTestState *qts, uint8_t address,
@@ -14220,6 +14302,7 @@ static void nand_get_features(QTestState *qts, uint8_t address,
 
     nand_command(qts, NAND_CMD_GET_FEATURES);
     nand_address(qts, address);
+    qtest_clock_step(qts, NAND_FEATURE_TIME_NS);
     for (i = 0; i < 4; i++) {
         data[i] = qtest_readb(qts, NAND_DATA);
     }
@@ -14231,6 +14314,36 @@ static void nand_migrate(QTestState *from, QTestState *to)
     migrate_qmp(from, to, NULL, NULL, "{}");
     wait_for_migration_complete(from);
     wait_for_migration_complete(to);
+}
+
+static QTestState *nand_migrate_pending_to_completion(QTestState *from,
+                                                       int64_t elapsed_ns,
+                                                       int64_t duration_ns)
+{
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    int64_t source_clock;
+
+    g_assert_cmpint(elapsed_ns, >, 0);
+    g_assert_cmpint(elapsed_ns, <, duration_ns);
+    nand_assert_ready_state(from, false, NAND_STATUS_BUSY);
+    nand_assert_ready_edge(from);
+    source_clock = qtest_clock_step(from, elapsed_ns);
+
+    nand_migrate(from, to);
+    g_assert_false(qtest_readl(to, SAM9X7_PIOD_BASE + PIO_ISR) &
+                   NAND_READY_PIN);
+    nand_assert_ready_state(to, false, NAND_STATUS_BUSY);
+    g_assert_cmpint(qtest_clock_set(to, source_clock), ==, source_clock);
+    qtest_clock_step(to, duration_ns - elapsed_ns - 1);
+    nand_assert_ready_state(to, false, NAND_STATUS_BUSY);
+    g_assert_false(qtest_readl(to, SAM9X7_PIOD_BASE + PIO_ISR) &
+                   NAND_READY_PIN);
+    qtest_clock_step(to, 1);
+    nand_assert_ready_state(to, true, NAND_STATUS_IDLE);
+    nand_assert_ready_edge(to);
+
+    qtest_quit(from);
+    return to;
 }
 
 static void test_ebi_chip_select_assignments(void)
@@ -14513,6 +14626,130 @@ static const uint8_t nand_parameter_page[256] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8d, 0xed,
 };
 
+static void test_nand_timing_and_ready_busy(void)
+{
+    static const uint8_t payload[] = { 0x5a, 0xa5, 0x36, 0xc9 };
+    static const uint8_t feature[] = { 4, 0, 0, 0 };
+    const uint32_t ready_vector = 0x44444444;
+    const uint32_t page = 96;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int i;
+
+    ebi_enable_nand(qts);
+    nand_enable_ready_observation(qts);
+    nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
+
+    /* The NAND, rather than PIOD's internal pull-up, drives ready high. */
+    qtest_writel(qts, SAM9X7_PIOD_BASE + PIO_PUDR, NAND_READY_PIN);
+    g_assert_true(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_PUSR) &
+                  NAND_READY_PIN);
+    g_assert_true(nand_ready(qts));
+
+    aic_configure(qts, NAND_READY_PIO_PID, AIC_SMR_LEVEL_HIGH | 4,
+                  ready_vector);
+    nand_begin_program(qts, page, 7, payload, sizeof(payload));
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+
+    /* PIOD's NAND R/B edge reaches AIC source 44 and its vector. */
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_CISR) &
+                  AIC_CISR_IRQ);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IVR), ==,
+                    ready_vector);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_ISR), ==,
+                    NAND_READY_PIO_PID);
+    nand_assert_ready_edge(qts);
+    qtest_writel(qts, SAM9X7_AIC_BASE + AIC_EOICR, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_ISR), ==, 0);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR1) & BIT(12));
+
+    /* Busy cycles other than Status and Reset are ignored silently. */
+    nand_command(qts, NAND_CMD_READ_ID);
+    nand_address(qts, 0x20);
+    qtest_writeb(qts, NAND_DATA, 0x00);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_BUSY);
+
+    qtest_clock_step(qts, NAND_PROGRAM_TIME_NS - 1);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    g_assert_false(qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_ISR) &
+                   NAND_READY_PIN);
+    qtest_clock_step(qts, 1);
+    nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
+    nand_assert_ready_edge(qts);
+
+    nand_begin_read(qts, page, 7);
+    nand_command(qts, NAND_CMD_ENH_STATUS);
+    nand_address(qts, page);
+    nand_address(qts, page >> 8);
+    nand_address(qts, page >> 16);
+    g_assert_false(nand_ready(qts));
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_BUSY);
+    nand_assert_ready_edge(qts);
+    qtest_clock_step(qts, NAND_READ_TIME_NS - 1);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, 1);
+    nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
+    nand_assert_ready_edge(qts);
+    nand_command(qts, NAND_CMD_READ0);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, payload[i]);
+    }
+
+    nand_command(qts, NAND_CMD_SET_FEATURES);
+    nand_address(qts, 0x01);
+    for (i = 0; i < sizeof(feature); i++) {
+        qtest_writeb(qts, NAND_DATA, feature[i]);
+    }
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    nand_assert_ready_edge(qts);
+    qtest_clock_step(qts, NAND_FEATURE_TIME_NS - 1);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, 1);
+    nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
+    nand_assert_ready_edge(qts);
+
+    nand_command(qts, NAND_CMD_GET_FEATURES);
+    nand_address(qts, 0x01);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    nand_assert_ready_edge(qts);
+    qtest_clock_step(qts, NAND_FEATURE_TIME_NS - 1);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, 1);
+    nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
+    nand_assert_ready_edge(qts);
+    nand_command(qts, NAND_CMD_READ0);
+    for (i = 0; i < sizeof(feature); i++) {
+        g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, feature[i]);
+    }
+
+    nand_begin_erase(qts, page);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    nand_assert_ready_edge(qts);
+    qtest_clock_step(qts, NAND_ERASE_TIME_NS - 1);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, 1);
+    nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
+    nand_assert_ready_edge(qts);
+
+    nand_start_read(qts, page, 7);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0xff);
+    }
+    qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_ISR);
+
+    nand_command(qts, NAND_CMD_RESET);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    nand_assert_ready_edge(qts);
+    qtest_clock_step(qts, 1);
+    nand_command(qts, NAND_CMD_RESET);
+    qtest_clock_step(qts, NAND_RESET_IDLE_NS - 2);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, 1);
+    nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
+    nand_assert_ready_edge(qts);
+
+    qtest_quit(qts);
+}
+
 static void test_nand_identification_program_and_erase(void)
 {
     static const uint8_t expected_id[] = {
@@ -14552,8 +14789,11 @@ static void test_nand_identification_program_and_erase(void)
     nand_command(qts, NAND_CMD_READ_PARAM);
     nand_address(qts, 0x00);
     nand_command(qts, NAND_CMD_STATUS);
-    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_BUSY);
     /* Repeated status commands must retain the suspended data producer. */
+    nand_command(qts, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, NAND_READ_TIME_NS);
     nand_command(qts, NAND_CMD_STATUS);
     g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
     nand_command(qts, NAND_CMD_READ0);
@@ -14577,9 +14817,15 @@ static void test_nand_identification_program_and_erase(void)
         qtest_writeb(qts, NAND_DATA, feature[i]);
     }
     nand_command(qts, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, NAND_FEATURE_TIME_NS);
+    nand_command(qts, NAND_CMD_STATUS);
     g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
     nand_command(qts, NAND_CMD_GET_FEATURES);
     nand_address(qts, 0x01);
+    nand_command(qts, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, NAND_FEATURE_TIME_NS);
     nand_command(qts, NAND_CMD_STATUS);
     g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
     nand_command(qts, NAND_CMD_READ0);
@@ -14597,6 +14843,7 @@ static void test_nand_identification_program_and_erase(void)
         qtest_writeb(qts, NAND_DATA, payload[i]);
     }
     nand_command(qts, NAND_CMD_PAGE_PROGRAM);
+    qtest_clock_step(qts, NAND_PROGRAM_TIME_NS);
     nand_command(qts, NAND_CMD_STATUS);
     g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
 
@@ -14610,6 +14857,7 @@ static void test_nand_identification_program_and_erase(void)
         qtest_writeb(qts, NAND_DATA, oob_payload[i]);
     }
     nand_command(qts, NAND_CMD_PAGE_PROGRAM);
+    qtest_clock_step(qts, NAND_PROGRAM_TIME_NS);
     nand_command(qts, NAND_CMD_STATUS);
     g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
 
@@ -14620,6 +14868,7 @@ static void test_nand_identification_program_and_erase(void)
     nand_address(qts, 0x00);
     nand_address(qts, 0x00);
     nand_command(qts, NAND_CMD_READ_START);
+    qtest_clock_step(qts, NAND_READ_TIME_NS);
     nand_command(qts, NAND_CMD_STATUS);
     g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
     nand_command(qts, NAND_CMD_READ0);
@@ -14634,6 +14883,7 @@ static void test_nand_identification_program_and_erase(void)
     nand_address(qts, 0x00);
     nand_address(qts, 0x00);
     nand_command(qts, NAND_CMD_READ_START);
+    qtest_clock_step(qts, NAND_READ_TIME_NS);
     nand_command(qts, NAND_CMD_STATUS);
     g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
     nand_command(qts, NAND_CMD_READ0);
@@ -14646,6 +14896,7 @@ static void test_nand_identification_program_and_erase(void)
     nand_address(qts, 0x00);
     nand_address(qts, 0x00);
     nand_command(qts, NAND_CMD_ERASE_START);
+    qtest_clock_step(qts, NAND_ERASE_TIME_NS);
     nand_command(qts, NAND_CMD_READ0);
     nand_address(qts, 0x00);
     nand_address(qts, 0x00);
@@ -14653,6 +14904,7 @@ static void test_nand_identification_program_and_erase(void)
     nand_address(qts, 0x00);
     nand_address(qts, 0x00);
     nand_command(qts, NAND_CMD_READ_START);
+    qtest_clock_step(qts, NAND_READ_TIME_NS);
     for (i = 0; i < G_N_ELEMENTS(payload); i++) {
         g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0xff);
     }
@@ -14664,6 +14916,7 @@ static void test_nand_identification_program_and_erase(void)
     nand_address(qts, 0x00);
     nand_address(qts, 0x00);
     nand_command(qts, NAND_CMD_READ_START);
+    qtest_clock_step(qts, NAND_READ_TIME_NS);
     for (i = 0; i < G_N_ELEMENTS(oob_payload); i++) {
         g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0xff);
     }
@@ -14690,6 +14943,8 @@ static void test_nand_features_and_reset_domains(void)
         0xf4, 0xaa, 0x55, 0xff,
     };
     static const uint8_t timing_mode_4[4] = { 4, 0, 0, 0 };
+    static const uint8_t invalid_timing_mode[4] = { 6, 0, 0, 0 };
+    static const uint8_t off_device_data = 0x5a;
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
     uint8_t feature[4];
     uint32_t value;
@@ -14734,7 +14989,35 @@ static void test_nand_features_and_reset_domains(void)
     g_assert_cmpmem(feature, sizeof(feature), timing_mode_4,
                     sizeof(timing_mode_4));
 
+    /* B0h.RANDEN extends program time, including a failing program. */
+    nand_begin_program(qts, 0x00ffffff, 0, &off_device_data, 1);
+    qtest_clock_step(qts, NAND_PROGRAM_TIME_NS);
+    g_assert_cmphex(nand_read_status(qts), ==, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, NAND_RANDOM_PROGRAM_TIME_NS -
+                     NAND_PROGRAM_TIME_NS - 1);
+    g_assert_cmphex(nand_read_status(qts), ==, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, 1);
+    g_assert_cmphex(nand_read_status(qts), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+
+    /* Set Features neither owns nor clears the program/erase fail latch. */
+    nand_start_read(qts, 0, 0);
+    g_assert_cmphex(nand_read_status(qts), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+    nand_set_features(qts, 0x01, invalid_timing_mode,
+                      sizeof(invalid_timing_mode));
+    g_assert_cmphex(nand_read_status(qts), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+    nand_get_features(qts, 0x01, feature);
+    g_assert_cmpmem(feature, sizeof(feature), timing_mode_4,
+                    sizeof(timing_mode_4));
+    g_assert_cmphex(nand_read_status(qts), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+
     nand_command(qts, NAND_CMD_RESET);
+    nand_command(qts, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, NAND_RESET_IDLE_NS);
     nand_command(qts, NAND_CMD_STATUS);
     g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, NAND_STATUS_IDLE);
     for (i = 0; i < G_N_ELEMENTS(feature_cases); i++) {
@@ -14746,6 +15029,7 @@ static void test_nand_features_and_reset_domains(void)
     /* The external NAND protocol and volatile features survive PROCRST. */
     nand_command(qts, NAND_CMD_GET_FEATURES);
     nand_address(qts, 0x01);
+    qtest_clock_step(qts, NAND_FEATURE_TIME_NS);
     g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 4);
     qtest_writel(qts, SAM9X7_RSTC_BASE + RSTC_CR,
                  RSTC_KEY | RSTC_CR_PROCRST);
@@ -14776,21 +15060,164 @@ static void test_nand_features_and_reset_domains(void)
     qtest_quit(qts);
 }
 
+static void test_nand_pending_operation_reset_domains(void)
+{
+    static const uint8_t payload[] = { 0x96, 0x69, 0x3c, 0xc3 };
+    static const uint8_t feature[] = { 4, 0, 0, 0 };
+    static const uint8_t feature_default[4] = { 0 };
+    const uint32_t abort_page = 192;
+    const uint32_t preserve_page = 193;
+    const uint32_t cold_reset_page = 194;
+    const int64_t elapsed = 200000;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint8_t observed_feature[4];
+    uint32_t value;
+    unsigned int i;
+
+    ebi_enable_nand(qts);
+    nand_enable_ready_observation(qts);
+    nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
+
+    /* Set Features is not an array program and uses the idle reset time. */
+    nand_command(qts, NAND_CMD_SET_FEATURES);
+    nand_address(qts, 0x01);
+    for (i = 0; i < sizeof(feature); i++) {
+        qtest_writeb(qts, NAND_DATA, feature[i]);
+    }
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    nand_assert_ready_edge(qts);
+    nand_command(qts, NAND_CMD_RESET);
+    qtest_clock_step(qts, NAND_RESET_IDLE_NS - 1);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, 1);
+    nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
+    nand_assert_ready_edge(qts);
+    nand_get_features(qts, 0x01, observed_feature);
+    g_assert_cmpmem(observed_feature, sizeof(observed_feature),
+                    feature_default, sizeof(feature_default));
+    qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_ISR);
+
+    /* FFh aborts a pending program and uses the program reset interval. */
+    nand_begin_program(qts, abort_page, 0, payload, sizeof(payload));
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    nand_assert_ready_edge(qts);
+    qtest_clock_step(qts, elapsed);
+    nand_command(qts, NAND_CMD_RESET);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, 1);
+    nand_command(qts, NAND_CMD_RESET);
+    qtest_clock_step(qts, NAND_RESET_PROGRAM_NS - 2);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, 1);
+    nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
+    nand_assert_ready_edge(qts);
+    nand_start_read(qts, abort_page, 0);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0xff);
+    }
+
+    /* An interrupted erase does not partially change deterministic media. */
+    nand_program(qts, abort_page, 0, payload, sizeof(payload));
+    qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_ISR);
+    nand_begin_erase(qts, abort_page);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    nand_assert_ready_edge(qts);
+    qtest_clock_step(qts, elapsed);
+    nand_command(qts, NAND_CMD_RESET);
+    qtest_clock_step(qts, NAND_RESET_ERASE_NS - 1);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, 1);
+    nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
+    nand_assert_ready_edge(qts);
+    nand_start_read(qts, abort_page, 0);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, payload[i]);
+    }
+
+    /* A NAND page read interrupted by FFh uses the read reset interval. */
+    qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_ISR);
+    nand_begin_read(qts, abort_page, 0);
+    qtest_clock_step(qts, NAND_READ_TIME_NS / 2);
+    nand_command(qts, NAND_CMD_RESET);
+    qtest_clock_step(qts, NAND_RESET_READ_NS - 1);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, 1);
+    nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
+    nand_assert_ready_edge(qts);
+
+    /* PROCRST does not reset the external NAND or restart its timer. */
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_WDDIS);
+    qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_ISR);
+    nand_begin_program(qts, preserve_page, 0, payload, sizeof(payload));
+    qtest_clock_step(qts, elapsed);
+    qtest_writel(qts, SAM9X7_RSTC_BASE + RSTC_CR,
+                 RSTC_KEY | RSTC_CR_PROCRST);
+    qtest_qmp_eventwait(qts, "RESET");
+    value = qtest_readl(qts, SAM9X7_RSTC_BASE + RSTC_SR);
+    g_assert_cmphex(value & RSTC_SR_RSTTYP_MASK, ==,
+                    RSTC_SR_RSTTYP(RSTC_TYPE_SOFTWARE));
+    ebi_enable_nand(qts);
+    nand_enable_ready_observation(qts);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, NAND_PROGRAM_TIME_NS - elapsed - 1);
+    nand_assert_ready_state(qts, false, NAND_STATUS_BUSY);
+    qtest_clock_step(qts, 1);
+    nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
+    nand_assert_ready_edge(qts);
+    nand_start_read(qts, preserve_page, 0);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, payload[i]);
+    }
+
+    /* A cold reset cancels the old deadline and restores ready-high. */
+    nand_begin_program(qts, cold_reset_page, 0, payload, sizeof(payload));
+    qtest_clock_step(qts, elapsed);
+    qtest_system_reset(qts);
+    ebi_enable_nand(qts);
+    nand_enable_ready_observation(qts);
+    nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
+    qtest_clock_step(qts, NAND_PROGRAM_TIME_NS);
+    nand_assert_ready_state(qts, true, NAND_STATUS_IDLE);
+    nand_start_read(qts, cold_reset_page, 0);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0xff);
+    }
+
+    qtest_quit(qts);
+}
+
 static void test_nand_parameter_status_poll_migration(void)
 {
     QTestState *from = qtest_init(SAM9X75_MACHINE);
     QTestState *middle = qtest_init(SAM9X75_MACHINE " -incoming defer");
     QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
     uint8_t parameter_page[256];
+    int64_t from_clock;
     unsigned int i;
 
     ebi_enable_nand(from);
+    nand_enable_ready_observation(from);
     nand_command(from, NAND_CMD_READ_PARAM);
     nand_address(from, 0x00);
-    nand_command(from, NAND_CMD_STATUS);
-    g_assert_cmphex(qtest_readb(from, NAND_DATA), ==, NAND_STATUS_IDLE);
+    nand_assert_ready_state(from, false, NAND_STATUS_BUSY);
+    nand_assert_ready_edge(from);
+    nand_command(from, NAND_CMD_ENH_STATUS);
+    nand_address(from, 0x00);
+    from_clock = qtest_clock_step(from, NAND_READ_TIME_NS / 2);
     nand_migrate(from, middle);
 
+    g_assert_false(qtest_readl(middle, SAM9X7_PIOD_BASE + PIO_ISR) &
+                   NAND_READY_PIN);
+    nand_address(middle, 0x00);
+    nand_address(middle, 0x00);
+    g_assert_false(nand_ready(middle));
+    g_assert_cmphex(qtest_readb(middle, NAND_DATA), ==, NAND_STATUS_BUSY);
+    g_assert_cmpint(qtest_clock_set(middle, from_clock), ==, from_clock);
+    qtest_clock_step(middle, NAND_READ_TIME_NS / 2 - 1);
+    nand_assert_ready_state(middle, false, NAND_STATUS_BUSY);
+    qtest_clock_step(middle, 1);
+    nand_assert_ready_state(middle, true, NAND_STATUS_IDLE);
+    nand_assert_ready_edge(middle);
     nand_command(middle, NAND_CMD_READ0);
     for (i = 0; i < 37; i++) {
         g_assert_cmphex(qtest_readb(middle, NAND_DATA), ==,
@@ -14809,6 +15236,139 @@ static void test_nand_parameter_status_poll_migration(void)
     qtest_quit(to);
     qtest_quit(middle);
     qtest_quit(from);
+}
+
+static void test_nand_pending_program_erase_migration(void)
+{
+    static const uint8_t payload[] = { 0xde, 0xad, 0xbe, 0xef };
+    const uint32_t page = 128;
+    const int64_t program_elapsed = 200000;
+    const int64_t erase_elapsed = 2000000;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *middle = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    int64_t source_clock;
+    unsigned int i;
+
+    ebi_enable_nand(from);
+    nand_enable_ready_observation(from);
+    nand_begin_program(from, page, 0, payload, sizeof(payload));
+    nand_assert_ready_state(from, false, NAND_STATUS_BUSY);
+    nand_assert_ready_edge(from);
+    source_clock = qtest_clock_step(from, program_elapsed);
+    nand_migrate(from, middle);
+
+    g_assert_false(qtest_readl(middle, SAM9X7_PIOD_BASE + PIO_ISR) &
+                   NAND_READY_PIN);
+    nand_assert_ready_state(middle, false, NAND_STATUS_BUSY);
+    g_assert_cmpint(qtest_clock_set(middle, source_clock), ==, source_clock);
+    qtest_clock_step(middle,
+                     NAND_PROGRAM_TIME_NS - program_elapsed - 1);
+    nand_assert_ready_state(middle, false, NAND_STATUS_BUSY);
+    qtest_clock_step(middle, 1);
+    nand_assert_ready_state(middle, true, NAND_STATUS_IDLE);
+    nand_assert_ready_edge(middle);
+
+    nand_start_read(middle, page, 0);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(qtest_readb(middle, NAND_DATA), ==, payload[i]);
+    }
+    qtest_readl(middle, SAM9X7_PIOD_BASE + PIO_ISR);
+
+    nand_begin_erase(middle, page);
+    nand_assert_ready_state(middle, false, NAND_STATUS_BUSY);
+    nand_assert_ready_edge(middle);
+    source_clock = qtest_clock_step(middle, erase_elapsed);
+    nand_migrate(middle, to);
+
+    g_assert_false(qtest_readl(to, SAM9X7_PIOD_BASE + PIO_ISR) &
+                   NAND_READY_PIN);
+    nand_assert_ready_state(to, false, NAND_STATUS_BUSY);
+    g_assert_cmpint(qtest_clock_set(to, source_clock), ==, source_clock);
+    qtest_clock_step(to, NAND_ERASE_TIME_NS - erase_elapsed - 1);
+    nand_assert_ready_state(to, false, NAND_STATUS_BUSY);
+    qtest_clock_step(to, 1);
+    nand_assert_ready_state(to, true, NAND_STATUS_IDLE);
+    nand_assert_ready_edge(to);
+
+    nand_start_read(to, page, 0);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, 0xff);
+    }
+
+    qtest_quit(to);
+    qtest_quit(middle);
+    qtest_quit(from);
+}
+
+static void test_nand_pending_read_feature_reset_migration(void)
+{
+    static const uint8_t payload[] = { 0xde, 0xad, 0xbe, 0xef };
+    static const uint8_t feature_default[4] = { 0 };
+    static const uint8_t timing_mode_4[4] = { 4, 0, 0, 0 };
+    const uint32_t page = 160;
+    const uint32_t column = 13;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint8_t feature[4];
+    unsigned int i;
+
+    ebi_enable_nand(qts);
+    nand_enable_ready_observation(qts);
+    nand_program(qts, page, column, payload, sizeof(payload));
+    qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_ISR);
+
+    /* PAGE_READ migrates its captured page, column, and deadline. */
+    nand_begin_read(qts, page, column);
+    qts = nand_migrate_pending_to_completion(qts, 11000,
+                                              NAND_READ_TIME_NS);
+    nand_command(qts, NAND_CMD_READ0);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, payload[i]);
+    }
+
+    /* GET_FEATURES prepares its four result bytes only at completion. */
+    nand_command(qts, NAND_CMD_GET_FEATURES);
+    nand_address(qts, 0x01);
+    qts = nand_migrate_pending_to_completion(qts, 400,
+                                              NAND_FEATURE_TIME_NS);
+    nand_command(qts, NAND_CMD_READ0);
+    for (i = 0; i < sizeof(feature); i++) {
+        feature[i] = qtest_readb(qts, NAND_DATA);
+    }
+    g_assert_cmpmem(feature, sizeof(feature), feature_default,
+                    sizeof(feature_default));
+
+    /* SET_FEATURES commits P1-P4 only when its deadline expires. */
+    nand_command(qts, NAND_CMD_SET_FEATURES);
+    nand_address(qts, 0x01);
+    for (i = 0; i < sizeof(timing_mode_4); i++) {
+        qtest_writeb(qts, NAND_DATA, timing_mode_4[i]);
+    }
+    qts = nand_migrate_pending_to_completion(qts, 600,
+                                              NAND_FEATURE_TIME_NS);
+    nand_get_features(qts, 0x01, feature);
+    g_assert_cmpmem(feature, sizeof(feature), timing_mode_4,
+                    sizeof(timing_mode_4));
+
+    qtest_readl(qts, SAM9X7_PIOD_BASE + PIO_ISR);
+    nand_command(qts, NAND_CMD_RESET);
+
+    /* Enhanced Status is rejected while Reset is pending. */
+    nand_command(qts, NAND_CMD_ENH_STATUS);
+    nand_address(qts, 0);
+    nand_address(qts, 0);
+    nand_address(qts, 0);
+    g_assert_cmphex(qtest_readb(qts, NAND_DATA), ==, 0xff);
+    g_assert_cmphex(nand_read_status(qts), ==, NAND_STATUS_BUSY);
+
+    /* RESET migrates its deadline and preserves volatile features. */
+    qts = nand_migrate_pending_to_completion(qts, 2000,
+                                              NAND_RESET_IDLE_NS);
+    nand_get_features(qts, 0x01, feature);
+    g_assert_cmpmem(feature, sizeof(feature), timing_mode_4,
+                    sizeof(timing_mode_4));
+
+    qtest_quit(qts);
 }
 
 static void test_nand_page_status_poll_migration(void)
@@ -14888,6 +15448,7 @@ static void test_nand_random_data_input_migration(void)
         qtest_writeb(to, NAND_DATA, oob[i]);
     }
     nand_command(to, NAND_CMD_PAGE_PROGRAM);
+    qtest_clock_step(to, NAND_PROGRAM_TIME_NS);
     nand_command(to, NAND_CMD_STATUS);
     g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, NAND_STATUS_IDLE);
 
@@ -14928,6 +15489,7 @@ static void test_nand_program_old_source_migration(void)
     qtest_writeb(to, NAND_DATA, payload[2]);
     qtest_writeb(to, NAND_DATA, payload[3]);
     nand_command(to, NAND_CMD_PAGE_PROGRAM);
+    qtest_clock_step(to, NAND_PROGRAM_TIME_NS);
     nand_command(to, NAND_CMD_STATUS);
     g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, NAND_STATUS_IDLE);
 
@@ -14953,11 +15515,97 @@ static void test_nand_off_device_program_migration(void)
     nand_migrate(from, to);
 
     nand_command(to, NAND_CMD_PAGE_PROGRAM);
+    qtest_clock_step(to, NAND_PROGRAM_TIME_NS);
     nand_command(to, NAND_CMD_STATUS);
     g_assert_cmphex(qtest_readb(to, NAND_DATA), ==,
                     NAND_STATUS_IDLE | NAND_STATUS_FAIL);
 
     qtest_quit(to);
+    qtest_quit(from);
+}
+
+static void test_nand_per_plane_status_migration(void)
+{
+    static const uint8_t payload = 0x5a;
+    static const uint8_t valid_payload[] = { 0xa6, 0x59 };
+    const uint32_t plane0_page = NAND_NUM_PAGES;
+    const uint32_t plane1_page = NAND_NUM_PAGES | BIT(6);
+    const uint32_t valid_page = BIT(6) + 3;
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *middle = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    unsigned int i;
+
+    ebi_enable_nand(from);
+    nand_program(from, valid_page, 7, valid_payload, sizeof(valid_payload));
+
+    /* A plane-0 failure is global in 70h and local in 78h. */
+    nand_begin_program(from, plane0_page, 0, &payload, 1);
+    qtest_clock_step(from, NAND_PROGRAM_TIME_NS);
+    g_assert_cmphex(nand_read_status(from), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+    g_assert_cmphex(nand_read_enhanced_status(from, plane0_page), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+    g_assert_cmphex(nand_read_enhanced_status(from, plane1_page), ==,
+                    NAND_STATUS_IDLE);
+
+    /* The next program result selects plane 1 and clears plane 0. */
+    nand_begin_program(from, plane1_page, 0, &payload, 1);
+    qtest_clock_step(from, NAND_PROGRAM_TIME_NS);
+    g_assert_cmphex(nand_read_status(from), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+    g_assert_cmphex(nand_read_enhanced_status(from, plane0_page), ==,
+                    NAND_STATUS_IDLE);
+    g_assert_cmphex(nand_read_enhanced_status(from, plane1_page), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+
+    /* A completed 78h followed by active 70h retains plane latches. */
+    g_assert_cmphex(nand_read_status(from), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+    nand_migrate(from, middle);
+    g_assert_cmphex(qtest_readb(middle, NAND_DATA), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+    g_assert_cmphex(nand_read_enhanced_status(middle, plane0_page), ==,
+                    NAND_STATUS_IDLE);
+    g_assert_cmphex(nand_read_enhanced_status(middle, plane1_page), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+
+    /* Migrate the nonzero plane latch and one of the three row cycles. */
+    nand_command(middle, NAND_CMD_ENH_STATUS);
+    nand_address(middle, plane1_page);
+    g_assert_cmphex(qtest_readb(middle, NAND_DATA), ==, 0xff);
+    nand_migrate(middle, to);
+    nand_address(to, plane1_page >> 8);
+    nand_address(to, plane1_page >> 16);
+    g_assert_cmphex(qtest_readb(to, NAND_DATA), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+    g_assert_cmphex(nand_read_status(to), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+
+    /* A successful array read preserves both failure indications. */
+    nand_start_read(to, valid_page, 7);
+    for (i = 0; i < sizeof(valid_payload); i++) {
+        g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, valid_payload[i]);
+    }
+    g_assert_cmphex(nand_read_status(to), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+    g_assert_cmphex(nand_read_enhanced_status(to, plane0_page), ==,
+                    NAND_STATUS_IDLE);
+    g_assert_cmphex(nand_read_enhanced_status(to, plane1_page), ==,
+                    NAND_STATUS_IDLE | NAND_STATUS_FAIL);
+
+    /* FFh clears the global and per-plane failure latches. */
+    nand_command(to, NAND_CMD_RESET);
+    g_assert_cmphex(nand_read_status(to), ==, NAND_STATUS_BUSY);
+    qtest_clock_step(to, NAND_RESET_IDLE_NS);
+    g_assert_cmphex(nand_read_status(to), ==, NAND_STATUS_IDLE);
+    g_assert_cmphex(nand_read_enhanced_status(to, plane0_page), ==,
+                    NAND_STATUS_IDLE);
+    g_assert_cmphex(nand_read_enhanced_status(to, plane1_page), ==,
+                    NAND_STATUS_IDLE);
+
+    qtest_quit(to);
+    qtest_quit(middle);
     qtest_quit(from);
 }
 
@@ -14973,6 +15621,9 @@ static void test_nand_features_status_poll_migration(void)
     nand_set_features(from, 0x01, timing_mode_3, sizeof(timing_mode_3));
     nand_command(from, NAND_CMD_GET_FEATURES);
     nand_address(from, 0x01);
+    nand_command(from, NAND_CMD_STATUS);
+    g_assert_cmphex(qtest_readb(from, NAND_DATA), ==, NAND_STATUS_BUSY);
+    qtest_clock_step(from, NAND_FEATURE_TIME_NS);
     nand_command(from, NAND_CMD_STATUS);
     g_assert_cmphex(qtest_readb(from, NAND_DATA), ==, NAND_STATUS_IDLE);
     nand_migrate(from, middle);
@@ -15009,6 +15660,7 @@ static void test_nand_set_features_migration(void)
     for (i = 2; i < sizeof(timing_mode_4); i++) {
         qtest_writeb(to, NAND_DATA, timing_mode_4[i]);
     }
+    qtest_clock_step(to, NAND_FEATURE_TIME_NS);
     nand_get_features(to, 0x01, feature);
     g_assert_cmpmem(feature, sizeof(feature), timing_mode_4,
                     sizeof(timing_mode_4));
@@ -15024,11 +15676,14 @@ static void test_nand_empty_media_migration(void)
     QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
     unsigned int i;
 
-    /* Incoming state replaces, rather than merges with, destination media. */
+    /* Incoming state replaces a destination's staged data and stale timer. */
     ebi_enable_nand(from);
     ebi_enable_nand(to);
-    nand_program(to, 9, 0, payload, sizeof(payload));
+    nand_begin_program(to, 9, 0, payload, sizeof(payload));
+    g_assert_cmphex(nand_read_status(to), ==, NAND_STATUS_BUSY);
     nand_migrate(from, to);
+    g_assert_cmphex(nand_read_status(to), ==, NAND_STATUS_IDLE);
+    qtest_clock_step(to, NAND_PROGRAM_TIME_NS);
     nand_start_read(to, 9, 0);
     for (i = 0; i < sizeof(payload); i++) {
         g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, 0xff);
@@ -15036,6 +15691,70 @@ static void test_nand_empty_media_migration(void)
 
     qtest_quit(to);
     qtest_quit(from);
+}
+
+static void test_nand_backend_deferred_timing(void)
+{
+    static const uint8_t payload[] = { 0xa6, 0x59, 0x3c, 0xc3 };
+    const uint32_t page = 64;
+    const off_t offset = (off_t)page * NAND_PAGE_SIZE;
+    g_autofree uint8_t *page_data = g_malloc(NAND_PAGE_SIZE);
+    g_autofree char *image_path = NULL;
+    g_autofree char *args = NULL;
+    GError *error = NULL;
+    QTestState *qts;
+    ssize_t ret;
+    unsigned int i;
+    int fd;
+
+    fd = g_file_open_tmp("sam9x75-nand-deferred-XXXXXX", &image_path,
+                         &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, NAND_DATA_SIZE), ==, 0);
+    memset(page_data, 0xff, NAND_PAGE_SIZE);
+    ret = pwrite(fd, page_data, NAND_PAGE_SIZE, offset);
+    g_assert_cmpint(ret, ==, NAND_PAGE_SIZE);
+
+    args = g_strdup_printf(
+        SAM9X75_MACHINE
+        " -drive file=%s,file.locking=off,if=mtd,index=0,format=raw",
+        image_path);
+    qts = qtest_init(args);
+    ebi_enable_nand(qts);
+
+    nand_begin_program(qts, page, 0, payload, sizeof(payload));
+    ret = pread(fd, page_data, NAND_PAGE_SIZE, offset);
+    g_assert_cmpint(ret, ==, NAND_PAGE_SIZE);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(page_data[i], ==, 0xff);
+    }
+    qtest_clock_step(qts, NAND_PROGRAM_TIME_NS - 1);
+    ret = pread(fd, page_data, NAND_PAGE_SIZE, offset);
+    g_assert_cmpint(ret, ==, NAND_PAGE_SIZE);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(page_data[i], ==, 0xff);
+    }
+    qtest_clock_step(qts, 1);
+    ret = pread(fd, page_data, NAND_PAGE_SIZE, offset);
+    g_assert_cmpint(ret, ==, NAND_PAGE_SIZE);
+    g_assert_cmpmem(page_data, sizeof(payload), payload, sizeof(payload));
+
+    nand_begin_erase(qts, page);
+    qtest_clock_step(qts, NAND_ERASE_TIME_NS - 1);
+    ret = pread(fd, page_data, NAND_PAGE_SIZE, offset);
+    g_assert_cmpint(ret, ==, NAND_PAGE_SIZE);
+    g_assert_cmpmem(page_data, sizeof(payload), payload, sizeof(payload));
+    qtest_clock_step(qts, 1);
+    ret = pread(fd, page_data, NAND_PAGE_SIZE, offset);
+    g_assert_cmpint(ret, ==, NAND_PAGE_SIZE);
+    for (i = 0; i < sizeof(payload); i++) {
+        g_assert_cmphex(page_data[i], ==, 0xff);
+    }
+
+    qtest_quit(qts);
+    close(fd);
+    unlink(image_path);
 }
 
 static void nand_test_backend_migration(bool raw)
@@ -16151,6 +16870,7 @@ static void test_pmecc_nand_write_stream_migration(void)
         qtest_writeb(to, NAND_DATA, page[i]);
     }
     nand_command(to, NAND_CMD_PAGE_PROGRAM);
+    qtest_clock_step(to, NAND_PROGRAM_TIME_NS);
     nand_command(to, NAND_CMD_STATUS);
     g_assert_cmphex(qtest_readb(to, NAND_DATA), ==, NAND_STATUS_IDLE);
     g_assert_cmphex(qtest_readl(to, SAM9X7_PMECC_BASE + PMECC_SR), ==,
@@ -21365,10 +22085,18 @@ int main(int argc, char **argv)
                    test_nand_identification_program_and_erase);
     qtest_add_func("sam9x75/nand/cs2-mirroring",
                    test_nand_cs2_mirroring);
+    qtest_add_func("sam9x75/nand/timing-and-ready-busy",
+                   test_nand_timing_and_ready_busy);
     qtest_add_func("sam9x75/nand/features-and-reset-domains",
                    test_nand_features_and_reset_domains);
+    qtest_add_func("sam9x75/nand/pending-operation-reset-domains",
+                   test_nand_pending_operation_reset_domains);
     qtest_add_func("sam9x75/nand/parameter-status-poll-migration",
                    test_nand_parameter_status_poll_migration);
+    qtest_add_func("sam9x75/nand/pending-program-erase-migration",
+                   test_nand_pending_program_erase_migration);
+    qtest_add_func("sam9x75/nand/pending-read-feature-reset-migration",
+                   test_nand_pending_read_feature_reset_migration);
     qtest_add_func("sam9x75/nand/page-status-poll-migration",
                    test_nand_page_status_poll_migration);
     qtest_add_func("sam9x75/nand/random-data-input-migration",
@@ -21377,12 +22105,16 @@ int main(int argc, char **argv)
                    test_nand_program_old_source_migration);
     qtest_add_func("sam9x75/nand/off-device-program-migration",
                    test_nand_off_device_program_migration);
+    qtest_add_func("sam9x75/nand/per-plane-status-migration",
+                   test_nand_per_plane_status_migration);
     qtest_add_func("sam9x75/nand/features-status-poll-migration",
                    test_nand_features_status_poll_migration);
     qtest_add_func("sam9x75/nand/set-features-migration",
                    test_nand_set_features_migration);
     qtest_add_func("sam9x75/nand/empty-media-migration",
                    test_nand_empty_media_migration);
+    qtest_add_func("sam9x75/nand/backend-deferred-timing",
+                   test_nand_backend_deferred_timing);
     qtest_add_func("sam9x75/nand/data-backend-migration",
                    test_nand_data_backend_migration);
     qtest_add_func("sam9x75/nand/raw-backend-migration",

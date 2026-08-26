@@ -7,13 +7,16 @@
 #ifndef HW_BLOCK_AT91_NAND_H
 #define HW_BLOCK_AT91_NAND_H
 
+#include "hw/core/irq.h"
 #include "hw/core/sysbus.h"
+#include "qemu/timer.h"
 #include "qom/object.h"
 
 #define TYPE_AT91_NAND "at91-nand"
 OBJECT_DECLARE_SIMPLE_TYPE(AT91NANDState, AT91_NAND)
 
 #define AT91_NAND_GPIO_NCE "nce"
+#define AT91_NAND_GPIO_READY "ready"
 
 struct AT91PMECCState;
 
@@ -34,6 +37,8 @@ struct AT91NANDState {
     SysBusDevice parent_obj;
 
     MemoryRegion mmio;
+    qemu_irq ready;
+    QEMUTimer *operation_timer;
     BlockBackend *blk;
     struct AT91PMECCState *pmecc;
     uint8_t **sparse_pages;
@@ -43,8 +48,14 @@ struct AT91NANDState {
     uint8_t command;
     uint8_t previous_command;
     uint8_t status;
+    uint8_t pending_operation;
+    uint32_t pending_page;
+    uint32_t pending_column;
     uint8_t address[5];
     uint8_t address_len;
+    uint8_t enhanced_status_address[3];
+    uint8_t enhanced_status_address_len;
+    uint8_t plane_status[2];
     uint8_t feature_address;
     uint8_t features[256][4];
     uint32_t current_page;

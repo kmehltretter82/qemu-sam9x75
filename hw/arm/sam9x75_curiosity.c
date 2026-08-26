@@ -353,8 +353,10 @@ static void sam9x75_curiosity_init(MachineState *machine)
         sam9x75_curiosity_attach_spi_sd(soc, 1);
     }
 
-    /* The populated NAND drives its active-high ready signal onto PD14. */
-    qemu_set_irq(qdev_get_gpio_in(DEVICE(&soc->pio[3]), 14), 1);
+    /* U5 R/B# plus its pull-up form an active-high ready signal on PD14. */
+    qdev_connect_gpio_out_named(DEVICE(&soc->nand),
+                                AT91_NAND_GPIO_READY, 0,
+                                qdev_get_gpio_in(DEVICE(&soc->pio[3]), 14));
 
     board->boot_info = (struct arm_boot_info) {
         .loader_start = SAM9X7_DDR_BASE,
