@@ -17,6 +17,7 @@
 #include "qemu/bitops.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
+#include "qemu/main-loop.h"
 #include "qemu/module.h"
 
 /* Global register bank. */
@@ -134,6 +135,14 @@ static const uint16_t at91_udphs_physical_size[AT91_UDPHS_NUM_ENDPOINTS] = {
     64, 1024, 1024, 1024, 1024, 1024, 1024,
 };
 
+static void at91_udphs_gadget_kick_endpoint(AT91UDPHSState *s,
+                                             unsigned index);
+static void at91_udphs_gadget_kick_all(AT91UDPHSState *s);
+static void at91_udphs_gadget_abort_endpoint(AT91UDPHSState *s,
+                                              unsigned index, int status);
+static void at91_udphs_gadget_abort_all(AT91UDPHSState *s, int status);
+static void at91_udphs_gadget_drain_aborts(AT91UDPHSGadgetState *bridge);
+
 static unsigned at91_udphs_ep_size(const AT91UDPHSEndpoint *ep)
 {
     return 8U << (ep->cfg & UDPHS_EPT_CFG_SIZE_MASK);
@@ -186,7 +195,7 @@ static bool at91_udphs_transfer_is_in(const AT91UDPHSEndpoint *ep)
 
 static bool at91_udphs_cfg_valid(unsigned index, uint32_t cfg);
 static bool at91_udphs_cfg_operational(unsigned index, uint32_t cfg);
-static void at91_udphs_dma_service(AT91UDPHSState *s, unsigned index);
+static bool at91_udphs_dma_service(AT91UDPHSState *s, unsigned index);
 
 static bool at91_udphs_clocked(const AT91UDPHSState *s)
 {
@@ -383,6 +392,14 @@ static void at91_udphs_disable_endpoint(AT91UDPHSEndpoint *ep)
 
 static void at91_udphs_sync_usb(AT91UDPHSState *s);
 
+static void at91_udphs_dma_cancel_pending(AT91UDPHSState *s)
+{
+    s->dma_pending = 0;
+    if (s->dma_bh) {
+        qemu_bh_cancel(s->dma_bh);
+    }
+}
+
 static void at91_udphs_reset_bus(AT91UDPHSState *s, int speed)
 {
     unsigned i;
@@ -395,6 +412,8 @@ static void at91_udphs_reset_bus(AT91UDPHSState *s, int speed)
     for (i = 0; i < AT91_UDPHS_NUM_ENDPOINTS; i++) {
         at91_udphs_reset_endpoint(s, i, true);
     }
+    at91_udphs_dma_cancel_pending(s);
+    s->dma_generation++;
     memset(s->dma, 0, sizeof(s->dma));
     s->dma_servicing = 0;
     at91_udphs_sync_usb(s);
@@ -513,6 +532,7 @@ static void at91_udphs_clock_changed(void *opaque, ClockEvent event)
     AT91UDPHSState *s = opaque;
 
     at91_udphs_update_outputs(s);
+    at91_udphs_gadget_kick_all(s);
     at91_udphs_update_irq(s);
 }
 
@@ -572,6 +592,8 @@ static void at91_udphs_write_cfg(AT91UDPHSState *s, unsigned index,
     if (cfg != ep->cfg) {
         at91_udphs_reset_endpoint(s, index, false);
         ep->cfg = cfg;
+        at91_udphs_sync_usb_endpoint(s, index);
+        at91_udphs_gadget_abort_endpoint(s, index, USB_RET_IOERROR);
     }
     at91_udphs_sync_usb_endpoint(s, index);
     at91_udphs_update_irq(s);
@@ -711,6 +733,7 @@ static uint64_t at91_udphs_fifo_read(void *opaque, hwaddr offset,
          service_index < AT91_UDPHS_NUM_ENDPOINTS; service_index++) {
         if (service_mask & BIT(service_index)) {
             at91_udphs_dma_service(s, service_index);
+            at91_udphs_gadget_kick_endpoint(s, service_index);
         }
     }
     if (update_irq) {
@@ -776,6 +799,7 @@ static void at91_udphs_fifo_write(void *opaque, hwaddr offset,
          service_index < AT91_UDPHS_NUM_ENDPOINTS; service_index++) {
         if (service_mask & BIT(service_index)) {
             at91_udphs_dma_service(s, service_index);
+            at91_udphs_gadget_kick_endpoint(s, service_index);
         }
     }
     if (update_irq) {
@@ -839,6 +863,8 @@ static void at91_udphs_endpoint_write(AT91UDPHSState *s, unsigned index,
         ep->ctl &= ~mask;
         if (mask & UDPHS_EPT_CTL_ENABLE) {
             at91_udphs_disable_endpoint(ep);
+            at91_udphs_sync_usb_endpoint(s, index);
+            at91_udphs_gadget_abort_endpoint(s, index, USB_RET_IOERROR);
         }
         break;
     case UDPHS_EPT_SETSTA:
@@ -885,6 +911,7 @@ static void at91_udphs_endpoint_write(AT91UDPHSState *s, unsigned index,
     at91_udphs_refresh_endpoint(s, index);
     at91_udphs_dma_service(s, index);
     at91_udphs_sync_usb_endpoint(s, index);
+    at91_udphs_gadget_kick_endpoint(s, index);
     at91_udphs_update_irq(s);
 }
 
@@ -927,10 +954,15 @@ static bool at91_udphs_dma_memory_read(AT91UDPHSState *s, unsigned index,
                                        hwaddr address, void *buffer,
                                        size_t length)
 {
+    uint32_t generation = s->dma_generation;
     MemTxResult result;
 
     result = address_space_read(&s->dma_as, address,
                                 MEMTXATTRS_UNSPECIFIED, buffer, length);
+    if (generation != s->dma_generation) {
+        /* A bus target reset the controller while servicing this access. */
+        return false;
+    }
     if (result != MEMTX_OK) {
         at91_udphs_dma_error(s, index, address, "read");
         return false;
@@ -942,10 +974,15 @@ static bool at91_udphs_dma_memory_write(AT91UDPHSState *s, unsigned index,
                                         hwaddr address, const void *buffer,
                                         size_t length)
 {
+    uint32_t generation = s->dma_generation;
     MemTxResult result;
 
     result = address_space_write(&s->dma_as, address,
                                  MEMTXATTRS_UNSPECIFIED, buffer, length);
+    if (generation != s->dma_generation) {
+        /* A bus target reset the controller while servicing this access. */
+        return false;
+    }
     if (result != MEMTX_OK) {
         at91_udphs_dma_error(s, index, address, "write");
         return false;
@@ -1033,13 +1070,14 @@ static bool at91_udphs_dma_queue_zlp(AT91UDPHSState *s, unsigned index)
     return true;
 }
 
-static void at91_udphs_dma_service_in(AT91UDPHSState *s, unsigned index)
+static bool at91_udphs_dma_service_in(AT91UDPHSState *s, unsigned index)
 {
     AT91UDPHSDMAChannel *dma = &s->dma[index - 1];
     AT91UDPHSEndpoint *ep = &s->endpoint[index];
     unsigned packet_size = at91_udphs_ep_size(ep);
+    bool progress;
 
-    at91_udphs_dma_queue_zlp(s, index);
+    progress = at91_udphs_dma_queue_zlp(s, index);
     while (at91_udphs_dma_enabled(dma)) {
         AT91UDPHSBank *fifo;
         unsigned length;
@@ -1078,6 +1116,7 @@ static void at91_udphs_dma_service_in(AT91UDPHSState *s, unsigned index)
                              dma->remaining == 0));
         if (validate) {
             fifo->state = AT91_UDPHS_BANK_READY_IN;
+            progress = true;
             next = at91_udphs_find_bank(ep, bank + 1,
                                         AT91_UDPHS_BANK_FREE);
             if (next >= 0) {
@@ -1093,7 +1132,7 @@ static void at91_udphs_dma_service_in(AT91UDPHSState *s, unsigned index)
             dma->pending_zlp |= need_zlp;
             if (!at91_udphs_dma_complete(s, index - 1,
                                          UDPHS_DMA_END_BUF_STATUS)) {
-                at91_udphs_dma_queue_zlp(s, index);
+                progress |= at91_udphs_dma_queue_zlp(s, index);
                 break;
             }
         }
@@ -1103,13 +1142,15 @@ static void at91_udphs_dma_service_in(AT91UDPHSState *s, unsigned index)
             break;
         }
     }
+    return progress;
 }
 
-static void at91_udphs_dma_service_out(AT91UDPHSState *s, unsigned index)
+static bool at91_udphs_dma_service_out(AT91UDPHSState *s, unsigned index)
 {
     AT91UDPHSDMAChannel *dma = &s->dma[index - 1];
     AT91UDPHSEndpoint *ep = &s->endpoint[index];
     unsigned packet_size = at91_udphs_ep_size(ep);
+    bool progress = false;
 
     while (at91_udphs_dma_enabled(dma)) {
         AT91UDPHSBank *fifo;
@@ -1139,6 +1180,7 @@ static void at91_udphs_dma_service_out(AT91UDPHSState *s, unsigned index)
             /* A received ZLP is a real short-packet transfer event. */
             if (validate) {
                 at91_udphs_clear_rx_ready(s, index);
+                progress = true;
             }
             if (end_transfer) {
                 if (!at91_udphs_dma_complete(s, index - 1,
@@ -1176,6 +1218,7 @@ static void at91_udphs_dma_service_out(AT91UDPHSState *s, unsigned index)
                      (dma->control & UDPHS_DMA_END_BUF_ENABLE)));
         if (validate) {
             at91_udphs_clear_rx_ready(s, index);
+            progress = true;
         }
         if (end_buffer) {
             events |= UDPHS_DMA_END_BUF_STATUS;
@@ -1193,23 +1236,41 @@ static void at91_udphs_dma_service_out(AT91UDPHSState *s, unsigned index)
             break;
         }
     }
+    return progress;
 }
 
-static void at91_udphs_dma_service(AT91UDPHSState *s, unsigned index)
+static bool at91_udphs_dma_service(AT91UDPHSState *s, unsigned index)
 {
+    AT91UDPHSDMAChannel *dma;
     AT91UDPHSEndpoint *ep;
+    bool progress = false;
 
     if (index == 0 || index >= AT91_UDPHS_NUM_ENDPOINTS) {
-        return;
+        return false;
     }
     ep = &s->endpoint[index];
     if (at91_udphs_ep_is_control(ep) ||
         !(ep->cfg & UDPHS_EPT_CFG_MAPPED) ||
         !(ep->ctl & UDPHS_EPT_CTL_ENABLE)) {
-        return;
+        return false;
     }
-    if (s->dma_servicing & BIT(index)) {
-        return;
+    dma = &s->dma[index - 1];
+    if (!at91_udphs_dma_enabled(dma) && !dma->pending_zlp) {
+        return false;
+    }
+    /*
+     * USB token handling owns a host-controller USBPacket until its callback
+     * unwinds.  DMA can target MMIO, including either USB controller, so do
+     * not let a DMA access reset or cancel that packet from inside the token
+     * callback.  Serializing channels also prevents cross-channel MMIO
+     * recursion.  The guarded BH additionally rejects DMA self-MMIO.
+     */
+    if ((s->gadget && s->gadget->servicing) || s->dma_servicing) {
+        s->dma_pending |= BIT(index);
+        if (s->dma_bh) {
+            qemu_bh_schedule(s->dma_bh);
+        }
+        return false;
     }
     s->dma_servicing |= BIT(index);
     at91_udphs_refresh_endpoint(s, index);
@@ -1219,13 +1280,39 @@ static void at91_udphs_dma_service(AT91UDPHSState *s, unsigned index)
         goto out;
     }
     if (at91_udphs_transfer_is_in(ep)) {
-        at91_udphs_dma_service_in(s, index);
+        progress = at91_udphs_dma_service_in(s, index);
     } else {
-        at91_udphs_dma_service_out(s, index);
+        progress = at91_udphs_dma_service_out(s, index);
     }
     at91_udphs_refresh_endpoint(s, index);
 out:
     s->dma_servicing &= ~BIT(index);
+    return progress;
+}
+
+static void at91_udphs_dma_bh(void *opaque)
+{
+    AT91UDPHSState *s = opaque;
+    uint32_t generation = s->dma_generation;
+    uint8_t pending = s->dma_pending;
+    unsigned index;
+
+    s->dma_pending = 0;
+    for (index = 1; index < AT91_UDPHS_NUM_ENDPOINTS; index++) {
+        if (generation != s->dma_generation) {
+            break;
+        }
+        if (pending & BIT(index)) {
+            bool progress = at91_udphs_dma_service(s, index);
+
+            if (generation != s->dma_generation) {
+                break;
+            }
+            if (progress) {
+                at91_udphs_gadget_kick_endpoint(s, index);
+            }
+        }
+    }
 }
 
 static uint32_t at91_udphs_dma_read(AT91UDPHSState *s, unsigned index,
@@ -1366,6 +1453,8 @@ static void at91_udphs_disable_reset(AT91UDPHSState *s)
     for (i = 0; i < AT91_UDPHS_NUM_ENDPOINTS; i++) {
         at91_udphs_reset_endpoint(s, i, true);
     }
+    at91_udphs_dma_cancel_pending(s);
+    s->dma_generation++;
     memset(s->dma, 0, sizeof(s->dma));
     s->dma_servicing = 0;
 }
@@ -1410,6 +1499,8 @@ static void at91_udphs_regs_write(void *opaque, hwaddr offset,
 
             at91_udphs_disable_reset(s);
             s->ctrl = ctrl;
+            at91_udphs_sync_usb(s);
+            at91_udphs_gadget_abort_all(s, USB_RET_NODEV);
         }
         at91_udphs_sync_usb(s);
         at91_udphs_update_outputs(s);
@@ -1432,6 +1523,7 @@ static void at91_udphs_regs_write(void *opaque, hwaddr offset,
                 s->endpoint[i].sta &= ~UDPHS_EPT_STA_TOGGLE_MASK;
                 s->endpoint[i].sta |= toggle;
                 at91_udphs_sync_usb_endpoint(s, i);
+                at91_udphs_gadget_abort_endpoint(s, i, USB_RET_IOERROR);
                 at91_udphs_dma_service(s, i);
             }
         }
@@ -1506,13 +1598,22 @@ static void at91_udphs_handle_setup(AT91UDPHSState *s, USBPacket *packet,
 }
 
 static void at91_udphs_handle_in(AT91UDPHSState *s, USBPacket *packet,
-                                 unsigned index)
+                                 unsigned index, size_t host_length)
 {
     AT91UDPHSEndpoint *ep = &s->endpoint[index];
     unsigned banks = at91_udphs_ep_banks(ep);
-    size_t host_length = usb_packet_size(packet);
     size_t length;
     int bank;
+
+    /* A prefetched status token must wait for the OUT data stage to finish. */
+    if (at91_udphs_ep_is_control(ep) && !ep->control_dir_in &&
+        ep->control_length && host_length == 0 &&
+        ep->control_transferred < ep->control_length) {
+        ep->sta |= UDPHS_EPT_STA_NAK_IN;
+        packet->status = USB_RET_NAK;
+        at91_udphs_update_irq(s);
+        return;
+    }
 
     if (index) {
         at91_udphs_dma_service(s, index);
@@ -1553,14 +1654,23 @@ static void at91_udphs_handle_in(AT91UDPHSState *s, USBPacket *packet,
         at91_udphs_dma_service(s, index);
     }
 
-    if (at91_udphs_ep_is_control(ep) && ep->control_dir_in &&
-        ep->control_length) {
-        ep->control_transferred = MIN((unsigned)ep->control_length,
-                                      (unsigned)ep->control_transferred +
-                                      (unsigned)length);
-        if (length < at91_udphs_ep_size(ep) ||
-            ep->control_transferred >= ep->control_length) {
-            ep->status_out_nak = true;
+    if (at91_udphs_ep_is_control(ep)) {
+        if (ep->control_dir_in && ep->control_length) {
+            ep->control_transferred = MIN((unsigned)ep->control_length,
+                                          (unsigned)ep->control_transferred +
+                                          (unsigned)length);
+            if (length < at91_udphs_ep_size(ep)) {
+                /* A short IN packet terminates the control data stage. */
+                ep->control_transferred = ep->control_length;
+                ep->status_out_nak = true;
+            } else if (ep->control_transferred >= ep->control_length) {
+                ep->status_out_nak = true;
+            }
+        } else if (!ep->control_dir_in && host_length == 0 && !length &&
+                   packet->status == USB_RET_SUCCESS) {
+            /* Successful status IN completes a control-OUT transfer. */
+            ep->control_length = 0;
+            ep->control_transferred = 0;
         }
     }
 
@@ -1569,14 +1679,23 @@ static void at91_udphs_handle_in(AT91UDPHSState *s, USBPacket *packet,
 }
 
 static void at91_udphs_handle_out(AT91UDPHSState *s, USBPacket *packet,
-                                  unsigned index)
+                                  unsigned index, size_t host_length)
 {
     AT91UDPHSEndpoint *ep = &s->endpoint[index];
     unsigned banks = at91_udphs_ep_banks(ep);
     unsigned packet_size = at91_udphs_ep_size(ep);
-    size_t host_length = usb_packet_size(packet);
     size_t length = MIN(host_length, (size_t)packet_size);
     int bank;
+
+    /* A prefetched status token must wait for the IN data stage to finish. */
+    if (at91_udphs_ep_is_control(ep) && ep->control_dir_in &&
+        ep->control_length && host_length == 0 &&
+        ep->control_transferred < ep->control_length) {
+        ep->sta |= UDPHS_EPT_STA_NAK_OUT;
+        packet->status = USB_RET_NAK;
+        at91_udphs_update_irq(s);
+        return;
+    }
 
     /* Figure 72.10 mandates a NAK on the first status-OUT token. */
     if (at91_udphs_ep_is_control(ep) && ep->status_out_nak &&
@@ -1621,20 +1740,32 @@ static void at91_udphs_handle_out(AT91UDPHSState *s, USBPacket *packet,
         packet->status = USB_RET_SUCCESS;
     }
 
-    if (at91_udphs_ep_is_control(ep) && host_length == 0) {
-        ep->control_length = 0;
-        ep->control_transferred = 0;
+    if (at91_udphs_ep_is_control(ep) &&
+        packet->status == USB_RET_SUCCESS) {
+        if (!ep->control_dir_in && ep->control_length) {
+            ep->control_transferred = MIN(
+                (unsigned)ep->control_length,
+                (unsigned)ep->control_transferred + (unsigned)length);
+            if (length < packet_size) {
+                /* A short OUT packet terminates the control data stage. */
+                ep->control_transferred = ep->control_length;
+            }
+        } else if (ep->control_dir_in && host_length == 0) {
+            ep->control_length = 0;
+            ep->control_transferred = 0;
+        }
     }
     at91_udphs_refresh_endpoint(s, index);
     at91_udphs_update_irq(s);
 }
 
-void at91_udphs_handle_token(AT91UDPHSState *s, USBPacket *packet)
+static void at91_udphs_handle_token_length(AT91UDPHSState *s,
+                                            USBPacket *packet,
+                                            size_t token_length)
 {
     AT91UDPHSEndpoint *ep;
     unsigned index;
 
-    packet->actual_length = 0;
     if (!at91_udphs_link_enabled(s)) {
         packet->status = USB_RET_NODEV;
         return;
@@ -1703,10 +1834,10 @@ void at91_udphs_handle_token(AT91UDPHSState *s, USBPacket *packet)
 
     switch (packet->pid) {
     case USB_TOKEN_IN:
-        at91_udphs_handle_in(s, packet, index);
+        at91_udphs_handle_in(s, packet, index, token_length);
         break;
     case USB_TOKEN_OUT:
-        at91_udphs_handle_out(s, packet, index);
+        at91_udphs_handle_out(s, packet, index, token_length);
         break;
     default:
         packet->status = USB_RET_IOERROR;
@@ -1714,11 +1845,509 @@ void at91_udphs_handle_token(AT91UDPHSState *s, USBPacket *packet)
     }
 }
 
+void at91_udphs_handle_token(AT91UDPHSState *s, USBPacket *packet)
+{
+    packet->actual_length = 0;
+    at91_udphs_handle_token_length(s, packet, usb_packet_size(packet));
+}
+
+static void at91_udphs_gadget_clear_transfer(
+    AT91UDPHSGadgetTransfer *transfer)
+{
+    memset(transfer, 0, sizeof(*transfer));
+}
+
+static unsigned at91_udphs_gadget_transfer_slot(unsigned index, int pid)
+{
+    assert(index < AT91_UDPHS_NUM_ENDPOINTS);
+    assert(pid == USB_TOKEN_OUT || pid == USB_TOKEN_IN);
+
+    return index * 2 + (pid == USB_TOKEN_IN);
+}
+
+static bool at91_udphs_gadget_endpoint_has_work(
+    const AT91UDPHSGadgetState *bridge, unsigned index)
+{
+    uint8_t aborts = bridge->abort_ioerror | bridge->abort_nodev;
+
+    return (aborts & BIT(index)) ||
+           bridge->transfer[at91_udphs_gadget_transfer_slot(
+               index, USB_TOKEN_OUT)].active ||
+           bridge->transfer[at91_udphs_gadget_transfer_slot(
+               index, USB_TOKEN_IN)].active;
+}
+
+static bool at91_udphs_gadget_has_work(
+    const AT91UDPHSGadgetState *bridge)
+{
+    unsigned index;
+
+    for (index = 0; index < AT91_UDPHS_NUM_ENDPOINTS; index++) {
+        if (at91_udphs_gadget_endpoint_has_work(bridge, index)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void at91_udphs_gadget_cancel_retry_if_idle(
+    AT91UDPHSGadgetState *bridge)
+{
+    if (bridge->retry_timer && !at91_udphs_gadget_has_work(bridge)) {
+        timer_del(bridge->retry_timer);
+    }
+}
+
+static void at91_udphs_gadget_retry_timer(void *opaque)
+{
+    AT91UDPHSGadgetState *bridge = opaque;
+
+    at91_udphs_gadget_drain_aborts(bridge);
+    at91_udphs_gadget_kick_all(bridge->udphs);
+}
+
+static void at91_udphs_gadget_schedule_retry(
+    AT91UDPHSGadgetState *bridge)
+{
+    USBDevice *dev = USB_DEVICE(bridge);
+    int64_t delay = dev->speed == USB_SPEED_HIGH ? 125000 : 1000000;
+
+    if (bridge->retry_timer && !timer_pending(bridge->retry_timer)) {
+        timer_mod(bridge->retry_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + delay);
+    }
+}
+
+static void at91_udphs_gadget_clear_all(AT91UDPHSGadgetState *bridge)
+{
+    unsigned i;
+
+    for (i = 0; i < AT91_UDPHS_GADGET_TRANSFERS; i++) {
+        at91_udphs_gadget_clear_transfer(&bridge->transfer[i]);
+    }
+    if (bridge->retry_timer) {
+        timer_del(bridge->retry_timer);
+    }
+    bridge->abort_ioerror = 0;
+    bridge->abort_nodev = 0;
+    bridge->servicing = 0;
+}
+
+static bool at91_udphs_gadget_transfer_matches(
+    const AT91UDPHSGadgetTransfer *transfer, const USBPacket *packet,
+    size_t size)
+{
+    return transfer->active && transfer->pid == packet->pid &&
+           transfer->id == packet->id && transfer->size == size;
+}
+
+static void at91_udphs_gadget_save_transfer(
+    AT91UDPHSGadgetTransfer *transfer, const USBPacket *packet, size_t size)
+{
+    transfer->active = true;
+    transfer->pid = packet->pid;
+    transfer->id = packet->id;
+    transfer->size = size;
+    transfer->actual_length = packet->actual_length;
+}
+
+/*
+ * QEMU host controllers present a complete TD/qTD to USBDevice, whereas a
+ * device-controller model has to expose one maximum-sized wire transaction
+ * at a time to guest firmware.  Keep a partly consumed host transfer async
+ * until firmware makes another DPRAM bank available.
+ */
+static bool at91_udphs_gadget_service_packet(AT91UDPHSGadgetState *bridge,
+                                              USBPacket *packet,
+                                              unsigned index)
+{
+    AT91UDPHSState *s = bridge->udphs;
+    AT91UDPHSEndpoint *ep = &s->endpoint[index];
+    AT91UDPHSGadgetTransfer *transfer = &bridge->transfer[
+        at91_udphs_gadget_transfer_slot(index, packet->pid)];
+    size_t size = usb_packet_size(packet);
+    size_t packet_size = at91_udphs_ep_size(ep);
+
+    if (size > INT_MAX || packet->actual_length < 0 ||
+        (size_t)packet->actual_length > size || !packet_size) {
+        packet->status = USB_RET_IOERROR;
+        at91_udphs_gadget_clear_transfer(transfer);
+        return true;
+    }
+
+    if (transfer->active) {
+        if (!at91_udphs_gadget_transfer_matches(transfer, packet, size)) {
+            /* A cancelled/replaced host descriptor must not inherit state. */
+            at91_udphs_gadget_clear_transfer(transfer);
+            packet->status = USB_RET_IOERROR;
+            return true;
+        } else if (!packet->actual_length) {
+            /* EHCI reconstructs a nacked/async qTD with a fresh USBPacket. */
+            if (transfer->actual_length > size ||
+                transfer->actual_length > INT_MAX) {
+                packet->status = USB_RET_IOERROR;
+                at91_udphs_gadget_clear_transfer(transfer);
+                return true;
+            }
+            packet->actual_length = transfer->actual_length;
+        } else if ((uint32_t)packet->actual_length !=
+                   transfer->actual_length) {
+            packet->status = USB_RET_IOERROR;
+            at91_udphs_gadget_clear_transfer(transfer);
+            return true;
+        }
+    } else if (packet->actual_length ||
+               packet->state == USB_PACKET_ASYNC) {
+        packet->status = USB_RET_IOERROR;
+        return true;
+    }
+
+    /*
+     * USB core may submit an HCD-prefetched packet here with state QUEUED.
+     * That packet has already been reported to the HCD as asynchronous, so a
+     * device NAK cannot be returned synchronously.  Retain it as a real
+     * device-owned async request and retry after the next endpoint kick.
+     */
+    if (!size) {
+        bool queued = packet->state == USB_PACKET_QUEUED;
+
+        packet->status = USB_RET_SUCCESS;
+        at91_udphs_handle_token_length(s, packet, 0);
+        if (packet->status == USB_RET_NAK &&
+            (queued || transfer->active)) {
+            at91_udphs_gadget_save_transfer(transfer, packet, size);
+            packet->status = USB_RET_ASYNC;
+            at91_udphs_gadget_schedule_retry(bridge);
+            return false;
+        }
+        at91_udphs_gadget_clear_transfer(transfer);
+        return true;
+    }
+
+    for (;;) {
+        size_t before = packet->actual_length;
+        size_t remaining = size - before;
+        size_t token_length;
+        size_t transferred;
+
+        if (!remaining) {
+            packet->status = USB_RET_SUCCESS;
+            at91_udphs_gadget_clear_transfer(transfer);
+            return true;
+        }
+
+        token_length = MIN(remaining, packet_size);
+        packet->status = USB_RET_SUCCESS;
+        at91_udphs_handle_token_length(s, packet, token_length);
+        if (packet->actual_length < before ||
+            (size_t)packet->actual_length > size) {
+            packet->status = USB_RET_IOERROR;
+            at91_udphs_gadget_clear_transfer(transfer);
+            return true;
+        }
+        transferred = packet->actual_length - before;
+
+        if (packet->status == USB_RET_NAK) {
+            if (!before && !transfer->active &&
+                packet->state != USB_PACKET_QUEUED) {
+                return true;
+            }
+            at91_udphs_gadget_save_transfer(transfer, packet, size);
+            packet->status = USB_RET_ASYNC;
+            at91_udphs_gadget_schedule_retry(bridge);
+            return false;
+        }
+        if (packet->status != USB_RET_SUCCESS) {
+            at91_udphs_gadget_clear_transfer(transfer);
+            return true;
+        }
+
+        if ((size_t)packet->actual_length == size ||
+            transferred < packet_size) {
+            at91_udphs_gadget_clear_transfer(transfer);
+            return true;
+        }
+
+        at91_udphs_gadget_save_transfer(transfer, packet, size);
+        /* Consume another already available bank before deferring. */
+    }
+}
+
 static void at91_udphs_gadget_handle_packet(USBDevice *dev, USBPacket *packet)
 {
     AT91UDPHSGadgetState *bridge = AT91_UDPHS_GADGET(dev);
+    AT91UDPHSState *s = bridge->udphs;
+    AT91UDPHSEndpoint *ep;
+    AT91UDPHSGadgetTransfer *transfer;
+    size_t size;
+    uint8_t old_servicing;
+    unsigned index;
+    unsigned type;
 
-    at91_udphs_handle_token(bridge->udphs, packet);
+    if (!packet->ep || packet->ep->nr >= AT91_UDPHS_NUM_ENDPOINTS) {
+        at91_udphs_handle_token(s, packet);
+        return;
+    }
+
+    index = packet->ep->nr;
+    ep = &s->endpoint[index];
+    type = at91_udphs_ep_type(ep);
+    if (packet->pid == USB_TOKEN_SETUP) {
+        bool abort_pending = (bridge->abort_ioerror |
+                              bridge->abort_nodev) & BIT(index);
+        bool transfer_active = bridge->transfer[
+            at91_udphs_gadget_transfer_slot(index, USB_TOKEN_OUT)].active ||
+            bridge->transfer[
+                at91_udphs_gadget_transfer_slot(index,
+                                                 USB_TOKEN_IN)].active;
+
+        old_servicing = bridge->servicing;
+        bridge->servicing |= BIT(index);
+        if (type == USB_ENDPOINT_XFER_CONTROL &&
+            (transfer_active || abort_pending)) {
+            /*
+             * Retire the previous transfer outside this SETUP's HCD stack.
+             * NAK keeps the replacement request at the head of the host
+             * schedule; accepting it first could queue its data behind the
+             * old request and lose both when the old endpoint is halted.
+             */
+            if (packet->state == USB_PACKET_QUEUED) {
+                /* USB core cannot propagate NAK from its queued drain. */
+                packet->status = USB_RET_IOERROR;
+            } else {
+                ep->sta |= UDPHS_EPT_STA_NAK_OUT;
+                packet->status = USB_RET_NAK;
+            }
+            if (transfer_active && !abort_pending) {
+                at91_udphs_gadget_abort_endpoint(s, index,
+                                                  USB_RET_IOERROR);
+            }
+            at91_udphs_update_irq(s);
+            bridge->servicing = old_servicing;
+            return;
+        }
+        at91_udphs_handle_token(s, packet);
+        bridge->servicing = old_servicing;
+        return;
+    }
+    if (packet->pid != USB_TOKEN_IN && packet->pid != USB_TOKEN_OUT) {
+        old_servicing = bridge->servicing;
+        bridge->servicing |= BIT(index);
+        at91_udphs_handle_token(s, packet);
+        bridge->servicing = old_servicing;
+        return;
+    }
+    transfer = &bridge->transfer[
+        at91_udphs_gadget_transfer_slot(index, packet->pid)];
+    size = usb_packet_size(packet);
+    if ((type != USB_ENDPOINT_XFER_CONTROL &&
+         type != USB_ENDPOINT_XFER_BULK) ||
+        (packet->state != USB_PACKET_QUEUED &&
+         size <= at91_udphs_ep_size(ep) &&
+         !transfer->active)) {
+        old_servicing = bridge->servicing;
+        bridge->servicing |= BIT(index);
+        at91_udphs_handle_token(s, packet);
+        bridge->servicing = old_servicing;
+        return;
+    }
+
+    old_servicing = bridge->servicing;
+    bridge->servicing |= BIT(index);
+    at91_udphs_gadget_service_packet(bridge, packet, index);
+    bridge->servicing = old_servicing;
+    at91_udphs_gadget_cancel_retry_if_idle(bridge);
+}
+
+static void at91_udphs_gadget_kick_endpoint(AT91UDPHSState *s,
+                                             unsigned index)
+{
+    AT91UDPHSGadgetState *bridge = s->gadget;
+    USBDevice *dev;
+    int pid;
+
+    if (!bridge || index >= AT91_UDPHS_NUM_ENDPOINTS) {
+        return;
+    }
+    if (bridge->servicing || s->dma_servicing ||
+        ((bridge->abort_ioerror | bridge->abort_nodev) & BIT(index))) {
+        if (at91_udphs_gadget_endpoint_has_work(bridge, index)) {
+            at91_udphs_gadget_schedule_retry(bridge);
+        }
+        return;
+    }
+    dev = USB_DEVICE(bridge);
+    for (pid = USB_TOKEN_OUT; pid != 0;
+         pid = pid == USB_TOKEN_OUT ? USB_TOKEN_IN : 0) {
+        AT91UDPHSGadgetTransfer *transfer = &bridge->transfer[
+            at91_udphs_gadget_transfer_slot(index, pid)];
+
+        while (transfer->active) {
+            USBPacket *packet = usb_ep_find_packet_by_id(
+                dev, transfer->pid, index, transfer->id);
+            bool complete;
+
+            if (!packet) {
+                /* Migration rebuild queues the packet after device load. */
+                break;
+            }
+            if (packet->state != USB_PACKET_ASYNC) {
+                /* USB core must expose queued requests in endpoint order. */
+                break;
+            }
+            bridge->servicing |= BIT(index);
+            complete = at91_udphs_gadget_service_packet(bridge, packet,
+                                                         index);
+            bridge->servicing &= ~BIT(index);
+            at91_udphs_gadget_cancel_retry_if_idle(bridge);
+            if (!complete) {
+                break;
+            }
+            if (packet->status == USB_RET_NAK ||
+                packet->status == USB_RET_ASYNC) {
+                packet->status = USB_RET_IOERROR;
+            }
+            usb_packet_complete(dev, packet);
+            /* Completion can expose another queued request in this slot. */
+        }
+    }
+}
+
+static void at91_udphs_gadget_kick_all(AT91UDPHSState *s)
+{
+    unsigned i;
+
+    for (i = 0; i < AT91_UDPHS_NUM_ENDPOINTS; i++) {
+        at91_udphs_gadget_kick_endpoint(s, i);
+    }
+}
+
+static void at91_udphs_gadget_abort_endpoint_now(
+    AT91UDPHSGadgetState *bridge, unsigned index, int status)
+{
+    USBDevice *dev;
+    int pid;
+
+    if (index >= AT91_UDPHS_NUM_ENDPOINTS) {
+        return;
+    }
+    dev = USB_DEVICE(bridge);
+    for (pid = USB_TOKEN_OUT; pid != 0;
+         pid = pid == USB_TOKEN_OUT ? USB_TOKEN_IN : 0) {
+        AT91UDPHSGadgetTransfer *transfer = &bridge->transfer[
+            at91_udphs_gadget_transfer_slot(index, pid)];
+        USBPacket *packet;
+
+        if (!transfer->active) {
+            continue;
+        }
+        packet = usb_ep_find_packet_by_id(dev, transfer->pid, index,
+                                          transfer->id);
+        at91_udphs_gadget_clear_transfer(transfer);
+        if (packet && packet->state == USB_PACKET_ASYNC) {
+            packet->status = status;
+            usb_packet_complete(dev, packet);
+        }
+    }
+    at91_udphs_gadget_cancel_retry_if_idle(bridge);
+}
+
+static void at91_udphs_gadget_abort_endpoint(AT91UDPHSState *s,
+                                              unsigned index, int status)
+{
+    AT91UDPHSGadgetState *bridge = s->gadget;
+
+    if (!bridge || index >= AT91_UDPHS_NUM_ENDPOINTS) {
+        return;
+    }
+    if (bridge->servicing) {
+        if (status == USB_RET_NODEV) {
+            bridge->abort_nodev |= BIT(index);
+            bridge->abort_ioerror &= ~BIT(index);
+        } else if (!(bridge->abort_nodev & BIT(index))) {
+            bridge->abort_ioerror |= BIT(index);
+        }
+        at91_udphs_gadget_schedule_retry(bridge);
+        return;
+    }
+    at91_udphs_gadget_abort_endpoint_now(bridge, index, status);
+}
+
+static void at91_udphs_gadget_drain_aborts(AT91UDPHSGadgetState *bridge)
+{
+    uint8_t ioerror = bridge->abort_ioerror;
+    uint8_t nodev = bridge->abort_nodev;
+    unsigned index;
+
+    bridge->abort_ioerror = 0;
+    bridge->abort_nodev = 0;
+    for (index = 0; index < AT91_UDPHS_NUM_ENDPOINTS; index++) {
+        if (nodev & BIT(index)) {
+            at91_udphs_gadget_abort_endpoint_now(bridge, index,
+                                                  USB_RET_NODEV);
+        } else if (ioerror & BIT(index)) {
+            at91_udphs_gadget_abort_endpoint_now(bridge, index,
+                                                  USB_RET_IOERROR);
+        }
+    }
+}
+
+static void at91_udphs_gadget_abort_all(AT91UDPHSState *s, int status)
+{
+    unsigned i;
+
+    for (i = 0; i < AT91_UDPHS_NUM_ENDPOINTS; i++) {
+        at91_udphs_gadget_abort_endpoint(s, i, status);
+    }
+}
+
+static void at91_udphs_gadget_cancel_packet(USBDevice *dev,
+                                             USBPacket *packet)
+{
+    AT91UDPHSGadgetState *bridge = AT91_UDPHS_GADGET(dev);
+    AT91UDPHSGadgetTransfer *transfer;
+    unsigned index;
+
+    if (!packet->ep || packet->ep->nr >= AT91_UDPHS_NUM_ENDPOINTS) {
+        return;
+    }
+    index = packet->ep->nr;
+    if (packet->pid != USB_TOKEN_OUT && packet->pid != USB_TOKEN_IN) {
+        return;
+    }
+    transfer = &bridge->transfer[
+        at91_udphs_gadget_transfer_slot(index, packet->pid)];
+    if (at91_udphs_gadget_transfer_matches(transfer, packet,
+                                            usb_packet_size(packet))) {
+        at91_udphs_gadget_clear_transfer(transfer);
+        at91_udphs_gadget_cancel_retry_if_idle(bridge);
+    }
+}
+
+static void at91_udphs_gadget_ep_stopped(USBDevice *dev, USBEndpoint *ep)
+{
+    AT91UDPHSGadgetState *bridge = AT91_UDPHS_GADGET(dev);
+    int pid;
+
+    if (ep->nr >= AT91_UDPHS_NUM_ENDPOINTS) {
+        return;
+    }
+    if (ep->nr && ep->pid != USB_TOKEN_OUT && ep->pid != USB_TOKEN_IN) {
+        return;
+    }
+    for (pid = ep->nr ? ep->pid : USB_TOKEN_OUT; pid != 0;
+         pid = ep->nr ? 0 :
+               (pid == USB_TOKEN_OUT ? USB_TOKEN_IN : 0)) {
+        AT91UDPHSGadgetTransfer *transfer = &bridge->transfer[
+            at91_udphs_gadget_transfer_slot(ep->nr, pid)];
+
+        if (transfer->active &&
+            !usb_ep_find_packet_by_id(dev, transfer->pid, ep->nr,
+                                      transfer->id)) {
+            at91_udphs_gadget_clear_transfer(transfer);
+        }
+    }
+    at91_udphs_gadget_cancel_retry_if_idle(bridge);
 }
 
 static void at91_udphs_gadget_handle_reset(USBDevice *dev)
@@ -1726,6 +2355,7 @@ static void at91_udphs_gadget_handle_reset(USBDevice *dev)
     AT91UDPHSGadgetState *bridge = AT91_UDPHS_GADGET(dev);
 
     at91_udphs_reset_bus(bridge->udphs, dev->speed);
+    at91_udphs_gadget_abort_all(bridge->udphs, USB_RET_NODEV);
     at91_udphs_sync_usb(bridge->udphs);
 }
 
@@ -1749,6 +2379,7 @@ static void at91_udphs_gadget_realize(USBDevice *dev, Error **errp)
         return;
     }
 
+    at91_udphs_gadget_clear_all(bridge);
     at91_udphs_set_speedmask(s);
     usb_check_attach(dev, &local_err);
     if (local_err) {
@@ -1756,6 +2387,9 @@ static void at91_udphs_gadget_realize(USBDevice *dev, Error **errp)
         return;
     }
 
+    bridge->retry_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                       at91_udphs_gadget_retry_timer,
+                                       bridge);
     s->gadget = bridge;
     at91_udphs_sync_usb(s);
     at91_udphs_update_outputs(s);
@@ -1770,6 +2404,11 @@ static void at91_udphs_gadget_unrealize(USBDevice *dev)
         s->gadget = NULL;
         qemu_set_irq(s->vbus, 0);
     }
+    at91_udphs_gadget_clear_all(bridge);
+    if (bridge->retry_timer) {
+        timer_free(bridge->retry_timer);
+        bridge->retry_timer = NULL;
+    }
 }
 
 static int at91_udphs_post_load(void *opaque, int version_id)
@@ -1783,6 +2422,8 @@ static int at91_udphs_post_load(void *opaque, int version_id)
     s->ien &= UDPHS_IEN_MASK;
     s->events &= UDPHS_GLOBAL_EVENT_MASK;
     s->tst &= UDPHS_TST_MASK;
+    at91_udphs_dma_cancel_pending(s);
+    s->dma_generation++;
     s->dma_servicing = 0;
     if (s->negotiated_speed != UDPHS_SPEED_UNKNOWN &&
         s->negotiated_speed != USB_SPEED_FULL &&
@@ -1836,12 +2477,20 @@ static int at91_udphs_post_load(void *opaque, int version_id)
         if (s->dma[i].remaining) {
             at91_udphs_dma_set_count(&s->dma[i]);
         }
+        if (at91_udphs_dma_enabled(&s->dma[i]) ||
+            s->dma[i].pending_zlp) {
+            /* Reconstruct work that may have been between token and BH. */
+            s->dma_pending |= BIT(i + 1);
+        }
     }
 
     at91_udphs_set_speedmask(s);
     at91_udphs_sync_usb(s);
     at91_udphs_update_outputs(s);
     at91_udphs_update_irq(s);
+    if (s->dma_pending && s->dma_bh) {
+        qemu_bh_schedule(s->dma_bh);
+    }
     return 0;
 }
 
@@ -1937,14 +2586,126 @@ static int at91_udphs_gadget_post_load(void *opaque, int version_id)
     return 0;
 }
 
+static int at91_udphs_gadget_pre_load(void *opaque)
+{
+    AT91UDPHSGadgetState *bridge = opaque;
+
+    at91_udphs_gadget_clear_all(bridge);
+    return 0;
+}
+
+static const VMStateDescription vmstate_at91_udphs_gadget_transfer = {
+    .name = TYPE_AT91_UDPHS_GADGET "/transfer",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(active, AT91UDPHSGadgetTransfer),
+        VMSTATE_UINT8(pid, AT91UDPHSGadgetTransfer),
+        VMSTATE_UINT64(id, AT91UDPHSGadgetTransfer),
+        VMSTATE_UINT32(size, AT91UDPHSGadgetTransfer),
+        VMSTATE_UINT32(actual_length, AT91UDPHSGadgetTransfer),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static bool at91_udphs_gadget_multipacket_needed(void *opaque)
+{
+    AT91UDPHSGadgetState *bridge = opaque;
+    unsigned i;
+
+    for (i = 0; i < AT91_UDPHS_GADGET_TRANSFERS; i++) {
+        if (bridge->transfer[i].active) {
+            return true;
+        }
+    }
+    return bridge->abort_ioerror || bridge->abort_nodev;
+}
+
+static int at91_udphs_gadget_multipacket_post_load(void *opaque,
+                                                    int version_id)
+{
+    AT91UDPHSGadgetState *bridge = opaque;
+    AT91UDPHSState *s = bridge->udphs;
+    unsigned i;
+
+    if (!s) {
+        return -EINVAL;
+    }
+    bridge->servicing = 0;
+    if ((bridge->abort_ioerror | bridge->abort_nodev) &
+        ~UDPHS_EPTRST_MASK) {
+        return -EINVAL;
+    }
+    bridge->abort_ioerror &= ~bridge->abort_nodev;
+    for (i = 0; i < AT91_UDPHS_GADGET_TRANSFERS; i++) {
+        AT91UDPHSGadgetTransfer *transfer = &bridge->transfer[i];
+        unsigned index = i / 2;
+        int pid = (i & 1) ? USB_TOKEN_IN : USB_TOKEN_OUT;
+        AT91UDPHSEndpoint *ep = &s->endpoint[index];
+        bool aborting = (bridge->abort_ioerror | bridge->abort_nodev) &
+                        BIT(index);
+        unsigned packet_size;
+        unsigned type;
+
+        if (!transfer->active) {
+            continue;
+        }
+        packet_size = at91_udphs_ep_size(ep);
+        type = at91_udphs_ep_type(ep);
+        if (transfer->pid != pid ||
+            transfer->size > INT_MAX ||
+            transfer->actual_length > INT_MAX ||
+            transfer->actual_length > transfer->size ||
+            (transfer->size &&
+             transfer->actual_length == transfer->size) ||
+            (!aborting &&
+             ((type != USB_ENDPOINT_XFER_CONTROL &&
+               type != USB_ENDPOINT_XFER_BULK) ||
+              (type == USB_ENDPOINT_XFER_BULK &&
+               ((pid == USB_TOKEN_IN) != at91_udphs_ep_is_in(ep))) ||
+              !at91_udphs_cfg_operational(index, ep->cfg) ||
+              !(ep->ctl & UDPHS_EPT_CTL_ENABLE) ||
+              (transfer->size &&
+               transfer->actual_length % packet_size)))) {
+            return -EINVAL;
+        }
+    }
+    if (at91_udphs_gadget_multipacket_needed(bridge)) {
+        at91_udphs_gadget_schedule_retry(bridge);
+    }
+    return 0;
+}
+
+static const VMStateDescription vmstate_at91_udphs_gadget_multipacket = {
+    .name = TYPE_AT91_UDPHS_GADGET "/multipacket",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = at91_udphs_gadget_multipacket_needed,
+    .post_load = at91_udphs_gadget_multipacket_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT_ARRAY(transfer, AT91UDPHSGadgetState,
+                             AT91_UDPHS_GADGET_TRANSFERS, 1,
+                             vmstate_at91_udphs_gadget_transfer,
+                             AT91UDPHSGadgetTransfer),
+        VMSTATE_UINT8(abort_ioerror, AT91UDPHSGadgetState),
+        VMSTATE_UINT8(abort_nodev, AT91UDPHSGadgetState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static const VMStateDescription vmstate_at91_udphs_gadget = {
     .name = TYPE_AT91_UDPHS_GADGET,
     .version_id = 1,
     .minimum_version_id = 1,
+    .pre_load = at91_udphs_gadget_pre_load,
     .post_load = at91_udphs_gadget_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_USB_DEVICE(parent_obj, AT91UDPHSGadgetState),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_at91_udphs_gadget_multipacket,
+        NULL
     },
 };
 
@@ -1959,6 +2720,7 @@ static void at91_udphs_reset(DeviceState *dev)
     s->events = 0;
     s->negotiated_speed = UDPHS_SPEED_UNKNOWN;
     at91_udphs_sync_usb(s);
+    at91_udphs_gadget_abort_all(s, USB_RET_NODEV);
     at91_udphs_update_outputs(s);
     at91_udphs_update_irq(s);
 }
@@ -2004,12 +2766,18 @@ static void at91_udphs_realize(DeviceState *dev, Error **errp)
 
     address_space_init(&s->dma_as, s->dma_mr, TYPE_AT91_UDPHS "-dma");
     s->dma_as_initialized = true;
+    s->dma_bh = qemu_bh_new_guarded(at91_udphs_dma_bh, s,
+                                    &dev->mem_reentrancy_guard);
 }
 
 static void at91_udphs_unrealize(DeviceState *dev)
 {
     AT91UDPHSState *s = AT91_UDPHS(dev);
 
+    if (s->dma_bh) {
+        qemu_bh_delete(s->dma_bh);
+        s->dma_bh = NULL;
+    }
     if (s->dma_as_initialized) {
         address_space_destroy(&s->dma_as);
         s->dma_as_initialized = false;
@@ -2053,6 +2821,8 @@ static void at91_udphs_gadget_class_init(ObjectClass *klass, const void *data)
     uc->unrealize = at91_udphs_gadget_unrealize;
     uc->handle_reset = at91_udphs_gadget_handle_reset;
     uc->handle_packet = at91_udphs_gadget_handle_packet;
+    uc->cancel_packet = at91_udphs_gadget_cancel_packet;
+    uc->ep_stopped = at91_udphs_gadget_ep_stopped;
 }
 
 static const TypeInfo at91_udphs_info = {

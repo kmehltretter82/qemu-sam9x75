@@ -13,6 +13,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/usb/usb.h"
 #include "qom/object.h"
+#include "qemu/timer.h"
 #include "system/memory.h"
 
 #define TYPE_AT91_UDPHS "at91-udphs"
@@ -27,6 +28,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(AT91UDPHSGadgetState, AT91_UDPHS_GADGET)
 #define AT91_UDPHS_MAX_PACKET_SIZE     1024
 #define AT91_UDPHS_FIFO_MMIO_SIZE      0x100000
 #define AT91_UDPHS_REG_MMIO_SIZE       0x400
+#define AT91_UDPHS_GADGET_TRANSFERS    (AT91_UDPHS_NUM_ENDPOINTS * 2)
 
 typedef enum AT91UDPHSBankState {
     AT91_UDPHS_BANK_FREE,
@@ -65,6 +67,14 @@ typedef struct AT91UDPHSDMAChannel {
     bool pending_zlp;
 } AT91UDPHSDMAChannel;
 
+typedef struct AT91UDPHSGadgetTransfer {
+    bool active;
+    uint8_t pid;
+    uint64_t id;
+    uint32_t size;
+    uint32_t actual_length;
+} AT91UDPHSGadgetTransfer;
+
 struct AT91UDPHSState {
     SysBusDevice parent_obj;
 
@@ -73,6 +83,7 @@ struct AT91UDPHSState {
     MemoryRegion *dma_mr;
     AddressSpace dma_as;
     bool dma_as_initialized;
+    QEMUBH *dma_bh;
 
     qemu_irq irq;
     qemu_irq device_mode;
@@ -91,6 +102,8 @@ struct AT91UDPHSState {
 
     AT91UDPHSEndpoint endpoint[AT91_UDPHS_NUM_ENDPOINTS];
     AT91UDPHSDMAChannel dma[AT91_UDPHS_NUM_DMA_CHANNELS];
+    uint32_t dma_generation;
+    uint8_t dma_pending;
     uint8_t dma_servicing;
 };
 
@@ -98,6 +111,12 @@ struct AT91UDPHSGadgetState {
     USBDevice parent_obj;
 
     AT91UDPHSState *udphs;
+    /* Separate OUT and IN state is required for nonzero control endpoints. */
+    AT91UDPHSGadgetTransfer transfer[AT91_UDPHS_GADGET_TRANSFERS];
+    QEMUTimer *retry_timer;
+    uint8_t abort_ioerror;
+    uint8_t abort_nodev;
+    uint8_t servicing;
 };
 
 /* Raw token entry point used by the USBDevice bridge and unit tests. */

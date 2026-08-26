@@ -20756,6 +20756,988 @@ static void udphs_ohci_control_token(QTestState *qts, uint32_t ed,
     ohci_wait_for_ed(qts, ed, tail);
 }
 
+static void udphs_ehci_wait_qtd_inactive(QTestState *qts, uint32_t qtd);
+
+static void test_udphs_multipacket_control_in(void)
+{
+    const uint32_t hcca = SAM9X7_SRAM0_BASE;
+    const uint32_t ed = SAM9X7_SRAM0_BASE + 0x100;
+    const uint32_t td = SAM9X7_SRAM0_BASE + 0x120;
+    const uint32_t tail = SAM9X7_SRAM0_BASE + 0x130;
+    const uint32_t setup_buffer = SAM9X7_SRAM0_BASE + 0x180;
+    const uint32_t host_buffer = SAM9X7_SRAM0_BASE + 0x200;
+    const uint8_t setup[] = {
+        0x80, 0x06, 0x00, 0x02, 0x00, 0x00, 75, 0x00,
+    };
+    uint8_t expected[75];
+    uint8_t observed[sizeof(expected)];
+    uint32_t status;
+    unsigned i;
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-multi-gadget,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+
+    for (i = 0; i < ARRAY_SIZE(expected); i++) {
+        expected[i] = 0x40 + i;
+    }
+
+    udphs_start_test_link(qts, hcca);
+    udphs_configure_endpoint(qts, 0,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_BANKS(1), 0);
+
+    qtest_memwrite(qts, setup_buffer, setup, sizeof(setup));
+    udphs_ohci_control_token(qts, ed, td, tail, setup_buffer, 0,
+                             0xf2000000, sizeof(setup));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
+                 UDPHS_EPTSTA_RX_SETUP);
+
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE, expected, 64);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(0),
+                 UDPHS_EPTSTA_TXRDY);
+    qtest_memset(qts, host_buffer, 0xa5, sizeof(expected));
+    udphs_ohci_start_control_token(qts, ed, td, tail, host_buffer, 0,
+                                   0xf3100000, sizeof(expected));
+    qtest_clock_step(qts, 3 * 1000000LL);
+
+    /* One raw 64-byte transaction must not retire the 75-byte host TD. */
+    g_assert_cmphex(qtest_readl(qts, ed + 8) & ~3U, ==, td);
+    g_assert_cmphex(qtest_readl(qts, td) >> 28, ==, 0xf);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0));
+    g_assert_true(status & UDPHS_EPTSTA_TXCOMPLT);
+    g_assert_true(status & UDPHS_EPTSTA_NAK_IN);
+    g_assert_false(status & UDPHS_EPTSTA_TXRDY);
+
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
+                 UDPHS_EPTSTA_TXCOMPLT | UDPHS_EPTSTA_NAK_IN);
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE, expected + 64,
+                   sizeof(expected) - 64);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(0),
+                 UDPHS_EPTSTA_TXRDY);
+    ohci_wait_for_ed(qts, ed, tail);
+
+    g_assert_cmphex(qtest_readl(qts, td) >> 28, ==, 0);
+    qtest_memread(qts, host_buffer, observed, sizeof(observed));
+    g_assert_cmpmem(observed, sizeof(observed), expected, sizeof(expected));
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0));
+    g_assert_true(status & UDPHS_EPTSTA_TXCOMPLT);
+    g_assert_false(status & UDPHS_EPTSTA_TXRDY);
+
+    qtest_quit(qts);
+}
+
+static void test_udphs_ehci_control_out_prefetched_status(void)
+{
+    const uint32_t qh = SAM9X7_SRAM0_BASE + 0x100;
+    const uint32_t setup_qtd = SAM9X7_SRAM0_BASE + 0x180;
+    const uint32_t data_qtd = SAM9X7_SRAM0_BASE + 0x1c0;
+    const uint32_t status_qtd = SAM9X7_SRAM0_BASE + 0x200;
+    const uint32_t setup_buffer = SAM9X7_SRAM0_BASE + 0x300;
+    const uint32_t host_buffer = SAM9X7_SRAM0_BASE + 0x400;
+    const uint8_t setup[] = {
+        0x00, 0x75, 0x00, 0x00, 0x00, 0x00, 75, 0x00,
+    };
+    uint8_t expected[75];
+    uint8_t observed[64];
+    uint32_t endpoint_status;
+    unsigned int i;
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-control-out,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+
+    for (i = 0; i < sizeof(expected); i++) {
+        expected[i] = 0x20 + i;
+    }
+
+    pmc_configure_usb_host(qts);
+    pmc_write_pcr(qts, 23, PMC_PCR_EN);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_TST, 2);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_PULLD_DIS);
+    qtest_clock_step(qts, 1000000);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_CONFIGFLAG, 1);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_PORTSC(1),
+                 UHPHS_PORTSC_PRESET);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_PORTSC(1), 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE +
+                              UHPHS_PORTSC(1)) & UHPHS_PORTSC_PED);
+    udphs_configure_endpoint(qts, 0,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_BANKS(1), 0);
+
+    /*
+     * Put SETUP, a 75-byte OUT data stage and status IN in one qTD chain.
+     * EHCI may prefetch the status qTD while the single endpoint bank keeps
+     * the data qTD asynchronous after its first 64-byte wire transaction.
+     */
+    qtest_memset(qts, qh, 0, 0x180);
+    qtest_memwrite(qts, setup_buffer, setup, sizeof(setup));
+    qtest_memwrite(qts, host_buffer, expected, sizeof(expected));
+    qtest_writel(qts, qh, qh | BIT(1));
+    qtest_writel(qts, qh + 4,
+                 (64U << 16) | BIT(15) | BIT(14) | (2U << 12));
+    qtest_writel(qts, qh + 8, BIT(30));
+    qtest_writel(qts, qh + 16, setup_qtd);
+    qtest_writel(qts, qh + 20, BIT(0));
+
+    qtest_writel(qts, setup_qtd, data_qtd);
+    qtest_writel(qts, setup_qtd + 4, BIT(0));
+    qtest_writel(qts, setup_qtd + 8,
+                 (sizeof(setup) << 16) | (3U << 10) |
+                 (2U << 8) | BIT(7));
+    qtest_writel(qts, setup_qtd + 12, setup_buffer);
+
+    qtest_writel(qts, data_qtd, status_qtd);
+    qtest_writel(qts, data_qtd + 4, BIT(0));
+    qtest_writel(qts, data_qtd + 8,
+                 BIT(31) | (sizeof(expected) << 16) | (3U << 10) |
+                 BIT(7));
+    qtest_writel(qts, data_qtd + 12, host_buffer);
+
+    qtest_writel(qts, status_qtd, BIT(0));
+    qtest_writel(qts, status_qtd + 4, BIT(0));
+    qtest_writel(qts, status_qtd + 8,
+                 BIT(31) | BIT(15) | (3U << 10) | (1U << 8) | BIT(7));
+
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_ASYNCLISTADDR, qh);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_USBCMD,
+                 UHPHS_USBCMD_RUN | UHPHS_USBCMD_ASE);
+
+    for (i = 0; i < 100; i++) {
+        endpoint_status = qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                      UDPHS_EPTSTA(0));
+        if (endpoint_status & UDPHS_EPTSTA_RX_SETUP) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+    g_assert_false(qtest_readl(qts, setup_qtd + 8) & BIT(7));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
+                 UDPHS_EPTSTA_RX_SETUP);
+
+    for (i = 0; i < 100; i++) {
+        endpoint_status = qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                      UDPHS_EPTSTA(0));
+        if ((endpoint_status & (UDPHS_EPTSTA_RXRDY |
+                                UDPHS_EPTSTA_NAK_OUT)) ==
+            (UDPHS_EPTSTA_RXRDY | UDPHS_EPTSTA_NAK_OUT)) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+    g_assert_true(qtest_readl(qts, data_qtd + 8) & BIT(7));
+    g_assert_true(qtest_readl(qts, status_qtd + 8) & BIT(7));
+    g_assert_cmphex(endpoint_status & UDPHS_EPTSTA_BYTE_COUNT(0x7ff), ==,
+                    UDPHS_EPTSTA_BYTE_COUNT(64));
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE, observed, sizeof(observed));
+    g_assert_cmpmem(observed, sizeof(observed), expected, sizeof(observed));
+
+    /* Freeing the sole bank admits only the final 11 data bytes. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
+                 UDPHS_EPTSTA_RXRDY | UDPHS_EPTSTA_NAK_OUT);
+    udphs_ehci_wait_qtd_inactive(qts, data_qtd);
+    endpoint_status = qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                  UDPHS_EPTSTA(0));
+    g_assert_cmphex(qtest_readl(qts, data_qtd + 8) & 0xff, ==, 0);
+    g_assert_true(qtest_readl(qts, status_qtd + 8) & BIT(7));
+    g_assert_true(endpoint_status & UDPHS_EPTSTA_RXRDY);
+    g_assert_cmphex(endpoint_status & UDPHS_EPTSTA_BYTE_COUNT(0x7ff), ==,
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(expected) - 64));
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE, observed,
+                  sizeof(expected) - 64);
+    g_assert_cmpmem(observed, sizeof(expected) - 64, expected + 64,
+                    sizeof(expected) - 64);
+
+    /* Firmware consumes the last OUT bank and supplies the status-IN ZLP. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
+                 UDPHS_EPTSTA_RXRDY | UDPHS_EPTSTA_NAK_IN);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(0),
+                 UDPHS_EPTSTA_TXRDY);
+    udphs_ehci_wait_qtd_inactive(qts, status_qtd);
+    g_assert_cmphex(qtest_readl(qts, status_qtd + 8) & 0xff, ==, 0);
+    endpoint_status = qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                  UDPHS_EPTSTA(0));
+    g_assert_true(endpoint_status & UDPHS_EPTSTA_TXCOMPLT);
+    g_assert_false(endpoint_status & UDPHS_EPTSTA_TXRDY);
+
+    qtest_quit(qts);
+}
+
+enum {
+    UDPHS_EHCI_QH = SAM9X7_SRAM0_BASE + 0x100,
+    UDPHS_EHCI_SETUP_QTD = SAM9X7_SRAM0_BASE + 0x180,
+    UDPHS_EHCI_DATA_QTD = SAM9X7_SRAM0_BASE + 0x1c0,
+    UDPHS_EHCI_REPLACEMENT_SETUP_QTD = SAM9X7_SRAM0_BASE + 0x200,
+    UDPHS_EHCI_STATUS_QTD = SAM9X7_SRAM0_BASE + 0x240,
+    UDPHS_EHCI_SETUP_BUFFER = SAM9X7_SRAM0_BASE + 0x300,
+    UDPHS_EHCI_HOST_BUFFER = SAM9X7_SRAM0_BASE + 0x400,
+    UDPHS_EHCI_DATA_LENGTH = 75,
+};
+
+static void udphs_ehci_expected_data(uint8_t *data)
+{
+    unsigned int i;
+
+    for (i = 0; i < UDPHS_EHCI_DATA_LENGTH; i++) {
+        data[i] = 0xc0 + i;
+    }
+}
+
+static void udphs_ehci_wait_qtd_inactive(QTestState *qts, uint32_t qtd)
+{
+    unsigned int i;
+
+    for (i = 0; i < 100; i++) {
+        if (!(qtest_readl(qts, qtd + 8) & BIT(7))) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+}
+
+/*
+ * Stop immediately after EHCI's queued status-OUT token has reached the
+ * device and become device-owned ASYNC.  With hold_status clear this is the
+ * exact Linux-style three-qTD chain; the status token receives its mandated
+ * first NAK and is then retried.  With hold_status set, a valid zero-length
+ * IN control SETUP is queued between data and status.  Its pending RX_SETUP
+ * keeps the queued status OUT async until firmware acknowledges the SETUP,
+ * providing a deterministic lifecycle/migration test point.
+ */
+static void udphs_ehci_start_queued_status(QTestState *qts,
+                                            bool hold_status)
+{
+    const uint8_t setup[] = {
+        0x80, 0x06, 0x00, 0x02, 0x00, 0x00, 75, 0x00,
+    };
+    const uint8_t replacement_setup[] = {
+        0x80, 0x75, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    uint8_t expected[UDPHS_EHCI_DATA_LENGTH];
+    uint32_t status;
+    unsigned int i;
+
+    udphs_ehci_expected_data(expected);
+
+    pmc_configure_usb_host(qts);
+    pmc_write_pcr(qts, 23, PMC_PCR_EN);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_TST, 2);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_PULLD_DIS);
+    qtest_clock_step(qts, 1000000);
+
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_CONFIGFLAG, 1);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE +
+                              UHPHS_PORTSC(1)) & UHPHS_PORTSC_CONNECT);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_PORTSC(1),
+                 UHPHS_PORTSC_PRESET);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_PORTSC(1), 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE +
+                              UHPHS_PORTSC(1)) & UHPHS_PORTSC_PED);
+    udphs_configure_endpoint(qts, 0,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_BANKS(1), 0);
+
+    /*
+     * Build the Linux-style EP0 chain up front.  Once the 75-byte data qTD
+     * goes async after its first 64-byte packet, EHCI queues the status OUT
+     * behind it instead of submitting it to the device immediately.
+     */
+    qtest_memset(qts, UDPHS_EHCI_QH, 0, 0x200);
+    qtest_memwrite(qts, UDPHS_EHCI_SETUP_BUFFER, setup, sizeof(setup));
+    qtest_memwrite(qts, UDPHS_EHCI_SETUP_BUFFER + sizeof(setup),
+                   replacement_setup, sizeof(replacement_setup));
+    qtest_memset(qts, UDPHS_EHCI_HOST_BUFFER, 0xa5, sizeof(expected));
+    qtest_writel(qts, UDPHS_EHCI_QH, UDPHS_EHCI_QH | BIT(1));
+    qtest_writel(qts, UDPHS_EHCI_QH + 4,
+                 (64U << 16) | BIT(15) | BIT(14) | (2U << 12));
+    qtest_writel(qts, UDPHS_EHCI_QH + 8, BIT(30));
+    qtest_writel(qts, UDPHS_EHCI_QH + 16, UDPHS_EHCI_SETUP_QTD);
+    qtest_writel(qts, UDPHS_EHCI_QH + 20, BIT(0));
+
+    qtest_writel(qts, UDPHS_EHCI_SETUP_QTD, UDPHS_EHCI_DATA_QTD);
+    qtest_writel(qts, UDPHS_EHCI_SETUP_QTD + 4, BIT(0));
+    qtest_writel(qts, UDPHS_EHCI_SETUP_QTD + 8,
+                 (sizeof(setup) << 16) | (3U << 10) |
+                 (2U << 8) | BIT(7));
+    qtest_writel(qts, UDPHS_EHCI_SETUP_QTD + 12,
+                 UDPHS_EHCI_SETUP_BUFFER);
+
+    qtest_writel(qts, UDPHS_EHCI_DATA_QTD,
+                 hold_status ? UDPHS_EHCI_REPLACEMENT_SETUP_QTD :
+                               UDPHS_EHCI_STATUS_QTD);
+    qtest_writel(qts, UDPHS_EHCI_DATA_QTD + 4, BIT(0));
+    qtest_writel(qts, UDPHS_EHCI_DATA_QTD + 8,
+                 BIT(31) | (sizeof(expected) << 16) | (3U << 10) |
+                 (1U << 8) | BIT(7));
+    qtest_writel(qts, UDPHS_EHCI_DATA_QTD + 12,
+                 UDPHS_EHCI_HOST_BUFFER);
+
+    qtest_writel(qts, UDPHS_EHCI_REPLACEMENT_SETUP_QTD,
+                 UDPHS_EHCI_STATUS_QTD);
+    qtest_writel(qts, UDPHS_EHCI_REPLACEMENT_SETUP_QTD + 4, BIT(0));
+    qtest_writel(qts, UDPHS_EHCI_REPLACEMENT_SETUP_QTD + 8,
+                 (sizeof(replacement_setup) << 16) | (3U << 10) |
+                 (2U << 8) | BIT(7));
+    qtest_writel(qts, UDPHS_EHCI_REPLACEMENT_SETUP_QTD + 12,
+                 UDPHS_EHCI_SETUP_BUFFER + sizeof(setup));
+
+    qtest_writel(qts, UDPHS_EHCI_STATUS_QTD, BIT(0));
+    qtest_writel(qts, UDPHS_EHCI_STATUS_QTD + 4, BIT(0));
+    qtest_writel(qts, UDPHS_EHCI_STATUS_QTD + 8,
+                 BIT(31) | BIT(15) | (3U << 10) | BIT(7));
+
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_ASYNCLISTADDR,
+                 UDPHS_EHCI_QH);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_USBCMD,
+                 UHPHS_USBCMD_RUN | UHPHS_USBCMD_ASE);
+
+    /* Firmware first observes and acknowledges the SETUP packet. */
+    for (i = 0; i < 100; i++) {
+        status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0));
+        if (status & UDPHS_EPTSTA_RX_SETUP) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+    g_assert_false(qtest_readl(qts, UDPHS_EHCI_SETUP_QTD + 8) & BIT(7));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
+                 UDPHS_EPTSTA_RX_SETUP);
+
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE, expected, 64);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(0),
+                 UDPHS_EPTSTA_TXRDY);
+    for (i = 0; i < 100; i++) {
+        status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0));
+        if ((status & (UDPHS_EPTSTA_TXCOMPLT |
+                       UDPHS_EPTSTA_NAK_IN)) ==
+            (UDPHS_EPTSTA_TXCOMPLT | UDPHS_EPTSTA_NAK_IN)) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+    g_assert_true(qtest_readl(qts, UDPHS_EHCI_DATA_QTD + 8) & BIT(7));
+    g_assert_true(qtest_readl(qts, UDPHS_EHCI_STATUS_QTD + 8) & BIT(7));
+    g_assert_false(status & UDPHS_EPTSTA_NAK_OUT);
+
+    /*
+     * Completing the data qTD drains the queued status OUT.  Silicon first
+     * NAKs that token; EHCI must retry it without halting or losing the qTD.
+     */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
+                 UDPHS_EPTSTA_TXCOMPLT | UDPHS_EPTSTA_NAK_IN);
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE, expected + 64,
+                   sizeof(expected) - 64);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(0),
+                 UDPHS_EPTSTA_TXRDY);
+
+    /* The first mandated NAK is synchronous; the retry timer has not run. */
+    g_assert_true(qtest_readl(qts, UDPHS_EHCI_STATUS_QTD + 8) & BIT(7));
+
+    for (i = 0; i < 100; i++) {
+        status = qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                              UDPHS_EPTSTA(0));
+        if (status & UDPHS_EPTSTA_NAK_OUT) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+    g_assert_cmphex(qtest_readl(qts, UDPHS_EHCI_DATA_QTD + 8) & 0xff,
+                    ==, 0);
+    g_assert_true(status & UDPHS_EPTSTA_NAK_OUT);
+    if (hold_status) {
+        g_assert_false(qtest_readl(qts,
+                                   UDPHS_EHCI_REPLACEMENT_SETUP_QTD + 8) &
+                       BIT(7));
+        g_assert_true(qtest_readl(qts, UDPHS_EHCI_STATUS_QTD + 8) & BIT(7));
+        g_assert_true(status & UDPHS_EPTSTA_RX_SETUP);
+        g_assert_false(status & UDPHS_EPTSTA_RXRDY);
+    } else {
+        udphs_ehci_wait_qtd_inactive(qts, UDPHS_EHCI_STATUS_QTD);
+        g_assert_cmphex(qtest_readl(qts, UDPHS_EHCI_STATUS_QTD + 8) &
+                        0xff, ==, 0);
+        status = qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                              UDPHS_EPTSTA(0));
+        g_assert_true(status & UDPHS_EPTSTA_RXRDY);
+    }
+}
+
+static void udphs_ehci_complete_queued_status(QTestState *qts)
+{
+    uint32_t status;
+
+    /* Acknowledge the pending SETUP/NAK; that firmware event kicks retry. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
+                 UDPHS_EPTSTA_RX_SETUP | UDPHS_EPTSTA_NAK_OUT);
+    udphs_ehci_wait_qtd_inactive(qts, UDPHS_EHCI_STATUS_QTD);
+    g_assert_cmphex(qtest_readl(qts, UDPHS_EHCI_STATUS_QTD + 8) & 0xff,
+                    ==, 0);
+    status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0));
+    g_assert_false(status & UDPHS_EPTSTA_NAK_OUT);
+    g_assert_true(status & UDPHS_EPTSTA_RXRDY);
+}
+
+static void udphs_ehci_stop_async_schedule(QTestState *qts)
+{
+    unsigned int i;
+
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_USBCMD, 0);
+    for (i = 0; i < 100; i++) {
+        if (qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_USBSTS) &
+            UHPHS_USBSTS_HCHLT) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+}
+
+static void udphs_ehci_submit_reuse_setup(QTestState *qts)
+{
+    const uint8_t setup[] = {
+        0x40, 0x75, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    unsigned int i;
+
+    qtest_memset(qts, UDPHS_EHCI_QH, 0, 0x200);
+    qtest_memwrite(qts, UDPHS_EHCI_SETUP_BUFFER, setup, sizeof(setup));
+    qtest_writel(qts, UDPHS_EHCI_QH, UDPHS_EHCI_QH | BIT(1));
+    qtest_writel(qts, UDPHS_EHCI_QH + 4,
+                 (64U << 16) | BIT(15) | BIT(14) | (2U << 12));
+    qtest_writel(qts, UDPHS_EHCI_QH + 8, BIT(30));
+    qtest_writel(qts, UDPHS_EHCI_QH + 16, UDPHS_EHCI_SETUP_QTD);
+    qtest_writel(qts, UDPHS_EHCI_QH + 20, BIT(0));
+    qtest_writel(qts, UDPHS_EHCI_SETUP_QTD, BIT(0));
+    qtest_writel(qts, UDPHS_EHCI_SETUP_QTD + 4, BIT(0));
+    qtest_writel(qts, UDPHS_EHCI_SETUP_QTD + 8,
+                 (sizeof(setup) << 16) | (3U << 10) |
+                 (2U << 8) | BIT(7));
+    qtest_writel(qts, UDPHS_EHCI_SETUP_QTD + 12,
+                 UDPHS_EHCI_SETUP_BUFFER);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_ASYNCLISTADDR,
+                 UDPHS_EHCI_QH);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_USBCMD,
+                 UHPHS_USBCMD_RUN | UHPHS_USBCMD_ASE);
+
+    for (i = 0; i < 100; i++) {
+        if (qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(0)) &
+            UDPHS_EPTSTA_RX_SETUP) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+    udphs_ehci_wait_qtd_inactive(qts, UDPHS_EHCI_SETUP_QTD);
+}
+
+static void test_udphs_ehci_queued_status_nak(void)
+{
+    uint8_t expected[UDPHS_EHCI_DATA_LENGTH];
+    uint8_t observed[sizeof(expected)];
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-ehci-queue,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+
+    udphs_ehci_start_queued_status(qts, false);
+
+    udphs_ehci_expected_data(expected);
+    qtest_memread(qts, UDPHS_EHCI_HOST_BUFFER, observed, sizeof(observed));
+    g_assert_cmpmem(observed, sizeof(observed), expected, sizeof(expected));
+
+    qtest_quit(qts);
+}
+
+static void test_udphs_ehci_queued_status_migration(void)
+{
+    uint8_t expected[UDPHS_EHCI_DATA_LENGTH];
+    uint8_t observed[sizeof(expected)];
+    QTestState *from = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-status-migrate,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+    QTestState *to = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-status-migrate,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2 -incoming defer");
+
+    udphs_ehci_start_queued_status(from, true);
+
+    /* Keep the rebuilt destination packet async until a deliberate kick. */
+    pmc_write_pcr(from, 23, 0);
+    g_assert_true(qtest_readl(from, UDPHS_EHCI_STATUS_QTD + 8) & BIT(7));
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_true(qtest_readl(to, UDPHS_EHCI_STATUS_QTD + 8) & BIT(7));
+    pmc_write_pcr(to, 23, PMC_PCR_EN);
+    g_assert_true(qtest_readl(to, UDPHS_EHCI_STATUS_QTD + 8) & BIT(7));
+    udphs_ehci_complete_queued_status(to);
+    udphs_ehci_expected_data(expected);
+    qtest_memread(to, UDPHS_EHCI_HOST_BUFFER, observed, sizeof(observed));
+    g_assert_cmpmem(observed, sizeof(observed), expected, sizeof(expected));
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
+static void udphs_ehci_test_async_status_abort(bool bus_reset)
+{
+    uint32_t token;
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-status-abort,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+
+    udphs_ehci_start_queued_status(qts, true);
+    if (bus_reset) {
+        qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_PORTSC(1),
+                     UHPHS_PORTSC_PRESET);
+        qtest_clock_step(qts, 1000000);
+        /* Port reset cancels the host packet but leaves its guest qTD live. */
+        g_assert_true(qtest_readl(qts, UDPHS_EHCI_STATUS_QTD + 8) & BIT(7));
+        qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_PORTSC(1), 0);
+        qtest_clock_step(qts, 1000000);
+        g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE +
+                                  UHPHS_PORTSC(1)) & UHPHS_PORTSC_PED);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                    UDPHS_EPTCFG(0)), ==, 0);
+        udphs_configure_endpoint(qts, 0,
+                                 UDPHS_EPTCFG_SIZE(3) |
+                                 UDPHS_EPTCFG_BANKS(1), 0);
+        udphs_ehci_wait_qtd_inactive(qts, UDPHS_EHCI_STATUS_QTD);
+        token = qtest_readl(qts, UDPHS_EHCI_STATUS_QTD + 8);
+        g_assert_cmphex(token & 0xff, ==, 0);
+    } else {
+        qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCTLDIS(0),
+                     UDPHS_EPTCTL_ENABLE);
+        udphs_ehci_wait_qtd_inactive(qts, UDPHS_EHCI_STATUS_QTD);
+        token = qtest_readl(qts, UDPHS_EHCI_STATUS_QTD + 8);
+        g_assert_true(token & BIT(6));
+        g_assert_true(token & BIT(3));
+    }
+
+    udphs_ehci_stop_async_schedule(qts);
+
+    if (!bus_reset) {
+        udphs_configure_endpoint(qts, 0,
+                                 UDPHS_EPTCFG_SIZE(3) |
+                                 UDPHS_EPTCFG_BANKS(1), 0);
+    }
+    udphs_ehci_submit_reuse_setup(qts);
+    g_assert_false(qtest_readl(qts, UDPHS_EHCI_SETUP_QTD + 8) & BIT(7));
+
+    qtest_quit(qts);
+}
+
+static void test_udphs_ehci_async_status_disable(void)
+{
+    udphs_ehci_test_async_status_abort(false);
+}
+
+static void test_udphs_ehci_async_status_bus_reset(void)
+{
+    udphs_ehci_test_async_status_abort(true);
+}
+
+static void test_udphs_ehci_replacement_setup_new_data(void)
+{
+    const uint32_t old_qh = SAM9X7_SRAM0_BASE + 0x100;
+    const uint32_t new_qh = SAM9X7_SRAM0_BASE + 0x180;
+    const uint32_t old_setup_qtd = SAM9X7_SRAM0_BASE + 0x200;
+    const uint32_t old_data_qtd = SAM9X7_SRAM0_BASE + 0x240;
+    const uint32_t new_setup_qtd = SAM9X7_SRAM0_BASE + 0x280;
+    const uint32_t new_data_qtd = SAM9X7_SRAM0_BASE + 0x2c0;
+    const uint32_t old_setup_buffer = SAM9X7_SRAM0_BASE + 0x400;
+    const uint32_t new_setup_buffer = SAM9X7_SRAM0_BASE + 0x408;
+    const uint32_t old_host_buffer = SAM9X7_SRAM0_BASE + 0x500;
+    const uint32_t new_host_buffer = SAM9X7_SRAM0_BASE + 0x600;
+    const uint8_t old_setup[] = {
+        0xc0, 0x75, 0x00, 0x00, 0x00, 0x00, 75, 0x00,
+    };
+    const uint8_t new_setup[] = {
+        0x40, 0x76, 0x00, 0x00, 0x00, 0x00, 5, 0x00,
+    };
+    const uint8_t new_data[] = { 0x6e, 0x65, 0x77, 0x21, 0x01 };
+    uint8_t old_data[75];
+    uint8_t observed[sizeof(new_data)];
+    uint32_t endpoint_status;
+    uint32_t token;
+    unsigned int i;
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-new-setup,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+
+    for (i = 0; i < sizeof(old_data); i++) {
+        old_data[i] = 0x80 + i;
+    }
+
+    pmc_configure_usb_host(qts);
+    pmc_write_pcr(qts, 23, PMC_PCR_EN);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_TST, 2);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_PULLD_DIS);
+    qtest_clock_step(qts, 1000000);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_CONFIGFLAG, 1);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_PORTSC(1),
+                 UHPHS_PORTSC_PRESET);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_PORTSC(1), 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE +
+                              UHPHS_PORTSC(1)) & UHPHS_PORTSC_PED);
+    udphs_configure_endpoint(qts, 1,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_BANKS(1), 0);
+
+    qtest_memset(qts, old_qh, 0, 0x300);
+    qtest_memwrite(qts, old_setup_buffer, old_setup, sizeof(old_setup));
+    qtest_memwrite(qts, new_setup_buffer, new_setup, sizeof(new_setup));
+    qtest_memset(qts, old_host_buffer, 0xa5, sizeof(old_data));
+    qtest_memwrite(qts, new_host_buffer, new_data, sizeof(new_data));
+
+    /* Two circular QHs let opposite directions of control EP1 overlap. */
+    qtest_writel(qts, old_qh, new_qh | BIT(1));
+    qtest_writel(qts, old_qh + 4,
+                 (64U << 16) | BIT(15) | BIT(14) | (2U << 12) |
+                 (1U << 8));
+    qtest_writel(qts, old_qh + 8, BIT(30));
+    qtest_writel(qts, old_qh + 16, old_setup_qtd);
+    qtest_writel(qts, old_qh + 20, BIT(0));
+    qtest_writel(qts, new_qh, old_qh | BIT(1));
+    qtest_writel(qts, new_qh + 4,
+                 (64U << 16) | BIT(14) | (2U << 12) | (1U << 8));
+    qtest_writel(qts, new_qh + 8, BIT(30));
+    qtest_writel(qts, new_qh + 16, BIT(0));
+    qtest_writel(qts, new_qh + 20, BIT(0));
+
+    qtest_writel(qts, old_setup_qtd, old_data_qtd);
+    qtest_writel(qts, old_setup_qtd + 4, BIT(0));
+    qtest_writel(qts, old_setup_qtd + 8,
+                 (sizeof(old_setup) << 16) | (3U << 10) |
+                 (2U << 8) | BIT(7));
+    qtest_writel(qts, old_setup_qtd + 12, old_setup_buffer);
+    qtest_writel(qts, old_data_qtd, BIT(0));
+    qtest_writel(qts, old_data_qtd + 4, BIT(0));
+    qtest_writel(qts, old_data_qtd + 8,
+                 BIT(31) | (sizeof(old_data) << 16) | (3U << 10) |
+                 (1U << 8) | BIT(7));
+    qtest_writel(qts, old_data_qtd + 12, old_host_buffer);
+
+    qtest_writel(qts, new_setup_qtd, new_data_qtd);
+    qtest_writel(qts, new_setup_qtd + 4, BIT(0));
+    qtest_writel(qts, new_setup_qtd + 8,
+                 (sizeof(new_setup) << 16) | (3U << 10) |
+                 (2U << 8) | BIT(7));
+    qtest_writel(qts, new_setup_qtd + 12, new_setup_buffer);
+    qtest_writel(qts, new_data_qtd, BIT(0));
+    qtest_writel(qts, new_data_qtd + 4, BIT(0));
+    qtest_writel(qts, new_data_qtd + 8,
+                 BIT(31) | (sizeof(new_data) << 16) | (3U << 10) |
+                 BIT(7));
+    qtest_writel(qts, new_data_qtd + 12, new_host_buffer);
+
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_ASYNCLISTADDR,
+                 old_qh);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_USBCMD,
+                 UHPHS_USBCMD_RUN | UHPHS_USBCMD_ASE);
+    for (i = 0; i < 100; i++) {
+        endpoint_status = qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                      UDPHS_EPTSTA(1));
+        if (endpoint_status & UDPHS_EPTSTA_RX_SETUP) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(1),
+                 UDPHS_EPTSTA_RX_SETUP);
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE + (1U << 16), old_data,
+                   64);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(1),
+                 UDPHS_EPTSTA_TXRDY);
+    for (i = 0; i < 100; i++) {
+        endpoint_status = qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                      UDPHS_EPTSTA(1));
+        if ((endpoint_status & (UDPHS_EPTSTA_TXCOMPLT |
+                                UDPHS_EPTSTA_NAK_IN)) ==
+            (UDPHS_EPTSTA_TXCOMPLT | UDPHS_EPTSTA_NAK_IN)) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+    g_assert_true(qtest_readl(qts, old_data_qtd + 8) & BIT(7));
+
+    /* Arm the second QH only after the old IN transfer is device-owned. */
+    qtest_writel(qts, new_qh + 16, new_setup_qtd);
+    for (i = 0; i < 100; i++) {
+        endpoint_status = qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                      UDPHS_EPTSTA(1));
+        if (endpoint_status & UDPHS_EPTSTA_RX_SETUP) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+    udphs_ehci_wait_qtd_inactive(qts, new_setup_qtd);
+    udphs_ehci_wait_qtd_inactive(qts, old_data_qtd);
+    token = qtest_readl(qts, old_data_qtd + 8);
+    g_assert_true(token & BIT(6));
+    g_assert_true(token & BIT(3));
+
+    /* The immediately following new OUT stage cannot pass RX_SETUP. */
+    g_assert_true(qtest_readl(qts, new_data_qtd + 8) & BIT(7));
+    g_assert_true(endpoint_status & UDPHS_EPTSTA_RX_SETUP);
+    for (i = 0; i < 100; i++) {
+        endpoint_status = qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                      UDPHS_EPTSTA(1));
+        if (endpoint_status & UDPHS_EPTSTA_NAK_OUT) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+    g_assert_true(qtest_readl(qts, new_data_qtd + 8) & BIT(7));
+
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(1),
+                 UDPHS_EPTSTA_RX_SETUP | UDPHS_EPTSTA_NAK_OUT);
+    udphs_ehci_wait_qtd_inactive(qts, new_data_qtd);
+    g_assert_cmphex(qtest_readl(qts, new_data_qtd + 8) & 0xff, ==, 0);
+    endpoint_status = qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                  UDPHS_EPTSTA(1));
+    g_assert_true(endpoint_status & UDPHS_EPTSTA_RXRDY);
+    g_assert_cmphex(endpoint_status & UDPHS_EPTSTA_BYTE_COUNT(0x7ff), ==,
+                    UDPHS_EPTSTA_BYTE_COUNT(sizeof(new_data)));
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE + (1U << 16), observed,
+                  sizeof(observed));
+    g_assert_cmpmem(observed, sizeof(observed), new_data, sizeof(new_data));
+
+    qtest_quit(qts);
+}
+
+static void test_udphs_ehci_three_qtd_bulk_order(void)
+{
+    const uint32_t qh = SAM9X7_SRAM0_BASE + 0x800;
+    const uint32_t first_qtd = SAM9X7_SRAM0_BASE + 0x880;
+    const uint32_t second_qtd = SAM9X7_SRAM0_BASE + 0x8c0;
+    const uint32_t third_qtd = SAM9X7_SRAM0_BASE + 0x900;
+    const uint32_t first_buffer = SAM9X7_SRAM0_BASE + 0xa00;
+    const uint32_t second_buffer = SAM9X7_SRAM0_BASE + 0xb00;
+    const uint32_t third_buffer = SAM9X7_SRAM0_BASE + 0xc00;
+    uint8_t first_data[68];
+    const uint8_t second_data[] = { 0x21, 0x22, 0x23, 0x24, 0x25 };
+    const uint8_t third_data[] = { 0x31, 0x32, 0x33, 0x34, 0x35, 0x36 };
+    uint8_t observed[sizeof(first_data)];
+    uint32_t status;
+    unsigned int i;
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-bulk-order,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+
+    for (i = 0; i < sizeof(first_data); i++) {
+        first_data[i] = 0x80 + i;
+    }
+
+    pmc_configure_usb_host(qts);
+    pmc_write_pcr(qts, 23, PMC_PCR_EN);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_TST, 2);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_CTRL,
+                 UDPHS_CTRL_EN_UDPHS | UDPHS_CTRL_PULLD_DIS);
+    qtest_clock_step(qts, 1000000);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_CONFIGFLAG, 1);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_PORTSC(1),
+                 UHPHS_PORTSC_PRESET);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_PORTSC(1), 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_EHCI_BASE +
+                              UHPHS_PORTSC(1)) & UHPHS_PORTSC_PED);
+    udphs_configure_endpoint(qts, 1,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_DIR_IN |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(1), 0);
+
+    /*
+     * The 68-byte qTD goes async after one 64-byte wire transaction.  EHCI
+     * then queues both following qTDs behind it in the USB endpoint queue.
+     */
+    qtest_memset(qts, qh, 0, 0x200);
+    qtest_memset(qts, first_buffer, 0xa5, sizeof(first_data));
+    qtest_memset(qts, second_buffer, 0xa5, sizeof(second_data));
+    qtest_memset(qts, third_buffer, 0xa5, sizeof(third_data));
+    qtest_writel(qts, qh, qh | BIT(1));
+    qtest_writel(qts, qh + 4,
+                 (64U << 16) | BIT(15) | BIT(14) |
+                 (2U << 12) | (1U << 8));
+    qtest_writel(qts, qh + 8, BIT(30));
+    qtest_writel(qts, qh + 16, first_qtd);
+    qtest_writel(qts, qh + 20, BIT(0));
+
+    qtest_writel(qts, first_qtd, second_qtd);
+    qtest_writel(qts, first_qtd + 4, BIT(0));
+    qtest_writel(qts, first_qtd + 8,
+                 (sizeof(first_data) << 16) | (3U << 10) |
+                 (1U << 8) | BIT(7));
+    qtest_writel(qts, first_qtd + 12, first_buffer);
+    qtest_writel(qts, second_qtd, third_qtd);
+    qtest_writel(qts, second_qtd + 4, BIT(0));
+    qtest_writel(qts, second_qtd + 8,
+                 BIT(31) | (sizeof(second_data) << 16) | (3U << 10) |
+                 (1U << 8) | BIT(7));
+    qtest_writel(qts, second_qtd + 12, second_buffer);
+    qtest_writel(qts, third_qtd, BIT(0));
+    qtest_writel(qts, third_qtd + 4, BIT(0));
+    qtest_writel(qts, third_qtd + 8,
+                 (sizeof(third_data) << 16) | (3U << 10) |
+                 (1U << 8) | BIT(7));
+    qtest_writel(qts, third_qtd + 12, third_buffer);
+
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE + (1U << 16),
+                   first_data, 64);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(1),
+                 UDPHS_EPTSTA_TXRDY);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_ASYNCLISTADDR, qh);
+    qtest_writel(qts, SAM9X7_UHPHS_EHCI_BASE + UHPHS_USBCMD,
+                 UHPHS_USBCMD_RUN | UHPHS_USBCMD_ASE);
+
+    for (i = 0; i < 100; i++) {
+        status = qtest_readl(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSTA(1));
+        if ((status & (UDPHS_EPTSTA_TXCOMPLT |
+                       UDPHS_EPTSTA_NAK_IN)) ==
+            (UDPHS_EPTSTA_TXCOMPLT | UDPHS_EPTSTA_NAK_IN)) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+    g_assert_true(qtest_readl(qts, first_qtd + 8) & BIT(7));
+    g_assert_true(qtest_readl(qts, second_qtd + 8) & BIT(7));
+    g_assert_true(qtest_readl(qts, third_qtd + 8) & BIT(7));
+
+    /* Completing qTD 1 exposes qTD 2, which NAKs ahead of queued qTD 3. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(1),
+                 UDPHS_EPTSTA_TXCOMPLT | UDPHS_EPTSTA_NAK_IN);
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE + (1U << 16),
+                   first_data + 64, sizeof(first_data) - 64);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(1),
+                 UDPHS_EPTSTA_TXRDY);
+    udphs_ehci_wait_qtd_inactive(qts, first_qtd);
+    g_assert_true(qtest_readl(qts, second_qtd + 8) & BIT(7));
+    g_assert_true(qtest_readl(qts, third_qtd + 8) & BIT(7));
+    g_assert_true(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                              UDPHS_EPTSTA(1)) & UDPHS_EPTSTA_NAK_IN);
+
+    /* qTD 3 cannot consume data or retire until the middle qTD completes. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(1),
+                 UDPHS_EPTSTA_TXCOMPLT | UDPHS_EPTSTA_NAK_IN);
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE + (1U << 16),
+                   second_data, sizeof(second_data));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(1),
+                 UDPHS_EPTSTA_TXRDY);
+    udphs_ehci_wait_qtd_inactive(qts, second_qtd);
+    g_assert_true(qtest_readl(qts, third_qtd + 8) & BIT(7));
+    qtest_memread(qts, second_buffer, observed, sizeof(second_data));
+    g_assert_cmpmem(observed, sizeof(second_data), second_data,
+                    sizeof(second_data));
+
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(1),
+                 UDPHS_EPTSTA_TXCOMPLT | UDPHS_EPTSTA_NAK_IN);
+    qtest_memwrite(qts, SAM9X7_UDPHS_FIFO_BASE + (1U << 16),
+                   third_data, sizeof(third_data));
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(1),
+                 UDPHS_EPTSTA_TXRDY);
+    udphs_ehci_wait_qtd_inactive(qts, third_qtd);
+
+    qtest_memread(qts, first_buffer, observed, sizeof(first_data));
+    g_assert_cmpmem(observed, sizeof(first_data), first_data,
+                    sizeof(first_data));
+    qtest_memread(qts, third_buffer, observed, sizeof(third_data));
+    g_assert_cmpmem(observed, sizeof(third_data), third_data,
+                    sizeof(third_data));
+
+    qtest_quit(qts);
+}
+
+static void test_udphs_multipacket_migration(void)
+{
+    const uint32_t hcca = SAM9X7_SRAM0_BASE;
+    const uint32_t ed = SAM9X7_SRAM0_BASE + 0x100;
+    const uint32_t td = SAM9X7_SRAM0_BASE + 0x120;
+    const uint32_t tail = SAM9X7_SRAM0_BASE + 0x130;
+    const uint32_t setup_buffer = SAM9X7_SRAM0_BASE + 0x180;
+    const uint32_t host_buffer = SAM9X7_SRAM0_BASE + 0x200;
+    const uint8_t setup[] = {
+        0x80, 0x06, 0x00, 0x02, 0x00, 0x00, 75, 0x00,
+    };
+    uint8_t expected[75];
+    uint8_t observed[sizeof(expected)];
+    unsigned i;
+    QTestState *from = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-multi-migrate,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+    QTestState *to = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-multi-migrate,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2 -incoming defer");
+
+    for (i = 0; i < ARRAY_SIZE(expected); i++) {
+        expected[i] = 0x80 + i;
+    }
+
+    udphs_start_test_link(from, hcca);
+    udphs_configure_endpoint(from, 0,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_BANKS(1), 0);
+    qtest_memwrite(from, setup_buffer, setup, sizeof(setup));
+    udphs_ohci_control_token(from, ed, td, tail, setup_buffer, 0,
+                             0xf2000000, sizeof(setup));
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
+                 UDPHS_EPTSTA_RX_SETUP);
+    qtest_memwrite(from, SAM9X7_UDPHS_FIFO_BASE, expected, 64);
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(0),
+                 UDPHS_EPTSTA_TXRDY);
+    qtest_memset(from, host_buffer, 0xa5, sizeof(expected));
+    udphs_ohci_start_control_token(from, ed, td, tail, host_buffer, 0,
+                                   0xf3100000, sizeof(expected));
+    qtest_clock_step(from, 3 * 1000000LL);
+    g_assert_cmphex(qtest_readl(from, ed + 8) & ~3U, ==, td);
+    g_assert_true(qtest_readl(from, SAM9X7_UDPHS_BASE +
+                              UDPHS_EPTSTA(0)) & UDPHS_EPTSTA_NAK_IN);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    /* The reconstructed OHCI request retains its first 64 bytes. */
+    g_assert_cmphex(qtest_readl(to, ed + 8) & ~3U, ==, td);
+    qtest_writel(to, SAM9X7_UDPHS_BASE + UDPHS_EPTCLRSTA(0),
+                 UDPHS_EPTSTA_TXCOMPLT | UDPHS_EPTSTA_NAK_IN);
+    qtest_memwrite(to, SAM9X7_UDPHS_FIFO_BASE, expected + 64,
+                   sizeof(expected) - 64);
+    qtest_writel(to, SAM9X7_UDPHS_BASE + UDPHS_EPTSETSTA(0),
+                 UDPHS_EPTSTA_TXRDY);
+    ohci_wait_for_ed(to, ed, tail);
+    g_assert_cmphex(qtest_readl(to, td) >> 28, ==, 0);
+    qtest_memread(to, host_buffer, observed, sizeof(observed));
+    g_assert_cmpmem(observed, sizeof(observed), expected, sizeof(expected));
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
 static void udphs_ohci_start_bulk_transfer(QTestState *qts, uint32_t ed,
                                            uint32_t td, uint32_t tail,
                                            uint32_t buffer,
@@ -22165,6 +23147,211 @@ static void test_udphs_dma_data_tokens(void)
                                 UDPHS_DMAADDRESS(4)), ==, 0x10000000);
 
     qtest_quit(qts);
+}
+
+static void test_udphs_dma_host_mmio_during_async_out(void)
+{
+    const uint32_t hcca = SAM9X7_SRAM0_BASE;
+    const uint32_t ed = SAM9X7_SRAM0_BASE + 0x100;
+    const uint32_t td = SAM9X7_SRAM0_BASE + 0x120;
+    const uint32_t tail = SAM9X7_SRAM0_BASE + 0x130;
+    const uint32_t host_buffer = SAM9X7_SRAM0_BASE + 0x200;
+    uint8_t hostile_data[68];
+    const uint8_t reuse_data[] = {
+        0x72, 0x65, 0x75, 0x73, 0x65, 0x2d, 0x61,
+        0x66, 0x74, 0x65, 0x72, 0x2d, 0x72,
+    };
+    uint8_t observed[sizeof(reuse_data)];
+    uint32_t dma_status;
+    unsigned int i;
+    QTestState *qts = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-host-mmio,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+
+    memset(hostile_data, 0xa5, sizeof(hostile_data));
+    hostile_data[0] = UHPFS_COMMAND_HCR;
+    hostile_data[1] = 0;
+    hostile_data[2] = 0;
+    hostile_data[3] = 0;
+
+    udphs_start_test_link(qts, hcca);
+    udphs_configure_endpoint(qts, 1,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(1),
+                             UDPHS_EPTCTL_AUTO_VALID);
+
+    /*
+     * The first 64-byte wire transaction makes the host TD asynchronous.
+     * Its embedded DMA copies the leading word to OHCI HcCommandStatus,
+     * resetting the host controller that owns the packet.  DMA must run
+     * after the USB callback unwinds so cancellation cannot free the live
+     * packet reentrantly.
+     */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(1),
+                 SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_COMMAND_STATUS);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(1),
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_BF_EN |
+                 UDPHS_DMA_END_BF_IE | UDPHS_DMA_BUFF_LENGTH(4));
+    qtest_memwrite(qts, host_buffer, hostile_data, sizeof(hostile_data));
+    udphs_ohci_start_bulk_transfer(qts, ed, td, tail, host_buffer, 1,
+                                   false, 0xf2000000,
+                                   sizeof(hostile_data));
+    for (i = 0; i < 100; i++) {
+        if (qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                        UHPFS_HC_HCCA) == 0) {
+            break;
+        }
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+
+    /* Host reset cancels the packet without advancing the guest ED. */
+    g_assert_cmphex(qtest_readl(qts, ed + 8) & ~3U, ==, td);
+    dma_status = qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                             UDPHS_DMASTATUS(1));
+    g_assert_true(dma_status & UDPHS_DMA_END_BF_ST);
+    g_assert_false(dma_status & (UDPHS_DMA_CHANN_ENB |
+                                 UDPHS_DMA_CHANN_ACT));
+
+    /* Reset and reconnect both ends, then reuse the same endpoint. */
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(1), 0);
+    qtest_writel(qts, SAM9X7_UDPHS_BASE + UDPHS_EPTRST, BIT(1));
+    udphs_start_test_link(qts, hcca);
+    udphs_configure_endpoint(qts, 1,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(1),
+                             UDPHS_EPTCTL_AUTO_VALID);
+    qtest_memwrite(qts, host_buffer, reuse_data, sizeof(reuse_data));
+    udphs_ohci_bulk_transfer(qts, ed, td, tail, host_buffer, 1, false,
+                             sizeof(reuse_data));
+    g_assert_cmphex(qtest_readl(qts, td) >> 28, ==, 0);
+    qtest_memread(qts, SAM9X7_UDPHS_FIFO_BASE + (1U << 16), observed,
+                  sizeof(observed));
+    g_assert_cmpmem(observed, sizeof(observed), reuse_data,
+                    sizeof(reuse_data));
+
+    /* Give stale deferred work a chance to run; it must not touch reuse. */
+    for (i = 0; i < 3; i++) {
+        qtest_clock_step(qts, 1000000);
+    }
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE +
+                                UDPHS_EPTSTA(1)) &
+                    (UDPHS_EPTSTA_RXRDY |
+                     UDPHS_EPTSTA_BYTE_COUNT(0x7ff)), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_udphs_deferred_dma_multipacket_migration(void)
+{
+    const uint32_t hcca = SAM9X7_SRAM0_BASE;
+    const uint32_t ed = SAM9X7_SRAM0_BASE + 0x100;
+    const uint32_t td = SAM9X7_SRAM0_BASE + 0x120;
+    const uint32_t tail = SAM9X7_SRAM0_BASE + 0x130;
+    const uint32_t host_buffer = SAM9X7_SRAM0_BASE + 0x200;
+    const uint32_t dma_buffer = SAM9X7_SRAM0_BASE + 0x800;
+    uint8_t expected[68];
+    uint8_t observed[sizeof(expected)];
+    uint32_t endpoint_status;
+    uint32_t dma_status;
+    unsigned int i;
+    QTestState *from = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-deferred-dma,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2");
+    QTestState *to = qtest_init(
+        SAM9X75_MACHINE
+        " -device at91-udphs-gadget,id=sam9x75-udphs-deferred-dma,"
+        "udphs=/machine/soc/udphs,bus=usb-bus.0,port=2 -incoming defer");
+
+    for (i = 0; i < sizeof(expected); i++) {
+        expected[i] = 0x40 ^ i;
+    }
+
+    udphs_start_test_link(from, hcca);
+    udphs_configure_endpoint(from, 1,
+                             UDPHS_EPTCFG_SIZE(3) |
+                             UDPHS_EPTCFG_TYPE(2) |
+                             UDPHS_EPTCFG_BANKS(1),
+                             UDPHS_EPTCTL_AUTO_VALID |
+                             UDPHS_EPTCTL_INTDIS_DMA |
+                             UDPHS_EPTCTL_RXRDY_IE);
+    qtest_memset(from, dma_buffer, 0xa5, sizeof(expected));
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_DMAADDRESS(1),
+                 dma_buffer);
+    qtest_writel(from, SAM9X7_UDPHS_BASE + UDPHS_DMACONTROL(1),
+                 UDPHS_DMA_CHANN_ENB | UDPHS_DMA_END_BF_EN |
+                 UDPHS_DMA_END_BF_IE |
+                 UDPHS_DMA_BUFF_LENGTH(sizeof(expected)));
+    qtest_memwrite(from, host_buffer, expected, sizeof(expected));
+    udphs_ohci_start_bulk_transfer(from, ed, td, tail, host_buffer, 1,
+                                   false, 0xf2000000,
+                                   sizeof(expected));
+
+    /*
+     * Token service defers DMA until its USB callback unwinds.  RXRDY_IE
+     * then deliberately leaves that deferred channel and its first bank
+     * pending while the 68-byte host TD remains asynchronous.
+     */
+    for (i = 0; i < 100; i++) {
+        endpoint_status = qtest_readl(from, SAM9X7_UDPHS_BASE +
+                                      UDPHS_EPTSTA(1));
+        dma_status = qtest_readl(from, SAM9X7_UDPHS_BASE +
+                                 UDPHS_DMASTATUS(1));
+        if ((endpoint_status & (UDPHS_EPTSTA_RXRDY |
+                                UDPHS_EPTSTA_NAK_OUT)) ==
+            (UDPHS_EPTSTA_RXRDY | UDPHS_EPTSTA_NAK_OUT) &&
+            (dma_status & UDPHS_DMA_CHANN_ENB)) {
+            break;
+        }
+        qtest_clock_step(from, 1000000);
+    }
+    g_assert_cmpuint(i, <, 100);
+    g_assert_cmphex(qtest_readl(from, ed + 8) & ~3U, ==, td);
+    g_assert_cmphex(qtest_readl(from, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(1)), ==, dma_buffer);
+    g_assert_cmphex(dma_status & UDPHS_DMA_BUFF_COUNT(0xffff), ==,
+                    UDPHS_DMA_BUFF_COUNT(sizeof(expected)));
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    endpoint_status = qtest_readl(to, SAM9X7_UDPHS_BASE +
+                                  UDPHS_EPTSTA(1));
+    dma_status = qtest_readl(to, SAM9X7_UDPHS_BASE +
+                             UDPHS_DMASTATUS(1));
+    g_assert_cmphex(qtest_readl(to, ed + 8) & ~3U, ==, td);
+    g_assert_true(endpoint_status & UDPHS_EPTSTA_RXRDY);
+    g_assert_true(endpoint_status & UDPHS_EPTSTA_NAK_OUT);
+    g_assert_true(dma_status & UDPHS_DMA_CHANN_ENB);
+    g_assert_cmphex(dma_status & UDPHS_DMA_BUFF_COUNT(0xffff), ==,
+                    UDPHS_DMA_BUFF_COUNT(sizeof(expected)));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(1)), ==, dma_buffer);
+
+    /* Removing the local DMA gate drains 64+4 bytes and retires the TD. */
+    qtest_writel(to, SAM9X7_UDPHS_BASE + UDPHS_EPTCTLDIS(1),
+                 UDPHS_EPTCTL_INTDIS_DMA);
+    ohci_wait_for_ed(to, ed, tail);
+    g_assert_cmphex(qtest_readl(to, td) >> 28, ==, 0);
+    qtest_memread(to, dma_buffer, observed, sizeof(observed));
+    g_assert_cmpmem(observed, sizeof(observed), expected, sizeof(expected));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_UDPHS_BASE +
+                                UDPHS_DMAADDRESS(1)), ==,
+                    dma_buffer + sizeof(expected));
+    dma_status = qtest_readl(to, SAM9X7_UDPHS_BASE +
+                             UDPHS_DMASTATUS(1));
+    g_assert_true(dma_status & UDPHS_DMA_END_BF_ST);
+    g_assert_false(dma_status & (UDPHS_DMA_CHANN_ENB |
+                                 UDPHS_DMA_CHANN_ACT));
+
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
 static void test_udphs_migration(void)
@@ -23958,6 +25145,24 @@ int main(int argc, char **argv)
                    test_udphs_shared_port_a_mux);
     qtest_add_func("sam9x75/udphs/control-setup-interlock",
                    test_udphs_control_setup_interlock);
+    qtest_add_func("sam9x75/udphs/multipacket-control-in",
+                   test_udphs_multipacket_control_in);
+    qtest_add_func("sam9x75/udphs/ehci-control-out-prefetched-status",
+                   test_udphs_ehci_control_out_prefetched_status);
+    qtest_add_func("sam9x75/udphs/ehci-queued-status-nak",
+                   test_udphs_ehci_queued_status_nak);
+    qtest_add_func("sam9x75/udphs/ehci-queued-status-migration",
+                   test_udphs_ehci_queued_status_migration);
+    qtest_add_func("sam9x75/udphs/ehci-async-status-disable",
+                   test_udphs_ehci_async_status_disable);
+    qtest_add_func("sam9x75/udphs/ehci-async-status-bus-reset",
+                   test_udphs_ehci_async_status_bus_reset);
+    qtest_add_func("sam9x75/udphs/ehci-replacement-setup-new-data",
+                   test_udphs_ehci_replacement_setup_new_data);
+    qtest_add_func("sam9x75/udphs/ehci-three-qtd-bulk-order",
+                   test_udphs_ehci_three_qtd_bulk_order);
+    qtest_add_func("sam9x75/udphs/multipacket-migration",
+                   test_udphs_multipacket_migration);
     qtest_add_func("sam9x75/udphs/iso-error-paths",
                    test_udphs_iso_error_paths);
     qtest_add_func("sam9x75/udphs/high-bandwidth-iso-zlp",
@@ -23968,6 +25173,10 @@ int main(int argc, char **argv)
                    test_udphs_intdis_dma_gating);
     qtest_add_func("sam9x75/udphs/dma-data-tokens",
                    test_udphs_dma_data_tokens);
+    qtest_add_func("sam9x75/udphs/dma-host-mmio-during-async-out",
+                   test_udphs_dma_host_mmio_during_async_out);
+    qtest_add_func("sam9x75/udphs/deferred-dma-multipacket-migration",
+                   test_udphs_deferred_dma_multipacket_migration);
     qtest_add_func("sam9x75/udphs/migration", test_udphs_migration);
     qtest_add_func("sam9x75/uhphs/registers-reset-and-companions",
                    test_uhphs_registers_reset_and_companions);
