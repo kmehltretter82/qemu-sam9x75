@@ -42,6 +42,10 @@
 #include <linux/can/raw.h>
 #include "qom/object.h"
 
+#ifndef CANFD_FDF
+#define CANFD_FDF 0x04
+#endif
+
 #ifndef DEBUG_CAN
 #define DEBUG_CAN 0
 #endif /*DEBUG_CAN*/
@@ -49,7 +53,6 @@
 #define TYPE_CAN_HOST_SOCKETCAN "can-host-socketcan"
 OBJECT_DECLARE_SIMPLE_TYPE(CanHostSocketCAN, CAN_HOST_SOCKETCAN)
 
-#define CAN_READ_BUF_LEN  5
 struct CanHostSocketCAN {
     CanHostState       parent;
     char               *ifname;
@@ -57,10 +60,6 @@ struct CanHostSocketCAN {
     qemu_can_filter    *rfilter;
     int                rfilter_num;
     can_err_mask_t     err_mask;
-
-    qemu_can_frame     buf[CAN_READ_BUF_LEN];
-    int                bufcnt;
-    int                bufptr;
 
     int                fd;
 };
@@ -70,8 +69,8 @@ QEMU_BUILD_BUG_ON(QEMU_CAN_EFF_FLAG != CAN_EFF_FLAG);
 QEMU_BUILD_BUG_ON(QEMU_CAN_RTR_FLAG != CAN_RTR_FLAG);
 QEMU_BUILD_BUG_ON(QEMU_CAN_ERR_FLAG != CAN_ERR_FLAG);
 QEMU_BUILD_BUG_ON(QEMU_CAN_INV_FILTER != CAN_INV_FILTER);
-QEMU_BUILD_BUG_ON(offsetof(qemu_can_frame, data)
-                  != offsetof(struct can_frame, data));
+QEMU_BUILD_BUG_ON(QEMU_CAN_FRMF_BRS != CANFD_BRS);
+QEMU_BUILD_BUG_ON(QEMU_CAN_FRMF_ESI != CANFD_ESI);
 
 static void can_host_socketcan_display_msg(struct qemu_can_frame *msg)
 {
@@ -97,26 +96,48 @@ static void can_host_socketcan_read(void *opaque)
 {
     CanHostSocketCAN *c = opaque;
     CanHostState *ch = CAN_HOST(c);
+    union {
+        struct can_frame classic;
+        struct canfd_frame fd;
+    } host_frame;
+    qemu_can_frame frame = { 0 };
+    ssize_t len;
 
-    /* CAN_READ_BUF_LEN for multiple messages syscall is possible for future */
-    c->bufcnt = read(c->fd, c->buf, sizeof(qemu_can_frame));
-    if (c->bufcnt < 0) {
+    len = read(c->fd, &host_frame.fd, sizeof(host_frame.fd));
+    if (len < 0) {
         warn_report("CAN bus host read failed (%s)", strerror(errno));
         return;
     }
 
-    if (!ch->bus_client.fd_mode) {
-        c->buf[0].flags = 0;
-    } else {
-        if (c->bufcnt > CAN_MTU) {
-            c->buf[0].flags |= QEMU_CAN_FRMF_TYPE_FD;
+    if (len == CAN_MTU) {
+        frame.can_id = host_frame.classic.can_id;
+        frame.can_dlc = host_frame.classic.can_dlc;
+        if (frame.can_dlc > CAN_MAX_DLEN) {
+            warn_report("CAN bus host read invalid classic CAN length %u",
+                        frame.can_dlc);
+            return;
         }
+        memcpy(frame.data, host_frame.classic.data, frame.can_dlc);
+    } else if (len == CANFD_MTU && ch->bus_client.fd_mode) {
+        frame.can_id = host_frame.fd.can_id;
+        frame.can_dlc = host_frame.fd.len;
+        if (frame.can_dlc > CANFD_MAX_DLEN) {
+            warn_report("CAN bus host read invalid CAN FD length %u",
+                        frame.can_dlc);
+            return;
+        }
+        frame.flags = (host_frame.fd.flags & (CANFD_BRS | CANFD_ESI)) |
+                      QEMU_CAN_FRMF_TYPE_FD;
+        memcpy(frame.data, host_frame.fd.data, frame.can_dlc);
+    } else {
+        warn_report("CAN bus host read unexpected frame size %zd", len);
+        return;
     }
 
-    can_bus_client_send(&ch->bus_client, c->buf, 1);
+    can_bus_client_send(&ch->bus_client, &frame, 1);
 
     if (DEBUG_CAN) {
-        can_host_socketcan_display_msg(c->buf);
+        can_host_socketcan_display_msg(&frame);
     }
 }
 
@@ -130,24 +151,52 @@ static ssize_t can_host_socketcan_receive(CanBusClientState *client,
 {
     CanHostState *ch = container_of(client, CanHostState, bus_client);
     CanHostSocketCAN *c = CAN_HOST_SOCKETCAN(ch);
+    union {
+        struct can_frame classic;
+        struct canfd_frame fd;
+    } host_frame = { 0 };
 
+    const void *buffer;
     size_t len;
     int res;
 
     if (c->fd < 0) {
         return -1;
     }
+    if (!frames_cnt) {
+        return 0;
+    }
     if (frames->flags & QEMU_CAN_FRMF_TYPE_FD) {
         if (!ch->bus_client.fd_mode) {
             return 0;
         }
+        if (frames->can_dlc > CANFD_MAX_DLEN) {
+            warn_report("[cansocketcan]: invalid CAN FD length %u",
+                        frames->can_dlc);
+            return -1;
+        }
+        host_frame.fd.can_id = frames->can_id;
+        host_frame.fd.len = frames->can_dlc;
+        host_frame.fd.flags = (frames->flags &
+                               (QEMU_CAN_FRMF_BRS | QEMU_CAN_FRMF_ESI)) |
+                              CANFD_FDF;
+        memcpy(host_frame.fd.data, frames->data, frames->can_dlc);
+        buffer = &host_frame.fd;
         len = CANFD_MTU;
     } else {
+        if (frames->can_dlc > CAN_MAX_DLEN) {
+            warn_report("[cansocketcan]: invalid classic CAN length %u",
+                        frames->can_dlc);
+            return -1;
+        }
+        host_frame.classic.can_id = frames->can_id;
+        host_frame.classic.can_dlc = frames->can_dlc;
+        memcpy(host_frame.classic.data, frames->data, frames->can_dlc);
+        buffer = &host_frame.classic;
         len = CAN_MTU;
-
     }
 
-    res = write(c->fd, frames, len);
+    res = write(c->fd, buffer, len);
 
     if (!res) {
         warn_report("[cansocketcan]: write message to host returns zero");
