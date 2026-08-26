@@ -30,8 +30,22 @@ RAM-backed ``/tmp``)::
   python3 tests/guest/at91/linux4sam/uart-partner/sam9x75_uart_partner.py \
       peer \
       --unix-listen "$FC1_SOCKET" \
-      --pace-us 50 --backpressure-every 8 --backpressure-ms 20 \
+      --timeout 900 \
+      --backpressure-every-bytes 32768 --backpressure-ms 20 \
       --json "$UART_DIR/peer.json"
+
+Backpressure intervals count received wire bytes, not transport ``read()``
+calls.  The 32,768-byte interval therefore injects the same bounded workload
+when an AF_UNIX backend returns one byte per call and when a physical adapter
+coalesces many bytes.  Timeout accounting begins before QEMU boots, so the
+900-second peer timeout includes firmware and Linux startup.  The unthrottled
+full-duplex test is the release gate; this 32-KiB/20-ms profile is supplemental
+RX-pressure coverage and produced six deterministic pauses at each endpoint
+in the exact Linux4Microchip 2026.04 guest.  Leave ``--pace-us`` at zero:
+fragmentation still occurs on every frame, while byte-based pauses avoid
+making the result depend on emulated userspace's sub-millisecond sleep
+scheduling.  Omit both backpressure options for the release-gate run.  Add
+``--progress`` for one diagnostic line per validated DATA and ACK frame.
 
 QEMU serial backends and SAM9X75 peripherals have this exact ordering:
 
@@ -64,6 +78,8 @@ the server.  Copy the script into the guest, make sure no getty owns
   dmesg | grep 'ttyS1 at MMIO 0xf8020200'
   systemctl stop serial-getty@ttyS1.service 2>/dev/null || true
   python3 /root/sam9x75_uart_partner.py guest --device /dev/ttyS1 \
+      --timeout 900 \
+      --backpressure-every-bytes 32768 --backpressure-ms 20 \
       --json /tmp/sam9x75-uart-guest.json
 
 The process exits nonzero on a framing, CRC, payload, direction, sequence or
@@ -103,7 +119,9 @@ peer role on the workstation using optional ``pyserial``::
 
   python3 -m pip install pyserial
   python3 sam9x75_uart_partner.py peer \
-      --serial /dev/ttyUSB0 --baud 115200 --sessions 2 \
+      --serial /dev/ttyUSB0 --baud 115200 --sessions 2 --timeout 900 \
+      --backpressure-every-bytes 32768 \
+      --backpressure-ms 20 \
       --json sam9x75-uart-hardware.json
 
 For macOS the adapter is normally named ``/dev/cu.usbserial-*``.  The default

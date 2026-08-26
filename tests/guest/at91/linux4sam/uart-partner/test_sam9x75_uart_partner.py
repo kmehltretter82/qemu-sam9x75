@@ -59,8 +59,9 @@ def endpoint_args(role, **overrides):
         "session": 0x0123456789abcdef if role == "guest" else 0,
         "fragment_pattern": (1, 3, 17, 257, 4096),
         "pace_us": 0,
-        "backpressure_every": 11,
+        "backpressure_every_bytes": 32768,
         "backpressure_ms": 1,
+        "progress": False,
         "timeout": 20.0,
         "sessions": 1,
         "barrier_after": None,
@@ -164,6 +165,28 @@ class ProtocolUnitTests(unittest.TestCase):
         self.assertNotEqual(first, reverse)
         self.assertEqual(len(first), 65535)
 
+    def test_backpressure_thresholds_ignore_read_granularity(self):
+        def pause_count(chunks, interval):
+            total = 0
+            pauses = 0
+            for length in chunks:
+                previous = total
+                total += length
+                pauses += uart.byte_threshold_crossings(
+                    previous, total, interval,
+                )
+            return total, pauses
+
+        fine = pause_count([1] * 10000, 4096)
+        coarse = pause_count([10000], 4096)
+        irregular = pause_count([3, 4092, 2, 4097, 1806], 4096)
+        self.assertEqual(fine, (10000, 2))
+        self.assertEqual(coarse, fine)
+        self.assertEqual(irregular, fine)
+        self.assertEqual(
+            uart.byte_threshold_crossings(0, 10000, 0), 0,
+        )
+
     def test_unix_migration_switches_to_destination_connection(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory, "uart.sock")
@@ -255,6 +278,12 @@ class EndToEndTests(unittest.TestCase):
                              len(uart.BOUNDARY_SIZES))
             self.assertEqual(report["rx_data_validated"],
                              len(uart.BOUNDARY_SIZES))
+            self.assertEqual(
+                report["backpressure_pause_count"],
+                report["transport_read_bytes"] //
+                report["backpressure_every_bytes"],
+            )
+            self.assertGreater(report["backpressure_pause_count"], 0)
         with tempfile.TemporaryDirectory() as directory:
             report_path = pathlib.Path(directory, "success.json")
             output = io.StringIO()
@@ -263,6 +292,10 @@ class EndToEndTests(unittest.TestCase):
             uart.write_json_report(report_path, reports[0])
             saved = json.loads(report_path.read_text())
             self.assertIn("ok 7 - overall", output.getvalue())
+            self.assertIn(
+                "# backpressure: interval-bytes=32768",
+                output.getvalue(),
+            )
             self.assertTrue(saved["success"])
 
     def test_migration_quiesce_barrier(self):

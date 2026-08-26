@@ -230,6 +230,14 @@ def parse_fragment_pattern(value):
     return result
 
 
+def byte_threshold_crossings(previous, current, interval):
+    """Count byte thresholds crossed between two cumulative totals."""
+
+    if interval == 0:
+        return 0
+    return current // interval - previous // interval
+
+
 class UnixServerStream:
     """Reconnectable AF_UNIX stream used by a QEMU socket chardev client."""
 
@@ -549,6 +557,8 @@ class EndpointRunner:
         self.rx_valid_total = 0
         self.duplicate_frames = 0
         self.read_batches = 0
+        self.transport_read_bytes = 0
+        self.backpressure_pause_count = 0
         self.errors = []
         self.started_at = time.monotonic()
         self.finished_at = None
@@ -572,6 +582,20 @@ class EndpointRunner:
 
     def _enqueue(self, kind, sequence=0, payload=b""):
         self.pump.enqueue(self._frame(kind, sequence, payload))
+
+    def _progress(self, event, sequence):
+        """Emit opt-in, low-rate diagnostics without changing the protocol."""
+
+        if not self.args.progress:
+            return
+        print(
+            "# progress: role=%s event=%s sequence=%d "
+            "tx-acked=%d rx-validated=%d wire-rx-bytes=%d" %
+            (self.role, event, sequence, self.tx_acked_total,
+             self.rx_valid_total, self.transport_read_bytes),
+            file=sys.stderr,
+            flush=True,
+        )
 
     def _reset_state(self, session):
         if self.session_started and not (self.local_done and self.remote_done):
@@ -663,6 +687,7 @@ class EndpointRunner:
         self.rx_next += 1
         self.rx_valid_total += 1
         self._enqueue(Kind.ACK, frame.sequence)
+        self._progress("data", frame.sequence)
 
     def _maybe_request_barrier(self):
         if (self.role == "peer" and self.args.barrier_after is not None and
@@ -700,6 +725,7 @@ class EndpointRunner:
         self.tx_outstanding = None
         self.tx_next += 1
         self.tx_acked_total += 1
+        self._progress("ack", frame.sequence)
         self._maybe_guest_quiesced()
         if not self._maybe_request_barrier():
             self._send_next_data()
@@ -848,17 +874,24 @@ class EndpointRunner:
                 except StreamEOF:
                     continue
                 self.read_batches += 1
+                previous_read_bytes = self.transport_read_bytes
+                self.transport_read_bytes += len(data)
+                backpressure_crossings = byte_threshold_crossings(
+                    previous_read_bytes,
+                    self.transport_read_bytes,
+                    self.args.backpressure_every_bytes,
+                )
+                if backpressure_crossings:
+                    self.backpressure_pause_count += backpressure_crossings
+                    time.sleep(
+                        backpressure_crossings *
+                        self.args.backpressure_ms / 1000.0
+                    )
                 for frame in self.decoder.feed(data):
                     self._handle_frame(frame)
                     if self._session_complete() and self._finish_session():
                         self.finished_at = time.monotonic()
                         return self.report()
-                if self.args.backpressure_every:
-                    inject_pause = (
-                        self.read_batches % self.args.backpressure_every == 0
-                    )
-                    if inject_pause:
-                        time.sleep(self.args.backpressure_ms / 1000.0)
             raise ProtocolError("overall test timeout")
         except Exception as exc:
             self.errors.append("%s: %s" % (type(exc).__name__, exc))
@@ -898,13 +931,20 @@ class EndpointRunner:
             "rx_data_validated": self.rx_valid_total,
             "duplicate_frames": self.duplicate_frames,
             "transport_read_batches": self.read_batches,
+            "transport_read_bytes": self.transport_read_bytes,
             "decoder_crc_errors": self.decoder.crc_errors,
             "decoder_header_errors": self.decoder.header_errors,
             "decoder_discarded_bytes": self.decoder.discarded_bytes,
             "fragment_pattern": list(self.args.fragment_pattern),
             "pace_us": self.args.pace_us,
-            "backpressure_every": self.args.backpressure_every,
+            "backpressure_every_bytes": (
+                self.args.backpressure_every_bytes
+            ),
             "backpressure_ms": self.args.backpressure_ms,
+            "backpressure_pause_count": self.backpressure_pause_count,
+            "backpressure_sleep_ms": (
+                self.backpressure_pause_count * self.args.backpressure_ms
+            ),
             "migration_barrier_requested": (
                 self.args.barrier_after is not None or self.barrier_seen
             ),
@@ -926,7 +966,8 @@ def emit_tap(report):
         (report["decoder_crc_errors"] == 0 and
          report["decoder_header_errors"] == 0,
          "stream framing stayed valid", None),
-        (not report["errors"], "fragmentation, pacing and backpressure", None),
+        (not report["errors"],
+         "fragmentation, pacing and byte-paced backpressure", None),
     ]
     if report["migration_barrier_requested"]:
         checks.append((
@@ -941,6 +982,17 @@ def emit_tap(report):
     ))
     print("TAP version 13")
     print("1..%d" % len(checks))
+    print(
+        "# transport: wire-rx-bytes=%d read-calls=%d" %
+        (report["transport_read_bytes"],
+         report["transport_read_batches"])
+    )
+    print(
+        "# backpressure: interval-bytes=%d pauses=%d sleep-ms=%d" %
+        (report["backpressure_every_bytes"],
+         report["backpressure_pause_count"],
+         report["backpressure_sleep_ms"])
+    )
     for number, (passed, description, skip) in enumerate(checks, 1):
         status = "ok" if passed else "not ok"
         suffix = " # SKIP %s" % skip if skip else ""
@@ -972,10 +1024,16 @@ def common_arguments(parser):
     )
     parser.add_argument("--pace-us", type=int, default=0,
                         help="delay after every write fragment")
-    parser.add_argument("--backpressure-every", type=int, default=0,
-                        help="pause receiver after every N reads (0 disables)")
+    parser.add_argument(
+        "--backpressure-every-bytes", type=int, default=0,
+        help="pause receiver after every N wire bytes (0 disables)",
+    )
     parser.add_argument("--backpressure-ms", type=int, default=25,
                         help="duration of each injected pause")
+    parser.add_argument(
+        "--progress", action="store_true",
+        help="print one diagnostic line per validated DATA and ACK frame",
+    )
     parser.add_argument("--json", metavar="FILE",
                         help="write the structured result atomically")
 
@@ -1020,7 +1078,7 @@ def build_parser():
 def validate_args(parser, args):
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
-    if (args.pace_us < 0 or args.backpressure_every < 0 or
+    if (args.pace_us < 0 or args.backpressure_every_bytes < 0 or
             args.backpressure_ms < 0):
         parser.error("pacing and backpressure values cannot be negative")
     if args.role == "peer":
@@ -1093,13 +1151,16 @@ def main(argv=None):
             "rx_data_validated": 0,
             "duplicate_frames": 0,
             "transport_read_batches": 0,
+            "transport_read_bytes": 0,
             "decoder_crc_errors": 0,
             "decoder_header_errors": 0,
             "decoder_discarded_bytes": 0,
             "fragment_pattern": list(args.fragment_pattern),
             "pace_us": args.pace_us,
-            "backpressure_every": args.backpressure_every,
+            "backpressure_every_bytes": args.backpressure_every_bytes,
             "backpressure_ms": args.backpressure_ms,
+            "backpressure_pause_count": 0,
+            "backpressure_sleep_ms": 0,
             "migration_barrier_requested": args.barrier_after is not None,
             "migration_barrier_ready": False,
             "migration_barrier_resumed": False,
