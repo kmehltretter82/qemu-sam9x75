@@ -7,6 +7,7 @@
 #include "qemu/option.h"
 #include "qemu/sockets.h"
 #include "chardev/char-fe.h"
+#include "chardev/char-serial.h"
 #include "system/system.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-char.h"
@@ -1608,6 +1609,11 @@ static void char_serial_test(void)
 {
     QemuOpts *opts;
     Chardev *chr;
+    CharFrontend c;
+    const int sentinel = 0x5a5a5a5a;
+    int flags = sentinel;
+    int get_ret;
+    int set_ret;
 
     opts = qemu_opts_create(qemu_find_opts("chardev"), "serial-id",
                             1, &error_abort);
@@ -1616,8 +1622,24 @@ static void char_serial_test(void)
 
     chr = qemu_chr_new_from_opts(opts, NULL, NULL);
     g_assert_nonnull(chr);
+    qemu_chr_fe_init(&c, chr, &error_abort);
+
+    get_ret = qemu_chr_fe_ioctl(&c, CHR_IOCTL_SERIAL_GET_TIOCM, &flags);
+    if (get_ret >= 0) {
+        g_test_skip("/dev/null supports modem-control ioctls");
+        goto out;
+    }
+
+    g_assert_cmpint(get_ret, <, 0);
+    g_assert_cmpint(flags, ==, sentinel);
+
+    flags = CHR_TIOCM_DTR | CHR_TIOCM_RTS;
+    set_ret = qemu_chr_fe_ioctl(&c, CHR_IOCTL_SERIAL_SET_TIOCM, &flags);
+    g_assert_cmpint(set_ret, ==, get_ret);
+
+out:
     /* TODO: add more tests with a pty */
-    object_unparent(OBJECT(chr));
+    qemu_chr_fe_deinit(&c, true);
 
     qemu_opts_del(opts);
 }
