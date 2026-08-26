@@ -204,36 +204,42 @@ static int serial_chr_ioctl(Chardev *chr, int cmd, void *arg)
     case CHR_IOCTL_SERIAL_GET_TIOCM:
         {
             int sarg = 0;
-            int *targ = (int *)arg;
-            ioctl(fioc->fd, TIOCMGET, &sarg);
-            *targ = 0;
+            int targ = 0;
+
+            if (ioctl(fioc->fd, TIOCMGET, &sarg) < 0) {
+                return -errno;
+            }
             if (sarg & TIOCM_CTS) {
-                *targ |= CHR_TIOCM_CTS;
+                targ |= CHR_TIOCM_CTS;
             }
             if (sarg & TIOCM_CAR) {
-                *targ |= CHR_TIOCM_CAR;
+                targ |= CHR_TIOCM_CAR;
             }
             if (sarg & TIOCM_DSR) {
-                *targ |= CHR_TIOCM_DSR;
+                targ |= CHR_TIOCM_DSR;
             }
             if (sarg & TIOCM_RI) {
-                *targ |= CHR_TIOCM_RI;
+                targ |= CHR_TIOCM_RI;
             }
             if (sarg & TIOCM_DTR) {
-                *targ |= CHR_TIOCM_DTR;
+                targ |= CHR_TIOCM_DTR;
             }
             if (sarg & TIOCM_RTS) {
-                *targ |= CHR_TIOCM_RTS;
+                targ |= CHR_TIOCM_RTS;
             }
+            *(int *)arg = targ;
         }
         break;
     case CHR_IOCTL_SERIAL_SET_TIOCM:
         {
             int sarg = *(int *)arg;
             int targ = 0;
-            ioctl(fioc->fd, TIOCMGET, &targ);
-            targ &= ~(CHR_TIOCM_CTS | CHR_TIOCM_CAR | CHR_TIOCM_DSR
-                     | CHR_TIOCM_RI | CHR_TIOCM_DTR | CHR_TIOCM_RTS);
+
+            if (ioctl(fioc->fd, TIOCMGET, &targ) < 0) {
+                return -errno;
+            }
+            targ &= ~(TIOCM_CTS | TIOCM_CAR | TIOCM_DSR | TIOCM_RI |
+                      TIOCM_DTR | TIOCM_RTS);
             if (sarg & CHR_TIOCM_CTS) {
                 targ |= TIOCM_CTS;
             }
@@ -252,7 +258,9 @@ static int serial_chr_ioctl(Chardev *chr, int cmd, void *arg)
             if (sarg & CHR_TIOCM_RTS) {
                 targ |= TIOCM_RTS;
             }
-            ioctl(fioc->fd, TIOCMSET, &targ);
+            if (ioctl(fioc->fd, TIOCMSET, &targ) < 0) {
+                return -errno;
+            }
         }
         break;
     default:

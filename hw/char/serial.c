@@ -190,12 +190,12 @@ static void serial_update_parameters(SerialState *s)
 static void serial_update_msl(SerialState *s)
 {
     uint8_t omsr;
-    int flags;
+    int flags = 0;
 
     timer_del(s->modem_status_poll);
 
     if (qemu_chr_fe_ioctl(&s->chr, CHR_IOCTL_SERIAL_GET_TIOCM,
-                          &flags) == -ENOTSUP) {
+                          &flags) < 0) {
         s->poll_msl = -1;
         return;
     }
@@ -315,9 +315,12 @@ static void serial_write_fcr(SerialState *s, uint8_t val)
 
 static void serial_update_tiocm(SerialState *s)
 {
-    int flags;
+    int flags = 0;
 
-    qemu_chr_fe_ioctl(&s->chr, CHR_IOCTL_SERIAL_GET_TIOCM, &flags);
+    if (qemu_chr_fe_ioctl(&s->chr, CHR_IOCTL_SERIAL_GET_TIOCM,
+                          &flags) < 0) {
+        return;
+    }
 
     flags &= ~(CHR_TIOCM_RTS | CHR_TIOCM_DTR);
 

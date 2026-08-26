@@ -231,11 +231,11 @@ static void usb_serial_handle_reset(USBDevice *dev)
 
 static uint8_t usb_get_modem_lines(USBSerialState *s)
 {
-    int flags;
+    int flags = 0;
     uint8_t ret;
 
     if (qemu_chr_fe_ioctl(&s->cs,
-                          CHR_IOCTL_SERIAL_GET_TIOCM, &flags) == -ENOTSUP) {
+                          CHR_IOCTL_SERIAL_GET_TIOCM, &flags) < 0) {
         return FTDI_CTS | FTDI_DSR | FTDI_RLSD;
     }
 
@@ -293,8 +293,12 @@ static void usb_serial_handle_control(USBDevice *dev, USBPacket *p,
         break;
     case VendorDeviceOutRequest | FTDI_SET_MDM_CTRL:
     {
-        static int flags;
-        qemu_chr_fe_ioctl(&s->cs, CHR_IOCTL_SERIAL_GET_TIOCM, &flags);
+        int flags = 0;
+
+        if (qemu_chr_fe_ioctl(&s->cs, CHR_IOCTL_SERIAL_GET_TIOCM,
+                              &flags) < 0) {
+            break;
+        }
         if (value & FTDI_SET_RTS) {
             if (value & FTDI_RTS) {
                 flags |= CHR_TIOCM_RTS;
