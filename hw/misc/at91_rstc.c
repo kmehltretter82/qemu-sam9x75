@@ -70,6 +70,19 @@ bool at91_rstc_take_warm_reset_request(AT91RSTCState *s)
     return pending;
 }
 
+bool at91_rstc_core_reset_requested(const AT91RSTCState *s)
+{
+    return s && (s->reset_request_level || s->power_reset_level ||
+                 s->pending_reset_type == RSTC_TYPE_BACKUP);
+}
+
+void at91_rstc_set_core_reset_active(AT91RSTCState *s, bool active)
+{
+    if (s) {
+        s->core_reset_active = active;
+    }
+}
+
 static void at91_rstc_update_irq(AT91RSTCState *s)
 {
     bool asserted = s->ursts && !(s->mode & RSTC_MR_URSTEN) &&
@@ -286,6 +299,7 @@ static void at91_rstc_set_wdt_reset(void *opaque, int n, int level)
                   at91_rstc_slow_clock_delay(
                       s, RSTC_INTERNAL_RESET_CYCLES));
     } else if (s->pending_reset_type == RSTC_TYPE_WATCHDOG &&
+               !s->core_reset_active &&
                !resettable_is_in_reset(OBJECT(s))) {
         /* A non-reset QEMU watchdog policy ends the physical pulse. */
         s->pending_reset_type = RSTC_TYPE_NONE;
@@ -443,6 +457,7 @@ static void at91_rstc_reset_hold(Object *obj, ResetType type)
         s->nrst_out_level = true;
         s->reset_request_level = false;
         s->warm_reset_pending = false;
+        s->core_reset_active = false;
     } else if (!active_reset) {
         if (s->pending_reset_type != RSTC_TYPE_NONE) {
             s->reset_type = s->pending_reset_type;

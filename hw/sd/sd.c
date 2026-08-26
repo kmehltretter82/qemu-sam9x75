@@ -162,6 +162,7 @@ struct SDState {
     /* Static properties */
 
     uint8_t spec_version;
+    bool retain_on_wakeup;
     uint64_t boot_part_size;
     uint64_t rpmb_part_size;
     BlockBackend *blk;
@@ -956,6 +957,15 @@ static void sd_reset(DeviceState *dev)
     sd->dat_lines = 0xf;
     sd->cmd_line = true;
     sd->multi_blk_cnt = 0;
+}
+
+static void sd_reset_hold(Object *obj, ResetType type)
+{
+    SDState *sd = SDMMC_COMMON(obj);
+
+    if (type != RESET_TYPE_WAKEUP || !sd->retain_on_wakeup) {
+        sd_reset(DEVICE(obj));
+    }
 }
 
 static bool sd_get_inserted(SDState *sd)
@@ -3219,6 +3229,7 @@ static void emmc_realize(DeviceState *dev, Error **errp)
 
 static const Property sdmmc_common_properties[] = {
     DEFINE_PROP_DRIVE("drive", SDState, blk),
+    DEFINE_PROP_BOOL("retain-on-wakeup", SDState, retain_on_wakeup, false),
 };
 
 static const Property sd_properties[] = {
@@ -3236,11 +3247,12 @@ static const Property emmc_properties[] = {
 static void sdmmc_common_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
     SDCardClass *sc = SDMMC_COMMON_CLASS(klass);
 
     device_class_set_props(dc, sdmmc_common_properties);
     dc->vmsd = &sd_vmstate;
-    device_class_set_legacy_reset(dc, sd_reset);
+    rc->phases.hold = sd_reset_hold;
     dc->bus_type = TYPE_SD_BUS;
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
 

@@ -194,10 +194,12 @@ Support matrix
        causes keep their documented encodings.  MCP16502 nRSTO drives the SoC
        NRST power-reset input: backup exit and warm reset reset VDDCORE devices
        while the VDDBU-powered SYSCWP, BSC, GPBR, RSTC, RTT, RTC, SHDWC and
-       SCKC retain state.  The processor is held for the full interval; the
-       remaining embedded peripherals currently receive their reset state at
-       assertion but are not yet held in QEMU reset until the RSTC release
-       edge.  SHDWC has
+       SCKC retain state.  The processor and modeled embedded VDDCORE
+       peripherals enter a private reset domain at the assertion edge and
+       remain there until the RSTC release edge; that held domain is rebuilt
+       after migration, and the Watchdog stays stopped while held.  External
+       SD cards, QSPI flash, PMIC and power monitor retain their device state
+       while their SoC controllers reset.  SHDWC has
        keyed two-slow-clock shutdown, SHDN,
        programmable WKUP0 polarity/debounce, raw RTC/RTT alarm wake-up,
        read-clear status, system write protection, VDDBU retention and

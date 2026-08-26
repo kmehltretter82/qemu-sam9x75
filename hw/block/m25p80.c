@@ -531,6 +531,7 @@ struct Flash {
     bool block_protect3;
     bool top_bottom_bit;
     bool status_register_write_disabled;
+    bool retain_on_wakeup;
     uint8_t ear;
 
     int64_t dirty_page;
@@ -1828,6 +1829,15 @@ static void m25p80_reset(DeviceState *d)
     reset_memory(s);
 }
 
+static void m25p80_reset_hold(Object *obj, ResetType type)
+{
+    Flash *s = M25P80(obj);
+
+    if (type != RESET_TYPE_WAKEUP || !s->retain_on_wakeup) {
+        m25p80_reset(DEVICE(obj));
+    }
+}
+
 static int m25p80_pre_save(void *opaque)
 {
     flash_sync_dirty((Flash *)opaque, -1);
@@ -1843,6 +1853,7 @@ static const Property m25p80_properties[] = {
     DEFINE_PROP_UINT8("spansion-cr2nv", Flash, spansion_cr2nv, 0x8),
     DEFINE_PROP_UINT8("spansion-cr3nv", Flash, spansion_cr3nv, 0x2),
     DEFINE_PROP_UINT8("spansion-cr4nv", Flash, spansion_cr4nv, 0x10),
+    DEFINE_PROP_BOOL("retain-on-wakeup", Flash, retain_on_wakeup, false),
     DEFINE_PROP_MACADDR("eui48", Flash, eui48),
     DEFINE_PROP_DRIVE("drive", Flash, blk),
 };
@@ -1976,6 +1987,7 @@ static const VMStateDescription vmstate_m25p80 = {
 static void m25p80_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
     SSIPeripheralClass *k = SSI_PERIPHERAL_CLASS(klass);
     M25P80Class *mc = M25P80_CLASS(klass);
 
@@ -1985,7 +1997,7 @@ static void m25p80_class_init(ObjectClass *klass, const void *data)
     k->cs_polarity = SSI_CS_LOW;
     dc->vmsd = &vmstate_m25p80;
     device_class_set_props(dc, m25p80_properties);
-    device_class_set_legacy_reset(dc, m25p80_reset);
+    rc->phases.hold = m25p80_reset_hold;
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
     mc->pi = data;
     dc->desc = "Serial Flash";

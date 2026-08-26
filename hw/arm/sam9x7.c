@@ -10,6 +10,7 @@
 #include "hw/arm/sam9x7.h"
 #include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
+#include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "target/arm/cpu-qom.h"
@@ -99,7 +100,8 @@ enum {
 static void sam9x7_update_cpu_reset_hold(SAM9X7State *s, bool force)
 {
     CPUState *cs = CPU(&s->cpu);
-    bool requested = s->power_reset_requested || s->core_reset_requested;
+    bool requested = s->vddcore_reset_active || s->power_reset_requested ||
+                     s->core_reset_requested;
 
     if (requested && (!s->cpu_reset_hold_active || force)) {
         s->cpu_reset_hold_active = true;
@@ -109,6 +111,60 @@ static void sam9x7_update_cpu_reset_hold(SAM9X7State *s, bool force)
         cpu_reset_interrupt(cs, CPU_INTERRUPT_HALT);
         cs->halted = 0;
         qemu_cpu_kick(cs);
+    }
+}
+
+static void sam9x7_set_vddcore_reset(SAM9X7State *s, bool active)
+{
+    s->vddcore_reset_active = active;
+    at91_rstc_set_core_reset_active(&s->rstc, active);
+
+    /*
+     * Board wiring can assert nRST before command-line devices have been
+     * cold-plugged onto the SoC's child buses.  Delay the reset traversal
+     * until every initial device exists so enter and exit visit the same
+     * reset graph.
+     */
+    if (!s->vddcore_reset_ready || s->vddcore_reset_asserted == active) {
+        return;
+    }
+
+    s->vddcore_reset_asserted = active;
+    if (active) {
+        resettable_assert_reset(OBJECT(s->vddcore_reset),
+                                RESET_TYPE_WAKEUP);
+    } else {
+        resettable_release_reset(OBJECT(s->vddcore_reset),
+                                 RESET_TYPE_WAKEUP);
+    }
+}
+
+void sam9x7_machine_init_done(SAM9X7State *s)
+{
+    s->vddcore_reset_ready = true;
+    sam9x7_set_vddcore_reset(s, s->vddcore_reset_active);
+    sam9x7_update_cpu_reset_hold(s, true);
+}
+
+static void sam9x7_reconcile_vddcore_reset(SAM9X7State *s)
+{
+    sam9x7_set_vddcore_reset(s, s->power_reset_requested ||
+                             at91_rstc_core_reset_requested(&s->rstc));
+}
+
+void sam9x7_prepare_machine_reset(SAM9X7State *s, ResetType type,
+                                  bool core_reset)
+{
+    if (!s) {
+        return;
+    }
+
+    if (core_reset) {
+        /* The machine accepted the guest reset request. */
+        sam9x7_set_vddcore_reset(s, true);
+    } else if (type != RESET_TYPE_WAKEUP) {
+        /* An explicit host reset cancels any retained reset interval. */
+        sam9x7_set_vddcore_reset(s, false);
     }
 }
 
@@ -128,14 +184,47 @@ static void sam9x7_set_reset(void *opaque, int n, int level)
     default:
         g_assert_not_reached();
     }
+
+    if (s->power_reset_requested) {
+        sam9x7_set_vddcore_reset(s, true);
+    } else if (s->vddcore_reset_active &&
+               !at91_rstc_core_reset_requested(&s->rstc)) {
+        sam9x7_set_vddcore_reset(s, false);
+    }
     sam9x7_update_cpu_reset_hold(s, false);
 }
 
 static void sam9x7_reset_exit(Object *obj, ResetType type)
 {
+    SAM9X7State *s = SAM9X7(obj);
+
+    /* Reconstruct a physical input that remained asserted over cold reset. */
+    sam9x7_reconcile_vddcore_reset(s);
     /* The CPU's reset phase clears HALT; restore an active reset hold. */
-    sam9x7_update_cpu_reset_hold(SAM9X7(obj), true);
+    sam9x7_update_cpu_reset_hold(s, true);
 }
+
+static int sam9x7_post_load(void *opaque, int version_id)
+{
+    SAM9X7State *s = SAM9X7(opaque);
+
+    s->core_reset_requested = s->rstc.reset_request_level;
+    s->power_reset_requested = s->rstc.power_reset_level;
+    sam9x7_reconcile_vddcore_reset(s);
+    sam9x7_update_cpu_reset_hold(s, true);
+    return 0;
+}
+
+static const VMStateDescription sam9x7_vmstate = {
+    .name = TYPE_SAM9X7,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .priority = MIG_PRI_LOW,
+    .post_load = sam9x7_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_END_OF_LIST()
+    },
+};
 
 static void sam9x7_set_boot_remap(void *opaque, int n, int level)
 {
@@ -786,6 +875,69 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
         qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 29));
 }
 
+static void sam9x7_vddcore_add(SAM9X7State *s, DeviceState *dev)
+{
+    resettable_container_add(s->vddcore_reset, OBJECT(dev));
+}
+
+static void sam9x7_init_vddcore_reset(SAM9X7State *s)
+{
+    Object *container = object_new(TYPE_RESETTABLE_CONTAINER);
+    unsigned int i;
+
+    object_property_add_child(OBJECT(s), "vddcore-reset", container);
+    s->vddcore_reset = RESETTABLE_CONTAINER(container);
+    object_unref(container);
+
+    sam9x7_vddcore_add(s, DEVICE(&s->cpu));
+    sam9x7_vddcore_add(s, DEVICE(&s->aic));
+    sam9x7_vddcore_add(s, DEVICE(&s->pmc));
+    sam9x7_vddcore_add(s, DEVICE(&s->wdt));
+    sam9x7_vddcore_add(s, DEVICE(&s->pit));
+    sam9x7_vddcore_add(s, DEVICE(&s->tcb));
+    sam9x7_vddcore_add(s, DEVICE(&s->tcb1));
+    sam9x7_vddcore_add(s, DEVICE(&s->xdmac));
+    sam9x7_vddcore_add(s, DEVICE(&s->trng));
+    sam9x7_vddcore_add(s, DEVICE(&s->aes));
+    sam9x7_vddcore_add(s, DEVICE(&s->sha));
+    sam9x7_vddcore_add(s, DEVICE(&s->tdes));
+    sam9x7_vddcore_add(s, DEVICE(&s->i2smcc));
+    sam9x7_vddcore_add(s, DEVICE(&s->classd));
+    sam9x7_vddcore_add(s, DEVICE(&s->sfr));
+    sam9x7_vddcore_add(s, DEVICE(&s->udphs));
+    sam9x7_vddcore_add(s, DEVICE(&s->uhphs_ehci));
+    sam9x7_vddcore_add(s, DEVICE(&s->uhphs_ohci));
+    sam9x7_vddcore_add(s, DEVICE(&s->mpddrc));
+    sam9x7_vddcore_add(s, DEVICE(&s->pmecc));
+    sam9x7_vddcore_add(s, DEVICE(&s->smc));
+    sam9x7_vddcore_add(s, DEVICE(&s->qspi));
+    sam9x7_vddcore_add(s, DEVICE(&s->gmac));
+    sam9x7_vddcore_add(s, DEVICE(&s->matrix));
+    sam9x7_vddcore_add(s, DEVICE(&s->otpc));
+    sam9x7_vddcore_add(s, DEVICE(&s->dbgu));
+
+    for (i = 0; i < ARRAY_SIZE(s->pit64b); i++) {
+        sam9x7_vddcore_add(s, DEVICE(&s->pit64b[i]));
+    }
+    for (i = 0; i < ARRAY_SIZE(s->mcan); i++) {
+        sam9x7_vddcore_add(s, DEVICE(&s->mcan[i]));
+    }
+    for (i = 0; i < ARRAY_SIZE(s->flexcom); i++) {
+        sam9x7_vddcore_add(s, DEVICE(&s->flexcom[i]));
+        sam9x7_vddcore_add(s, DEVICE(&s->usart[i]));
+        if (i < ARRAY_SIZE(s->spi)) {
+            sam9x7_vddcore_add(s, DEVICE(&s->spi[i]));
+        }
+        sam9x7_vddcore_add(s, DEVICE(&s->twi[i]));
+    }
+    for (i = 0; i < ARRAY_SIZE(s->sdmmc); i++) {
+        sam9x7_vddcore_add(s, DEVICE(&s->sdmmc[i]));
+    }
+    for (i = 0; i < ARRAY_SIZE(s->pio); i++) {
+        sam9x7_vddcore_add(s, DEVICE(&s->pio[i]));
+    }
+}
+
 static void sam9x7_init(Object *obj)
 {
     SAM9X7State *s = SAM9X7(obj);
@@ -1120,6 +1272,8 @@ static void sam9x7_init(Object *obj)
         qdev_connect_clock_in(DEVICE(&s->pit64b[i]), "gclk",
                              qdev_get_clock_out(DEVICE(&s->pmc), gclk_name));
     }
+
+    sam9x7_init_vddcore_reset(s);
 }
 
 static const Property sam9x7_properties[] = {
@@ -1140,6 +1294,7 @@ static void sam9x7_class_init(ObjectClass *klass, const void *data)
 
     dc->desc = "Microchip SAM9X7 SoC";
     dc->realize = sam9x7_realize;
+    dc->vmsd = &sam9x7_vmstate;
     dc->user_creatable = false;
     device_class_set_props(dc, sam9x7_properties);
     rc->phases.exit = sam9x7_reset_exit;

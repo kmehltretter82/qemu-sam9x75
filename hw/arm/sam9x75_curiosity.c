@@ -64,7 +64,16 @@ struct SAM9X75CuriosityMachineState {
     CanBusState *canbus[SAM9X7_NUM_MCAN];
     SAM9X7State *soc;
     struct arm_boot_info boot_info;
+    Notifier machine_done;
 };
+
+static void sam9x75_curiosity_machine_done(Notifier *notifier, void *data)
+{
+    SAM9X75CuriosityMachineState *board =
+        container_of(notifier, SAM9X75CuriosityMachineState, machine_done);
+
+    sam9x7_machine_init_done(board->soc);
+}
 
 static bool sam9x75_curiosity_attach_sd(SAM9X7State *soc,
                                         unsigned int unit)
@@ -77,6 +86,7 @@ static bool sam9x75_curiosity_attach_sd(SAM9X7State *soc,
     }
 
     card = qdev_new(TYPE_SD_CARD);
+    qdev_prop_set_bit(card, "retain-on-wakeup", true);
     qdev_prop_set_drive_err(card, "drive", blk_by_legacy_dinfo(dinfo),
                             &error_fatal);
     qdev_realize_and_unref(card, soc->sdmmc[unit].bus, &error_fatal);
@@ -134,6 +144,7 @@ static bool sam9x75_curiosity_attach_spi_sd(SAM9X7State *soc,
         qdev_get_gpio_in_named(adapter, SSI_GPIO_CS, 0));
 
     card = qdev_new(TYPE_SD_CARD_SPI);
+    qdev_prop_set_bit(card, "retain-on-wakeup", true);
     qdev_prop_set_drive_err(card, "drive", blk_by_legacy_dinfo(dinfo),
                             &error_fatal);
     qdev_realize_and_unref(card, qdev_get_child_bus(adapter, "sd-bus"),
@@ -282,6 +293,7 @@ static void sam9x75_curiosity_init(MachineState *machine)
 
     /* U6 is a Microchip SST26VF064BEUI 64-Mbit SQI NOR flash. */
     qspi_flash = qdev_new("sst26vf064beui");
+    qdev_prop_set_bit(qspi_flash, "retain-on-wakeup", true);
     qdev_prop_set_macaddr(qspi_flash, "eui48", soc->gmac.conf.macaddr.a);
     qspi_dinfo = drive_get(IF_MTD, 0, 1);
     if (qspi_dinfo) {
@@ -365,9 +377,12 @@ static void sam9x75_curiosity_init(MachineState *machine)
         .board_id = -1,
     };
 
-    if (!qtest_enabled() && !machine->firmware) {
+    if (!qtest_enabled()) {
         arm_load_kernel(&soc->cpu, machine, &board->boot_info);
     }
+
+    board->machine_done.notify = sam9x75_curiosity_machine_done;
+    qemu_add_machine_init_done_notifier(&board->machine_done);
 }
 
 static bool sam9x75_curiosity_get_nand_cs(Object *obj, Error **errp)
@@ -534,8 +549,10 @@ static void sam9x75_curiosity_machine_reset(MachineState *machine,
         SAM9X75_CURIOSITY_MACHINE(machine);
     bool core_reset = type == RESET_TYPE_COLD && board->soc &&
         at91_rstc_take_warm_reset_request(&board->soc->rstc);
+    ResetType effective_type = core_reset ? RESET_TYPE_WAKEUP : type;
 
-    qemu_devices_reset(core_reset ? RESET_TYPE_WAKEUP : type);
+    sam9x7_prepare_machine_reset(board->soc, effective_type, core_reset);
+    qemu_devices_reset(effective_type);
 }
 
 static void sam9x75_curiosity_machine_class_init(ObjectClass *oc,

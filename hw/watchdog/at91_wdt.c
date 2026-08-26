@@ -127,15 +127,14 @@ static void at91_wdt_raise_event(AT91WDTState *s, uint32_t event,
 
     if (generate_reset) {
         /*
-         * The physical output is consumed by the reset controller.  Use
-         * QEMU's watchdog policy until that controller can preserve the
-         * SAM9X7 reset cause and processor/peripheral reset distinction.
+         * The physical output is consumed by the reset controller.  Other
+         * QEMU watchdog policies report or stop on the event without
+         * changing guest hardware state.
          */
-        qemu_set_irq(s->reset_out, 1);
-        watchdog_perform_action();
-        if (get_watchdog_action() != WATCHDOG_ACTION_RESET) {
-            qemu_set_irq(s->reset_out, 0);
+        if (get_watchdog_action() == WATCHDOG_ACTION_RESET) {
+            qemu_set_irq(s->reset_out, 1);
         }
+        watchdog_perform_action();
     }
 }
 
@@ -360,9 +359,9 @@ static void at91_wdt_clock_changed(void *opaque, ClockEvent event)
     ptimer_transaction_commit(s->level_timer);
 }
 
-static void at91_wdt_reset(DeviceState *dev)
+static void at91_wdt_reset_enter(Object *obj, ResetType type)
 {
-    AT91WDTState *s = AT91_WDT(dev);
+    AT91WDTState *s = AT91_WDT(obj);
 
     s->mode = WDT_MR_PERIODRST | WDT_MR_RPTHRST;
     s->window = WDT_WLR_PERIOD_MASK;
@@ -371,8 +370,35 @@ static void at91_wdt_reset(DeviceState *dev)
     s->isr = 0;
     s->locked = false;
     s->cr_guard_deadline = -1;
+    s->running = false;
+    s->level_running = false;
+    s->clock_suspended = !clock_get_hz(s->slck);
+
+    ptimer_transaction_begin(s->timer);
+    ptimer_stop(s->timer);
+    at91_wdt_set_timer_period(s, s->timer);
+    ptimer_set_limit(s->timer, at91_wdt_period(s) + 1, 1);
+    ptimer_transaction_commit(s->timer);
+
+    ptimer_transaction_begin(s->level_timer);
+    ptimer_stop(s->level_timer);
+    at91_wdt_set_timer_period(s, s->level_timer);
+    ptimer_set_limit(s->level_timer, 1, 1);
+    ptimer_transaction_commit(s->level_timer);
+}
+
+static void at91_wdt_reset_hold(Object *obj, ResetType type)
+{
+    AT91WDTState *s = AT91_WDT(obj);
+
     qemu_set_irq(s->reset_out, 0);
     at91_wdt_update_irq(s);
+}
+
+static void at91_wdt_reset_exit(Object *obj, ResetType type)
+{
+    AT91WDTState *s = AT91_WDT(obj);
+
     at91_wdt_restart(s);
 }
 
@@ -463,12 +489,15 @@ static const Property at91_wdt_properties[] = {
 static void at91_wdt_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->desc = "Microchip AT91 watchdog timer";
     dc->realize = at91_wdt_realize;
     dc->vmsd = &at91_wdt_vmstate;
     device_class_set_props(dc, at91_wdt_properties);
-    device_class_set_legacy_reset(dc, at91_wdt_reset);
+    rc->phases.enter = at91_wdt_reset_enter;
+    rc->phases.hold = at91_wdt_reset_hold;
+    rc->phases.exit = at91_wdt_reset_exit;
     set_bit(DEVICE_CATEGORY_WATCHDOG, dc->categories);
 }
 

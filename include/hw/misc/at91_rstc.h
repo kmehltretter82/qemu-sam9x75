@@ -44,9 +44,12 @@ struct AT91RSTCState {
     bool warm_reset_pending;
     bool software_procrst;
     bool user_reset_active;
+    bool core_reset_active;
 };
 
 bool at91_rstc_gpbr_clear_enabled(const AT91RSTCState *s);
 bool at91_rstc_take_warm_reset_request(AT91RSTCState *s);
+bool at91_rstc_core_reset_requested(const AT91RSTCState *s);
+void at91_rstc_set_core_reset_active(AT91RSTCState *s, bool active);
 
 #endif /* HW_MISC_AT91_RSTC_H */

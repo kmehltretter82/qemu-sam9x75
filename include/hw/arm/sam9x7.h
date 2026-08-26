@@ -14,6 +14,7 @@
 #include "hw/char/at91_usart.h"
 #include "hw/core/clock.h"
 #include "hw/core/or-irq.h"
+#include "hw/core/resetcontainer.h"
 #include "hw/core/sysbus.h"
 #include "hw/dma/at91_xdmac.h"
 #include "hw/gpio/at91_pio.h"
@@ -190,6 +191,7 @@ struct SAM9X7State {
     OrIRQState sys_irq;
     OrIRQState ebi_irq;
     OrIRQState uhphs_irq;
+    ResettableContainer *vddcore_reset;
 
     Clock *main_xtal;
     Clock *slow_rc;
@@ -198,6 +200,9 @@ struct SAM9X7State {
     bool core_reset_requested;
     bool power_reset_requested;
     bool cpu_reset_hold_active;
+    bool vddcore_reset_active;
+    bool vddcore_reset_ready;
+    bool vddcore_reset_asserted;
     /* Derived from SFR outputs and reconstructed after migration. */
     bool nand_cs2_assigned;
     bool nand_d16_assigned;
@@ -216,5 +221,9 @@ struct SAM9X7State {
     MemoryRegion *ddr_memory;
     CanBusState *canbus[SAM9X7_NUM_MCAN];
 };
+
+void sam9x7_prepare_machine_reset(SAM9X7State *s, ResetType type,
+                                  bool core_reset);
+void sam9x7_machine_init_done(SAM9X7State *s);
 
 #endif /* HW_ARM_SAM9X7_H */

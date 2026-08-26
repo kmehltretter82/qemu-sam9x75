@@ -12,6 +12,7 @@
 
 #include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/resettable.h"
 #include "hw/sd/at91_sdhci.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
@@ -348,11 +349,16 @@ static void at91_sdhci_software_reset_all(SDHCIState *sdhci)
     s->cacr = 0;
 }
 
-static void at91_sdhci_reset(DeviceState *dev)
+static void at91_sdhci_reset_hold(Object *obj, ResetType type)
 {
-    AT91SDHCIState *s = AT91_SDHCI(dev);
+    AT91SDHCIState *s = AT91_SDHCI(obj);
 
-    device_cold_reset(DEVICE(&s->sdhci));
+    /*
+     * The embedded controller owns the SD bus.  Preserve the reset type so
+     * that board-level external cards can retain protocol state across a
+     * VDDCORE-only reset while still receiving cold resets.
+     */
+    resettable_reset(OBJECT(&s->sdhci), type);
 
     s->capareg = ((uint64_t)SDMMC_CA1R_RESET << 32) |
                  SDMMC_CA0R_RESET;
@@ -418,7 +424,7 @@ static void at91_sdhci_realize(DeviceState *dev, Error **errp)
     sysbus_pass_irq(sbd, sdhci_sbd);
     s->bus = qdev_get_child_bus(DEVICE(sdhci_sbd), "sd-bus");
 
-    at91_sdhci_reset(dev);
+    at91_sdhci_reset_hold(OBJECT(dev), RESET_TYPE_COLD);
 }
 
 static int at91_sdhci_post_load(void *opaque, int version_id)
@@ -468,11 +474,12 @@ static void at91_sdhci_init(Object *obj)
 static void at91_sdhci_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->desc = "Microchip AT91 SD/MMC host controller";
     dc->realize = at91_sdhci_realize;
     dc->vmsd = &at91_sdhci_vmstate;
-    device_class_set_legacy_reset(dc, at91_sdhci_reset);
+    rc->phases.hold = at91_sdhci_reset_hold;
 }
 
 static const TypeInfo at91_sdhci_info = {
