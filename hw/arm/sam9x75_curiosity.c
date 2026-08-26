@@ -17,6 +17,7 @@
 #include "hw/input/stellaris_gamepad.h"
 #include "hw/misc/led.h"
 #include "hw/misc/mcp16502.h"
+#include "hw/nvram/eeprom_at24c.h"
 #include "hw/sd/sd.h"
 #include "hw/sensor/pac1934.h"
 #include "hw/ssi/ssi.h"
@@ -234,6 +235,7 @@ static void sam9x75_curiosity_init(MachineState *machine)
     SAM9X7State *soc;
     DeviceState *qspi_flash;
     I2CSlave *pmic;
+    I2CSlave *lan_eeprom;
     I2CSlave *power_monitor;
     I2CBus *power_monitor_bus;
     DriveInfo *nand_dinfo;
@@ -347,6 +349,18 @@ static void sam9x75_curiosity_init(MachineState *machine)
     }
     i2c_slave_realize_and_unref(power_monitor, power_monitor_bus,
                                 &error_fatal);
+
+    /* The LAN8840 EDS2 daughter card carries an AT24C01 at address 0x54. */
+    lan_eeprom = i2c_slave_new(TYPE_AT24C_EE, 0x54);
+    object_property_add_child(OBJECT(machine), "lan8840-eeprom",
+                              OBJECT(lan_eeprom));
+    qdev_prop_set_uint32(DEVICE(lan_eeprom), "rom-size", 128);
+    qdev_prop_set_uint8(DEVICE(lan_eeprom), "address-size", 1);
+    qdev_prop_set_uint32(DEVICE(lan_eeprom), "page-size", 8);
+    qdev_prop_set_uint64(DEVICE(lan_eeprom), "write-cycle-ns", 5 * SCALE_MS);
+    qdev_prop_set_uint8(DEVICE(lan_eeprom), "init-value", 0xff);
+    qdev_prop_set_bit(DEVICE(lan_eeprom), "migrate-state", true);
+    i2c_slave_realize_and_unref(lan_eeprom, soc->twi[7].bus, &error_fatal);
 
     /* PB18 is the PAC1934's bidirectional SLOW/ALERT board signal. */
     qdev_connect_gpio_out(DEVICE(&soc->pio[1]), 18,

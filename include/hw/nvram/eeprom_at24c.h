@@ -9,6 +9,8 @@
 
 #include "hw/i2c/i2c.h"
 
+#define TYPE_AT24C_EE "at24c-eeprom"
+
 /*
  * Create and realize an AT24C EEPROM device on the heap.
  * @bus: I2C bus to put it on

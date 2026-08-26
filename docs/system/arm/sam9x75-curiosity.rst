@@ -434,7 +434,15 @@ Support matrix
        discovery but did not repeat packet traffic.  J12 defaults closed and
        supplies the LAN8840's required 25 MHz reference clock;
        opening it makes MDIO inaccessible and prevents external RGMII
-       traffic.
+       traffic.  The daughter card's AT24C01 EEPROM is independently attached
+       to FLEXCOM7/TWI7 at address ``0x54``.  It powers up as 128 erased bytes,
+       wraps writes within eight-byte pages and implements the 5 ms write-cycle
+       ACK-poll interval.  Its contents and an in-progress write migrate.
+       Linux4Microchip 2026.04 with the shipped LAN8840 overlay bound it as
+       ``1-0054``; the sysfs EEPROM read contained 128 bytes, all ``0xff``,
+       with SHA-256
+       ``e9175db65a9789096ca9cb5524d3abc2107df03e3c9ba3af1aca628f9c5d3bd2``.
+       That boot produced an empty ``-d unimp,guest_errors`` log.
 
        Statistics implement their documented 32-, 18-, 16-, 10- and 8-bit
        widths, saturation, read-to-clear behavior, ``WESTAT``, ``INCSTAT`` and
@@ -1158,7 +1166,8 @@ the LAN8840 on the Ethernet daughterboard.  Open it with::
 
 Without that clock the LAN8840 management interface is inaccessible, MDIO
 reads return ``0xffff``, link remains down and external RGMII traffic is
-blocked.  The GEM controller itself remains available.
+blocked.  The GEM controller itself and the daughter-card EEPROM on
+FLEXCOM7/TWI7 remain available.
 
 J38 and J39 both default to pins 2--3, routing PAC1934 I2C to FLEXCOM7.  The
 only other valid hardware settings route both jumpers to the external

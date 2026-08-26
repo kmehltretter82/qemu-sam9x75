@@ -12,10 +12,12 @@
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
 #include "hw/i2c/i2c.h"
 #include "hw/nvram/eeprom_at24c.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
+#include "migration/vmstate.h"
 #include "system/block-backend.h"
 #include "qom/object.h"
 
@@ -27,14 +29,13 @@
 #define DPRINTK(FMT, ...) do {} while (0)
 #endif
 
-#define TYPE_AT24C_EE "at24c-eeprom"
 OBJECT_DECLARE_SIMPLE_TYPE(EEPROMState, AT24C_EE)
 
 struct EEPROMState {
     I2CSlave parent_obj;
 
     /* address counter */
-    uint16_t cur;
+    uint32_t cur;
     /* total size in bytes */
     uint32_t rsize;
     /*
@@ -44,19 +45,63 @@ struct EEPROMState {
      */
     uint8_t asize;
 
+    /* Bytes in a page-write row; zero selects legacy whole-device wrapping. */
+    uint32_t page_size;
+    /* Maximum self-timed write cycle, in virtual nanoseconds. */
+    uint64_t write_cycle_ns;
+    /* Power-on fill used when neither a drive nor init_rom is supplied. */
+    uint8_t init_value;
+    /* Opt in only machines whose migration ABI includes this state. */
+    bool migrate_state;
+
     bool writable;
-    /* cells changed since last START? */
+    /* cells changed since the last successful backing-store sync */
     bool changed;
+    /* at least one data byte was accepted in the current transaction */
+    bool wrote_data;
     /* during WRITE, # of address bytes transferred */
     uint8_t haveaddr;
+    uint32_t addr_accum;
 
     uint8_t *mem;
 
     BlockBackend *blk;
 
+    QEMUTimer *write_timer;
+
     const uint8_t *init_rom;
     uint32_t init_rom_size;
 };
+
+static bool at24c_eeprom_busy(EEPROMState *ee)
+{
+    return timer_pending(ee->write_timer);
+}
+
+static void at24c_eeprom_write_complete(void *opaque)
+{
+    /* Expiry itself is the state transition: timer_pending() becomes false. */
+    (void)opaque;
+}
+
+static void at24c_eeprom_sync(EEPROMState *ee)
+{
+    int ret;
+
+    if (!ee->blk || !ee->changed) {
+        ee->changed = false;
+        return;
+    }
+
+    ret = blk_pwrite(ee->blk, 0, ee->rsize, ee->mem, 0);
+    if (ret < 0) {
+        error_report("%s: failed to write backing file", __func__);
+        return;
+    }
+
+    ee->changed = false;
+    DPRINTK("Wrote to backing file\n");
+}
 
 static
 int at24c_eeprom_event(I2CSlave *s, enum i2c_event event)
@@ -65,19 +110,28 @@ int at24c_eeprom_event(I2CSlave *s, enum i2c_event event)
 
     switch (event) {
     case I2C_START_SEND:
+    case I2C_START_SEND_ASYNC:
+        if (at24c_eeprom_busy(ee)) {
+            return 1;
+        }
+        ee->haveaddr = 0;
+        ee->addr_accum = 0;
+        break;
+    case I2C_START_RECV:
+        if (at24c_eeprom_busy(ee)) {
+            return 1;
+        }
+        DPRINTK("clear\n");
+        break;
     case I2C_FINISH:
         ee->haveaddr = 0;
-        /* fallthrough */
-    case I2C_START_RECV:
-        DPRINTK("clear\n");
-        if (ee->blk && ee->changed) {
-            int ret = blk_pwrite(ee->blk, 0, ee->rsize, ee->mem, 0);
-            if (ret < 0) {
-                error_report("%s: failed to write backing file", __func__);
-            }
-            DPRINTK("Wrote to backing file\n");
+        at24c_eeprom_sync(ee);
+        if (ee->wrote_data && ee->write_cycle_ns) {
+            timer_mod_ns(ee->write_timer,
+                         qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                         ee->write_cycle_ns);
         }
-        ee->changed = false;
+        ee->wrote_data = false;
         break;
     case I2C_NACK:
         break;
@@ -115,24 +169,28 @@ int at24c_eeprom_send(I2CSlave *s, uint8_t data)
     EEPROMState *ee = AT24C_EE(s);
 
     if (ee->haveaddr < ee->asize) {
-        ee->cur <<= 8;
-        ee->cur |= data;
+        ee->addr_accum <<= 8;
+        ee->addr_accum |= data;
         ee->haveaddr++;
         if (ee->haveaddr == ee->asize) {
-            ee->cur %= ee->rsize;
+            ee->cur = ee->addr_accum % ee->rsize;
             DPRINTK("Set pointer %04x\n", ee->cur);
         }
 
     } else {
         if (ee->writable) {
+            uint32_t page_base = ee->cur - ee->cur % ee->page_size;
+            uint32_t page_offset = ee->cur - page_base;
+
             DPRINTK("Send %02x\n", data);
             ee->mem[ee->cur] = data;
             ee->changed = true;
+            ee->wrote_data = true;
+            ee->cur = page_base + (page_offset + 1) % ee->page_size;
         } else {
             DPRINTK("Send error %02x read-only\n", data);
+            ee->cur = (ee->cur + 1u) % ee->rsize;
         }
-        ee->cur = (ee->cur + 1u) % ee->rsize;
-
     }
 
     return 0;
@@ -165,6 +223,11 @@ static void at24c_eeprom_realize(DeviceState *dev, Error **errp)
 {
     EEPROMState *ee = AT24C_EE(dev);
 
+    if (!ee->rsize) {
+        error_setg(errp, "%s: rom-size must be non-zero", TYPE_AT24C_EE);
+        return;
+    }
+
     if (ee->init_rom_size > ee->rsize) {
         error_setg(errp, "%s: init rom is larger than rom: %u > %u",
                    TYPE_AT24C_EE, ee->init_rom_size, ee->rsize);
@@ -189,7 +252,24 @@ static void at24c_eeprom_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    ee->mem = g_malloc0(ee->rsize);
+    if (ee->asize > 2) {
+        error_setg(errp, "%s: address-size must be 0 (auto), 1 or 2",
+                   TYPE_AT24C_EE);
+        return;
+    }
+
+    if (!ee->page_size) {
+        ee->page_size = ee->rsize;
+    } else if (ee->page_size > ee->rsize ||
+               (ee->page_size & (ee->page_size - 1)) ||
+               ee->rsize % ee->page_size) {
+        error_setg(errp, "%s: page-size must be a power-of-two divisor "
+                   "of rom-size", TYPE_AT24C_EE);
+        return;
+    }
+
+    ee->mem = g_malloc(ee->rsize);
+    memset(ee->mem, ee->init_value, ee->rsize);
 
     if (ee->blk) {
         int ret = blk_pread(ee->blk, 0, ee->rsize, ee->mem, 0);
@@ -223,16 +303,76 @@ void at24c_eeprom_reset(DeviceState *state)
     EEPROMState *ee = AT24C_EE(state);
 
     ee->changed = false;
+    ee->wrote_data = false;
     ee->cur = 0;
     ee->haveaddr = 0;
+    ee->addr_accum = 0;
+    timer_del(ee->write_timer);
 }
+
+static int at24c_eeprom_post_load(void *opaque, int version_id)
+{
+    EEPROMState *ee = opaque;
+
+    if (ee->cur >= ee->rsize || ee->haveaddr > ee->asize) {
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
+static bool at24c_eeprom_vmstate_needed(void *opaque)
+{
+    EEPROMState *ee = opaque;
+
+    return ee->migrate_state;
+}
+
+static const VMStateDescription at24c_eeprom_vmstate = {
+    .name = TYPE_AT24C_EE,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = at24c_eeprom_vmstate_needed,
+    .post_load = at24c_eeprom_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_I2C_SLAVE(parent_obj, EEPROMState),
+        VMSTATE_UINT32(cur, EEPROMState),
+        VMSTATE_BOOL(changed, EEPROMState),
+        VMSTATE_BOOL(wrote_data, EEPROMState),
+        VMSTATE_UINT8(haveaddr, EEPROMState),
+        VMSTATE_UINT32(addr_accum, EEPROMState),
+        VMSTATE_VBUFFER_UINT32(mem, EEPROMState, 1, NULL, rsize),
+        VMSTATE_TIMER_PTR(write_timer, EEPROMState),
+        VMSTATE_END_OF_LIST()
+    },
+};
 
 static const Property at24c_eeprom_props[] = {
     DEFINE_PROP_UINT32("rom-size", EEPROMState, rsize, 0),
     DEFINE_PROP_UINT8("address-size", EEPROMState, asize, 0),
+    DEFINE_PROP_UINT32("page-size", EEPROMState, page_size, 0),
+    DEFINE_PROP_UINT64("write-cycle-ns", EEPROMState, write_cycle_ns, 0),
+    DEFINE_PROP_UINT8("init-value", EEPROMState, init_value, 0),
+    DEFINE_PROP_BOOL("migrate-state", EEPROMState, migrate_state, false),
     DEFINE_PROP_BOOL("writable", EEPROMState, writable, true),
     DEFINE_PROP_DRIVE("drive", EEPROMState, blk),
 };
+
+static void at24c_eeprom_instance_init(Object *obj)
+{
+    EEPROMState *ee = AT24C_EE(obj);
+
+    ee->write_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                   at24c_eeprom_write_complete, ee);
+}
+
+static void at24c_eeprom_finalize(Object *obj)
+{
+    EEPROMState *ee = AT24C_EE(obj);
+
+    timer_free(ee->write_timer);
+    g_free(ee->mem);
+}
 
 static
 void at24c_eeprom_class_init(ObjectClass *klass, const void *data)
@@ -241,6 +381,7 @@ void at24c_eeprom_class_init(ObjectClass *klass, const void *data)
     I2CSlaveClass *k = I2C_SLAVE_CLASS(klass);
 
     dc->realize = &at24c_eeprom_realize;
+    dc->vmsd = &at24c_eeprom_vmstate;
     k->event = &at24c_eeprom_event;
     k->recv = &at24c_eeprom_recv;
     k->send = &at24c_eeprom_send;
@@ -255,6 +396,8 @@ const TypeInfo at24c_eeprom_type = {
     .parent = TYPE_I2C_SLAVE,
     .instance_size = sizeof(EEPROMState),
     .class_size = sizeof(I2CSlaveClass),
+    .instance_init = at24c_eeprom_instance_init,
+    .instance_finalize = at24c_eeprom_finalize,
     .class_init = at24c_eeprom_class_init,
 };
 
