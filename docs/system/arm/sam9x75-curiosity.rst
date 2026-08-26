@@ -147,9 +147,26 @@ Support matrix
      - Initial
      - Main and slow oscillators, five SAM9X7 PLL clock entries, master,
        programmable, generated and peripheral clocks, gating, interrupts and
-       write protection are modeled.  SCKC selects the modeled RC/crystal slow
-       clocks; oscillator start-up/failure-monitor timing and the remaining
-       revision-erratum cases are missing.
+       write protection are modeled.  ``PMC_SR`` resets to ``0x00030008``;
+       ``CKGR_MOR`` reset readback is ``0x00000028`` and persistent writable
+       state is limited by mask ``0x6700ff09``.  ``PMC_PCKx.CSS`` produces a
+       clock only for MD_SLCK, TD_SLCK, MAINCK, MCK, PLLA, UPLL and AUDIOPLL
+       (sources 0--6); reserved selectors read back but produce no clock.
+       Peripheral and generic clocks follow the DS60001813E per-PID
+       availability and source matrix.  This includes revision E's PID 67 GMAC
+       TSU peripheral clock and its MD_SLCK, TD_SLCK, MAINCK, MCK, PLLADIV2 and
+       AUDIOPLL GCLK sources.  PLLADIV2 is ID 4's gate on the PLLA fractional
+       core divided by four: its own ``DIVPMC`` and ``ENPLL`` do not affect the
+       rate, while ID 4 ``ENPLLCK`` and ID 0 ``ENPLL`` do.
+       PLLA and PLLADIV2 follow MAINCK; UPLL, AUDIOPLL and LVDSPLL require the
+       ``MOSCXTEN``-enabled main crystal oscillator independently of
+       ``MOSCSEL``.  Erratum DS80001082H section 5.3 is modeled: PCK and GCLK
+       ready status follows clock enable state rather than source activity or
+       division changes.  SCKC selects the modeled RC/crystal slow clocks.
+       Oscillator start-up/failure-monitor timing and the first-PCK
+       255-source-cycle delay are not modeled; aggregate and empty-set
+       ``GCLKRDY`` behavior remains queued for differential hardware
+       validation.
    * - PIOA--PIOD and pinctrl
      - Initial
      - SiP-specific valid lines and reset pulls, GPIO and open-drain drive,
