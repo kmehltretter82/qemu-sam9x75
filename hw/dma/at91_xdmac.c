@@ -122,6 +122,10 @@
 /* Bound work so a continuously runnable channel cannot starve the others. */
 #define XDMAC_CHANNEL_WORK_QUANTUM 16
 
+/* SAM9X7 exposes at most a word-wide system-bus access. */
+#define XDMAC_BUS_ACCESS_SIZE   4
+#define XDMAC_MAX_DATA_WIDTH    8
+
 typedef struct AT91XDMACCycleDetector {
     uint32_t anchor;
     uint32_t power;
@@ -193,7 +197,51 @@ static unsigned int at91_xdmac_data_width(const AT91XDMACChannel *ch)
     unsigned int dwidth = (ch->cc & XDMAC_CC_DWIDTH_MASK) >>
                           XDMAC_CC_DWIDTH_SHIFT;
 
-    return dwidth <= 2 ? 1U << dwidth : 0;
+    if (dwidth > 2 && at91_xdmac_is_peripheral(ch)) {
+        return 0;
+    }
+    return 1U << dwidth;
+}
+
+static MemTxResult at91_xdmac_memory_read(AT91XDMACState *s,
+                                          hwaddr address, uint8_t *data,
+                                          unsigned int width)
+{
+    unsigned int offset;
+
+    for (offset = 0; offset < width; offset += XDMAC_BUS_ACCESS_SIZE) {
+        unsigned int size = MIN(width - offset, XDMAC_BUS_ACCESS_SIZE);
+        MemTxResult result;
+
+        result = dma_memory_read(&s->dma_as, address + offset,
+                                 data + offset, size,
+                                 MEMTXATTRS_UNSPECIFIED);
+        if (result != MEMTX_OK) {
+            return result;
+        }
+    }
+    return MEMTX_OK;
+}
+
+static MemTxResult at91_xdmac_memory_write(AT91XDMACState *s,
+                                           hwaddr address,
+                                           const uint8_t *data,
+                                           unsigned int width)
+{
+    unsigned int offset;
+
+    for (offset = 0; offset < width; offset += XDMAC_BUS_ACCESS_SIZE) {
+        unsigned int size = MIN(width - offset, XDMAC_BUS_ACCESS_SIZE);
+        MemTxResult result;
+
+        result = dma_memory_write(&s->dma_as, address + offset,
+                                  data + offset, size,
+                                  MEMTXATTRS_UNSPECIFIED);
+        if (result != MEMTX_OK) {
+            return result;
+        }
+    }
+    return MEMTX_OK;
 }
 
 static unsigned int at91_xdmac_memory_burst_bytes(
@@ -668,7 +716,7 @@ static bool at91_xdmac_transfer_one(AT91XDMACState *s,
                                     AT91XDMACChannel *ch,
                                     unsigned int index)
 {
-    uint8_t data[4];
+    uint8_t data[XDMAC_MAX_DATA_WIDTH];
     unsigned int dwidth = (ch->cc & XDMAC_CC_DWIDTH_MASK) >>
                           XDMAC_CC_DWIDTH_SHIFT;
     unsigned int width;
@@ -683,7 +731,8 @@ static bool at91_xdmac_transfer_one(AT91XDMACState *s,
     bool microblock_end;
     MemTxResult result;
 
-    if (dwidth > 2) {
+    /* Peripheral transfers on SAM9X7 are at most word-wide. */
+    if (dwidth > 2 && at91_xdmac_is_peripheral(ch)) {
         at91_xdmac_set_error(s, ch, index, XDMAC_CIS_RBEIS);
         return false;
     }
@@ -691,19 +740,21 @@ static bool at91_xdmac_transfer_one(AT91XDMACState *s,
 
     if (ch->cc & XDMAC_CC_MEMSET) {
         uint32_t pattern = cpu_to_le32(ch->cds_msp);
+        unsigned int offset;
 
-        memcpy(data, &pattern, width);
+        for (offset = 0; offset < width; offset += sizeof(pattern)) {
+            memcpy(data + offset, &pattern,
+                   MIN(width - offset, sizeof(pattern)));
+        }
     } else {
-        result = dma_memory_read(&s->dma_as, ch->csa, data, width,
-                                 MEMTXATTRS_UNSPECIFIED);
+        result = at91_xdmac_memory_read(s, ch->csa, data, width);
         if (result != MEMTX_OK) {
             at91_xdmac_set_error(s, ch, index, XDMAC_CIS_RBEIS);
             return false;
         }
     }
 
-    result = dma_memory_write(&s->dma_as, ch->cda, data, width,
-                              MEMTXATTRS_UNSPECIFIED);
+    result = at91_xdmac_memory_write(s, ch->cda, data, width);
     if (result != MEMTX_OK) {
         at91_xdmac_set_error(s, ch, index, XDMAC_CIS_WBEIS);
         return false;

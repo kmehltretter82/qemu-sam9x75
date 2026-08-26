@@ -1305,6 +1305,7 @@
 #define XDMAC_CC_MBSIZE_SIXTEEN (3U << 1)
 #define XDMAC_CC_DWIDTH_HALFWORD (1U << 11)
 #define XDMAC_CC_DWIDTH_WORD    (2U << 11)
+#define XDMAC_CC_DWIDTH_DWORD   (3U << 11)
 #define XDMAC_CC_CSIZE_4        (2U << 8)
 #define XDMAC_CC_CSIZE_16       (4U << 8)
 #define XDMAC_CC_SAM_INC        (1U << 16)
@@ -14651,6 +14652,144 @@ static void nand_start_read(QTestState *qts, uint32_t page, uint32_t column)
     qtest_clock_step(qts, NAND_READ_TIME_NS);
 }
 
+static void test_xdmac_dword_memory_and_nand(void)
+{
+    const uint32_t source_address = SAM9X7_DDR_BASE + 0x1f000;
+    const uint32_t dest_address = SAM9X7_DDR_BASE + 0x1f100;
+    const uint32_t memset_address = SAM9X7_DDR_BASE + 0x1f200;
+    const uint32_t nand_dest_address = SAM9X7_DDR_BASE + 0x1f300;
+    const uint32_t invalid_dest_address = SAM9X7_DDR_BASE + 0x1f400;
+    const uint32_t pattern = 0x01020304;
+    const uint32_t nand_page = 23;
+    const uint64_t ch0 = XDMAC_CHANNEL(0);
+    const uint64_t ch1 = XDMAC_CHANNEL(1);
+    const uint64_t ch2 = XDMAC_CHANNEL(2);
+    const uint64_t ch3 = XDMAC_CHANNEL(3);
+    uint8_t source[64];
+    uint8_t result[64];
+    uint8_t expected[16];
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t status;
+    unsigned int i;
+
+    ebi_enable_ddr_and_nand(qts);
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+
+    for (i = 0; i < sizeof(source); i++) {
+        source[i] = 0x40 ^ (i * 13);
+    }
+    memset(result, 0, sizeof(result));
+    qtest_memwrite(qts, source_address, source, sizeof(source));
+    qtest_memwrite(qts, dest_address, result, sizeof(result));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch0 + XDMAC_CSA,
+                 source_address);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch0 + XDMAC_CDA,
+                 dest_address);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch0 + XDMAC_CUBC,
+                 sizeof(source) / sizeof(uint64_t));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch0 + XDMAC_CC,
+                 XDMAC_CC_PERID(0x7f) | XDMAC_CC_SAM_INC |
+                 XDMAC_CC_DAM_INC | XDMAC_CC_DWIDTH_DWORD);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
+    xdmac_waitl(qts, XDMAC_GS, BIT(0), 0);
+
+    qtest_memread(qts, dest_address, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), source, sizeof(source));
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_XDMAC_BASE + ch0 + XDMAC_CSA), ==,
+                    source_address + sizeof(source));
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_XDMAC_BASE + ch0 + XDMAC_CDA), ==,
+                    dest_address + sizeof(source));
+    status = qtest_readl(qts, SAM9X7_XDMAC_BASE + ch0 + XDMAC_CIS);
+    g_assert_cmphex(status, ==, XDMAC_INT_BIS);
+
+    memset(result, 0, sizeof(expected));
+    for (i = 0; i < sizeof(expected); i++) {
+        expected[i] = pattern >> ((i % sizeof(pattern)) * 8);
+    }
+    qtest_memwrite(qts, memset_address, result, sizeof(expected));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CDA,
+                 memset_address);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CUBC,
+                 sizeof(expected) / sizeof(uint64_t));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CDS_MSP, pattern);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CC,
+                 XDMAC_CC_PERID(0x7f) | XDMAC_CC_MEMSET |
+                 XDMAC_CC_DAM_INC | XDMAC_CC_DWIDTH_DWORD);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(1));
+    xdmac_waitl(qts, XDMAC_GS, BIT(1), 0);
+
+    qtest_memread(qts, memset_address, result, sizeof(expected));
+    g_assert_cmpmem(result, sizeof(expected), expected, sizeof(expected));
+    status = qtest_readl(qts, SAM9X7_XDMAC_BASE + ch1 + XDMAC_CIS);
+    g_assert_cmphex(status, ==, XDMAC_INT_BIS);
+
+    nand_program(qts, nand_page, 0, source, sizeof(source));
+    nand_start_read(qts, nand_page, 0);
+    memset(result, 0, sizeof(result));
+    qtest_memwrite(qts, nand_dest_address, result, sizeof(result));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CSA, NAND_DATA);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CDA,
+                 nand_dest_address);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CUBC,
+                 sizeof(source) / sizeof(uint64_t));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CC,
+                 XDMAC_CC_PERID(0x7f) | XDMAC_CC_MBSIZE_SIXTEEN |
+                 XDMAC_CC_SAM_INC | XDMAC_CC_DAM_INC |
+                 XDMAC_CC_DWIDTH_DWORD);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(2));
+    xdmac_waitl(qts, XDMAC_GS, BIT(2), 0);
+
+    qtest_memread(qts, nand_dest_address, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), source, sizeof(source));
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_XDMAC_BASE + ch2 + XDMAC_CSA), ==,
+                    NAND_DATA + sizeof(source));
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_XDMAC_BASE + ch2 + XDMAC_CDA), ==,
+                    nand_dest_address + sizeof(source));
+    status = qtest_readl(qts, SAM9X7_XDMAC_BASE + ch2 + XDMAC_CIS);
+    g_assert_cmphex(status, ==, XDMAC_INT_BIS);
+
+    /* Encoding 3 is not valid for a peripheral DMA. */
+    memset(result, 0, sizeof(uint64_t));
+    qtest_memwrite(qts, invalid_dest_address, result, sizeof(uint64_t));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch3 + XDMAC_CSA,
+                 source_address);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch3 + XDMAC_CDA,
+                 invalid_dest_address);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch3 + XDMAC_CUBC, 1);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch3 + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_SWREQ |
+                 XDMAC_CC_SAM_INC | XDMAC_CC_DAM_INC |
+                 XDMAC_CC_DWIDTH_DWORD);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + ch3 + XDMAC_CIE,
+                 XDMAC_INT_RBEIS);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GIE, BIT(3));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(3));
+    xdmac_waitl(qts, XDMAC_GIS, BIT(3), BIT(3));
+
+    status = qtest_readl(qts, SAM9X7_XDMAC_BASE + ch3 + XDMAC_CIS);
+    g_assert_cmphex(status, ==, XDMAC_INT_RBEIS);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_XDMAC_BASE + ch3 + XDMAC_CUBC), ==,
+                    1);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_XDMAC_BASE + ch3 + XDMAC_CSA), ==,
+                    source_address);
+    g_assert_cmphex(qtest_readl(qts,
+                               SAM9X7_XDMAC_BASE + ch3 + XDMAC_CDA), ==,
+                    invalid_dest_address);
+    qtest_memread(qts, invalid_dest_address, result, sizeof(uint64_t));
+    for (i = 0; i < sizeof(uint64_t); i++) {
+        g_assert_cmphex(result[i], ==, 0);
+    }
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GD, BIT(3));
+
+    qtest_quit(qts);
+}
+
 static void nand_begin_erase(QTestState *qts, uint32_t page)
 {
     nand_command(qts, NAND_CMD_ERASE);
@@ -22610,6 +22749,8 @@ int main(int argc, char **argv)
                    test_tcb1_active_timer_migration);
     qtest_add_func("sam9x75/xdmac/registers-memcpy-and-descriptors",
                    test_xdmac_registers_memcpy_and_descriptors);
+    qtest_add_func("sam9x75/xdmac/dword-memory-and-nand",
+                   test_xdmac_dword_memory_and_nand);
     qtest_add_func("sam9x75/xdmac/pacing-striding-and-errors",
                    test_xdmac_pacing_striding_and_errors);
     qtest_add_func("sam9x75/xdmac/fair-scheduling-and-flush-scope",

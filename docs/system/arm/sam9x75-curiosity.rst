@@ -262,7 +262,10 @@ Support matrix
        and memset, byte/halfword/word widths, address modes and 2D strides,
        software and external-request pacing, linked-list descriptor views and
        completion/error interrupts.  Register-level suspend, resume and disable
-       are present.  Peripheral-to-memory channels, including linked
+       are present.  Memory transfers also implement Linux's ``DWIDTH=3``
+       logical 8-byte compatibility mode as two word-wide bus accesses;
+       peripheral widths remain capped at one word.  Peripheral-to-memory
+       channels, including linked
        descriptors, cyclic rings and blocks containing multiple microblocks,
        use the GTYPE-reported 256-byte per-channel FIFO.  The next microblock
        or descriptor is not started until the preceding microblock's staged
@@ -1037,18 +1040,29 @@ data sheet.  Qtests cover the working 32-bit linked-descriptor path and the
 mismatched mode's three-byte stall; the Linux ordering fix remains a separate
 guest change to validate on the physical board.
 
-The XDMAC transfer width encoded as ``CC.DWIDTH=3`` also requires a physical
-board result before it can be modeled.  The SAM9X7 data sheet and device pack
-define only byte, halfword and word widths, while the upstream Linux
-``at_xdmac`` driver selects the fourth encoding for 8-byte-aligned memcpy,
-memset and interleaved transfers.  Run a RAM-resident 64-byte memcpy with
+The model accepts ``CC.DWIDTH=3`` for memory transfers as the logical 8-byte
+unit used by the upstream Linux ``at_xdmac`` driver.  Each unit decrements
+``CUBC`` once, advances an incremented address by eight bytes and is issued as
+two word-wide bus accesses; ``MEMSET`` repeats its 32-bit pattern in both
+halves.  Peripheral transfers remain limited to byte, halfword and word widths
+and report ``RBEIS`` for encoding 3.  This compatibility behavior is required
+by the exact Linux4Microchip 2026.04 NAND path: its 8-byte-aligned DMA memcpy
+programs ``CC=0x7f251806`` and a microblock length of eight for a 64-byte read.
+Rejecting the encoding left ``CUBC`` untouched and made Linux classify every
+NAND block as bad.  Qtests reproduce that configuration against both DDR and
+the NAND aperture.
+
+Physical confirmation is still required because the SAM9X7 data sheet and
+device pack list only encodings 0 through 2, while the long-standing Linux
+driver comment says implementations without native dword transfers treat the
+fourth encoding like word transfers.  Run a RAM-resident 64-byte memcpy with
 8-byte-aligned source and destination, ``CC.DWIDTH=3`` and a microblock length
 of eight; record ``CC``, ``CUBC``, ``CIS``, ``GS`` and the destination bytes.
-Repeat with ``CC.DWIDTH=2`` and a microblock length of 16 as the control.  In
-particular, determine whether the first case copies 64 bytes as dword transfers,
-copies only 32 bytes by aliasing word transfers, raises ``RBEIS`` or has another
-effect.  Do not add a guessed fourth width to QEMU until this differential
-result is available.
+Repeat with ``CC.DWIDTH=2`` and a microblock length of 16 as the control.  The
+result must distinguish a full 64-byte logical transfer, a 32-byte word alias,
+``RBEIS`` or any other behavior.  Until that result is available, the QEMU
+behavior is an explicit Linux-compatibility inference rather than a claim of
+measured silicon semantics.
 
 XDMAC FIFO and maintenance behavior should be compared with an uncached SRAM
 destination.  Use FLEXCOM0 USART local loopback to feed fewer bytes than a
