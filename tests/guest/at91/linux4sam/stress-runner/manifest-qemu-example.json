@@ -1,0 +1,93 @@
+{
+  "schema": "sam9x75-linux4sam-stress-manifest-v1",
+  "preflight": [
+    {
+      "name": "uname",
+      "argv": ["uname", "-a"],
+      "timeout": 10
+    },
+    {
+      "name": "python-version",
+      "argv": ["python3", "--version"],
+      "timeout": 10
+    },
+    {
+      "name": "block-inventory",
+      "argv": ["lsblk", "-b", "-o", "NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS"],
+      "timeout": 30
+    },
+    {
+      "name": "network-inventory",
+      "argv": ["ip", "-details", "-statistics", "link", "show"],
+      "timeout": 30
+    }
+  ],
+  "consumers": [
+    {
+      "name": "gem-lan8840",
+      "argv": [
+        "python3", "/mnt/payload/sam9x75_network_partner.py", "guest",
+        "--host", "10.0.2.2", "--tcp-port", "19091", "--udp-port", "19092",
+        "--streams", "2", "--bytes-per-direction", "2097152",
+        "--udp-packets", "128", "--timeout", "900",
+        "--session", "0x202608260101",
+        "--json", "/root/sam9x75-network-guest.json"
+      ],
+      "timeout": 950
+    },
+    {
+      "name": "mcan0",
+      "argv": [
+        "python3", "/mnt/payload/sam9x75_can_partner.py", "guest",
+        "--interface", "can0", "--configure", "--bitrate", "500000",
+        "--data-bitrate", "2000000", "--txqueuelen", "4096",
+        "--frames", "1000", "--window", "16", "--include-esi",
+        "--timeout", "900", "--session", "0x202608260102",
+        "--json", "/root/sam9x75-can0-guest.json"
+      ],
+      "timeout": 950
+    },
+    {
+      "name": "flexcom1-uart",
+      "argv": [
+        "python3", "/mnt/payload/sam9x75_uart_partner.py", "guest",
+        "--device", "/dev/ttyS1", "--timeout", "900",
+        "--session", "0x202608260103",
+        "--backpressure-every-bytes", "32768", "--backpressure-ms", "20",
+        "--json", "/root/sam9x75-uart-guest.json"
+      ],
+      "timeout": 950
+    },
+    {
+      "name": "crypto-engines",
+      "argv": [
+        "python3", "/mnt/payload/sam9x75_crypto_consumer.py",
+        "--iterations", "2", "--workers", "2", "--max-bytes", "65536",
+        "--json", "/root/sam9x75-crypto.json"
+      ],
+      "timeout": 950
+    }
+  ],
+  "postflight": [
+    {
+      "name": "network-counters",
+      "argv": ["ip", "-details", "-statistics", "link", "show", "eth0"],
+      "timeout": 30
+    },
+    {
+      "name": "phy-counters",
+      "argv": ["ethtool", "-S", "eth0"],
+      "timeout": 30
+    },
+    {
+      "name": "interrupt-counters",
+      "argv": ["cat", "/proc/interrupts"],
+      "timeout": 30
+    },
+    {
+      "name": "memory-summary",
+      "argv": ["cat", "/proc/meminfo"],
+      "timeout": 30
+    }
+  ]
+}
