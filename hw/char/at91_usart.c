@@ -165,6 +165,7 @@ enum {
 #define US_FMR_MASK             0x3f3f3fb3
 #define US_FMR_TXRDYM_MASK      0x3
 #define US_FMR_RXRDYM_SHIFT     4
+#define US_FMR_FRTSC            BIT(7)
 #define US_FMR_TXFTHRES_SHIFT   8
 #define US_FMR_RXFTHRES_SHIFT   16
 #define US_FMR_RXFTHRES2_SHIFT  24
@@ -366,6 +367,37 @@ static void at91_usart_refresh_status(AT91USARTState *s)
     }
 }
 
+static bool at91_usart_fifo_controls_rts(AT91USARTState *s)
+{
+    return s->fifo_enabled && (s->fifo_mode & US_FMR_FRTSC) &&
+           (s->mode & US_MR_USART_MODE_MASK) == US_MR_USART_MODE_HWHS;
+}
+
+static void at91_usart_refresh_fifo_rts(AT91USARTState *s)
+{
+    unsigned int high;
+    unsigned int low;
+
+    if (!at91_usart_fifo_controls_rts(s)) {
+        return;
+    }
+
+    high = extract32(s->fifo_mode, US_FMR_RXFTHRES_SHIFT, 6);
+    low = extract32(s->fifo_mode, US_FMR_RXFTHRES2_SHIFT, 6);
+
+    /*
+     * RXFTHRES and RXFTHRES2 form a hysteresis window.  RXFTHRES wins
+     * if the guest programs an invalid overlapping pair, matching the
+     * documented qualification that RXFTHRES2 only controls RTS while
+     * RXFTHRES is not reached.
+     */
+    if (s->rx_count >= high) {
+        s->fifo_rts_level = true;
+    } else if (s->rx_count <= low) {
+        s->fifo_rts_level = false;
+    }
+}
+
 static void at91_usart_update(AT91USARTState *s)
 {
     bool active;
@@ -374,6 +406,7 @@ static void at91_usart_update(AT91USARTState *s)
     bool rts_level;
 
     at91_usart_refresh_status(s);
+    at91_usart_refresh_fifo_rts(s);
     active = at91_usart_clocked(s) &&
              (s->mode & US_MR_CHMODE_MASK) != US_MR_CHMODE_REMOTE;
     tx = active && s->transmitter_enabled &&
@@ -394,7 +427,8 @@ static void at91_usart_update(AT91USARTState *s)
         rts_level = !(s->status & US_INT_TXEMPTY);
         break;
     case US_MR_USART_MODE_HWHS:
-        rts_level = s->rts_enabled;
+        rts_level = at91_usart_fifo_controls_rts(s) ?
+                    s->fifo_rts_level : s->rts_enabled;
         break;
     default:
         rts_level = !s->rts_enabled;
@@ -1282,8 +1316,8 @@ static void at91_usart_reset(DeviceState *dev)
     s->comparison_started = false;
     s->tx_fifo_locked = false;
     s->tx_break = false;
-    s->cts_level = false;
     s->rts_enabled = false;
+    s->fifo_rts_level = false;
     s->tx_request_level = false;
     s->rx_request_level = false;
     qemu_set_irq(s->tx_request, 0);
@@ -1294,6 +1328,11 @@ static void at91_usart_reset(DeviceState *dev)
 static int at91_usart_post_load(void *opaque, int version_id)
 {
     AT91USARTState *s = opaque;
+
+    if (version_id < 2) {
+        /* Version 1 had no independent FRTSC hysteresis latch. */
+        s->fifo_rts_level = s->rts_enabled;
+    }
 
     s->mode &= US_MR_MODE_MASK;
     s->interrupt_mask &= US_INT_VALID_MASK;
@@ -1329,7 +1368,7 @@ static int at91_usart_post_load(void *opaque, int version_id)
 
 static const VMStateDescription at91_usart_vmstate = {
     .name = TYPE_AT91_USART,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = at91_usart_post_load,
     .fields = (const VMStateField[]) {
@@ -1382,6 +1421,7 @@ static const VMStateDescription at91_usart_vmstate = {
         VMSTATE_BOOL(tx_break, AT91USARTState),
         VMSTATE_BOOL(cts_level, AT91USARTState),
         VMSTATE_BOOL(rts_enabled, AT91USARTState),
+        VMSTATE_BOOL_V(fifo_rts_level, AT91USARTState, 2),
         VMSTATE_CLOCK(pclk, AT91USARTState),
         VMSTATE_CLOCK(gclk, AT91USARTState),
         VMSTATE_TIMER_PTR(tx_timer, AT91USARTState),

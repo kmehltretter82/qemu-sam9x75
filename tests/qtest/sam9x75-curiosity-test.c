@@ -583,6 +583,7 @@
 #define US_VERSION              0xfc
 
 #define US_CR_RXEN              BIT(4)
+#define US_CR_RXDIS             BIT(5)
 #define US_CR_TXEN              BIT(6)
 #define US_CR_TXDIS             BIT(7)
 #define US_CR_RSTSTA            BIT(8)
@@ -599,16 +600,22 @@
 #define US_MR_PAR_NONE          (4U << 9)
 #define US_MR_LOCAL_LOOPBACK    (2U << 14)
 #define US_MR_USART_MODE_RS485  1
+#define US_MR_USART_MODE_HWHS   2
 #define US_MR_NORMAL            (US_MR_CHRL_8 | US_MR_PAR_NONE)
 #define US_MR_RS485             (US_MR_NORMAL | US_MR_USART_MODE_RS485)
+#define US_MR_HWHS              (US_MR_NORMAL | US_MR_USART_MODE_HWHS)
 #define US_MR_NORMAL_LOCAL      (US_MR_CHRL_8 | US_MR_PAR_NONE | \
                                  US_MR_LOCAL_LOOPBACK)
+#define US_MR_HWHS_LOCAL        (US_MR_HWHS | US_MR_LOCAL_LOOPBACK)
 #define US_INT_RXRDY            BIT(0)
 #define US_INT_TXRDY            BIT(1)
 #define US_INT_TIMEOUT          BIT(8)
 #define US_INT_TXEMPTY          BIT(9)
+#define US_INT_CTSIC            BIT(19)
+#define US_STATUS_CTS           BIT(23)
 #define US_FMR_TXRDYM_FOUR      2
 #define US_FMR_RXRDYM_FOUR      (2U << 4)
+#define US_FMR_FRTSC            BIT(7)
 #define US_FMR_TXFTHRES(value)  ((value) << 8)
 #define US_FMR_RXFTHRES(value)  ((value) << 16)
 #define US_FMR_RXFTHRES2(value) ((value) << 24)
@@ -1827,6 +1834,26 @@ static uint32_t usart_wait_status(QTestState *qts, uint64_t base,
             "(status 0x%08x)", mask, status);
 }
 
+static uint32_t usart_wait_fifo_level(QTestState *qts, uint64_t base,
+                                      unsigned int tx_count,
+                                      unsigned int rx_count)
+{
+    int64_t deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+    uint32_t expected = tx_count | (rx_count << 16);
+    uint32_t level;
+
+    do {
+        level = qtest_readl(qts, base + US_FLR);
+        if (level == expected) {
+            return level;
+        }
+        g_usleep(1000);
+    } while (g_get_monotonic_time() < deadline);
+
+    g_error("timed out waiting for USART FIFO level 0x%08x "
+            "(level 0x%08x)", expected, level);
+}
+
 static QTestState *qtest_init_with_flexcom0_serial(int *sock_fd)
 {
     g_autofree char *sock_dir = NULL;
@@ -1848,6 +1875,37 @@ static QTestState *qtest_init_with_flexcom0_serial(int *sock_fd)
     unlink(sock_path);
     rmdir(sock_dir);
     return qts;
+}
+
+static void usart_assert_no_serial_data(int sock_fd)
+{
+    uint8_t value;
+    ssize_t received;
+    int saved_errno;
+
+    received = recv(sock_fd, &value, 1, MSG_DONTWAIT);
+    saved_errno = errno;
+    g_assert_cmpint(received, ==, -1);
+    g_assert_true(saved_errno == EAGAIN || saved_errno == EWOULDBLOCK);
+}
+
+static uint8_t usart_receive_serial_byte(int sock_fd)
+{
+    int64_t deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+    uint8_t value;
+    ssize_t received;
+
+    do {
+        received = recv(sock_fd, &value, 1, MSG_DONTWAIT);
+        if (received == 1) {
+            return value;
+        }
+        g_assert_cmpint(received, ==, -1);
+        g_assert_true(errno == EAGAIN || errno == EWOULDBLOCK);
+        g_usleep(1000);
+    } while (g_get_monotonic_time() < deadline);
+
+    g_error("timed out waiting for USART serial output");
 }
 
 static uint32_t dbgu_wait_status(QTestState *qts, uint32_t mask)
@@ -3936,6 +3994,240 @@ static void test_flexcom_usart_rs485_migration(void)
     qtest_clock_step(to, 1);
     g_assert_true(qtest_readl(to, base + US_CSR) & US_INT_TXEMPTY);
     g_assert_false(qtest_get_irq(to, 0));
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
+static void test_flexcom_usart_hwhs_cts_and_tx(void)
+{
+    const uint64_t base = SAM9X7_USART0_BASE;
+    const char *path = "/machine/soc/usart[0]";
+    QTestState *qts;
+    uint64_t character_ns;
+    uint32_t status;
+    uint8_t value;
+    int sock_fd;
+
+    qts = qtest_init_with_flexcom0_serial(&sock_fd);
+    pmc_write_pcr(qts, 5, PMC_PCR_EN);
+    aic_configure(qts, 5, AIC_SMR_LEVEL_HIGH | 3, 0x50050005);
+    qtest_writel(qts, base + US_MR, US_MR_HWHS);
+    qtest_writel(qts, base + US_BRGR, 217);
+    qtest_writel(qts, base + US_CR, US_CR_RXEN | US_CR_TXEN);
+    qtest_writel(qts, base + US_IER, US_INT_CTSIC);
+    character_ns = usart_cycles_to_ns(qts, 5, 16 * 217 * 10);
+    g_assert_cmpuint(character_ns, >, 1);
+
+    status = qtest_readl(qts, base + US_CSR);
+    g_assert_false(status & (US_STATUS_CTS | US_INT_CTSIC));
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(5));
+
+    /* CSR mirrors physical CTS and its edge flag clears on the CSR read. */
+    qtest_set_irq_in(qts, path, "cts", 0, 1);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(5));
+    status = qtest_readl(qts, base + US_CSR);
+    g_assert_cmphex(status & (US_STATUS_CTS | US_INT_CTSIC), ==,
+                    US_STATUS_CTS | US_INT_CTSIC);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(5));
+    status = qtest_readl(qts, base + US_CSR);
+    g_assert_true(status & US_STATUS_CTS);
+    g_assert_false(status & US_INT_CTSIC);
+
+    qtest_set_irq_in(qts, path, "cts", 0, 1);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(5));
+    qtest_set_irq_in(qts, path, "cts", 0, 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(5));
+    status = qtest_readl(qts, base + US_CSR);
+    g_assert_false(status & US_STATUS_CTS);
+    g_assert_true(status & US_INT_CTSIC);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(5));
+
+    /* A high CTS holds a byte in THR until CTS falls. */
+    qtest_set_irq_in(qts, path, "cts", 0, 1);
+    qtest_readl(qts, base + US_CSR);
+    qtest_writeb(qts, base + US_THR, 0x3c);
+    status = qtest_readl(qts, base + US_CSR);
+    g_assert_false(status & (US_INT_TXRDY | US_INT_TXEMPTY));
+    qtest_clock_step(qts, character_ns * 2);
+    usart_assert_no_serial_data(sock_fd);
+
+    qtest_set_irq_in(qts, path, "cts", 0, 0);
+    qtest_clock_step(qts, character_ns - 1);
+    usart_assert_no_serial_data(sock_fd);
+    qtest_clock_step(qts, 1);
+    value = usart_receive_serial_byte(sock_fd);
+    g_assert_cmphex(value, ==, 0x3c);
+    g_assert_true(qtest_readl(qts, base + US_CSR) & US_INT_TXEMPTY);
+
+    /* Raising CTS does not truncate a character already in the shifter. */
+    qtest_writeb(qts, base + US_THR, 0x5a);
+    qtest_writeb(qts, base + US_THR, 0xa5);
+    qtest_set_irq_in(qts, path, "cts", 0, 1);
+    qtest_clock_step(qts, character_ns);
+    value = usart_receive_serial_byte(sock_fd);
+    g_assert_cmphex(value, ==, 0x5a);
+    qtest_clock_step(qts, character_ns * 2);
+    usart_assert_no_serial_data(sock_fd);
+    g_assert_false(qtest_readl(qts, base + US_CSR) & US_INT_TXEMPTY);
+
+    qtest_set_irq_in(qts, path, "cts", 0, 0);
+    qtest_clock_step(qts, character_ns);
+    value = usart_receive_serial_byte(sock_fd);
+    g_assert_cmphex(value, ==, 0xa5);
+    g_assert_true(qtest_readl(qts, base + US_CSR) & US_INT_TXEMPTY);
+
+    /* Reset keeps the live pin image but clears the edge latch and IRQ. */
+    qtest_set_irq_in(qts, path, "cts", 0, 1);
+    qtest_system_reset(qts);
+    status = qtest_readl(qts, base + US_CSR);
+    g_assert_true(status & US_STATUS_CTS);
+    g_assert_false(status & US_INT_CTSIC);
+    g_assert_cmphex(qtest_readl(qts, base + US_IMR), ==, 0);
+
+    close(sock_fd);
+    qtest_quit(qts);
+}
+
+static void test_flexcom_usart_hwhs_fifo_rts(void)
+{
+    const uint64_t base = SAM9X7_USART0_BASE;
+    const uint32_t fifo_mode = US_FMR_FRTSC |
+                               US_FMR_RXFTHRES(3) |
+                               US_FMR_RXFTHRES2(1);
+    const uint8_t input[] = { 0x11, 0x22, 0x33, 0x44, 0x55 };
+    QTestState *qts;
+    int sock_fd;
+    unsigned int i;
+
+    qts = qtest_init_with_flexcom0_serial(&sock_fd);
+    qtest_irq_intercept_out_named(qts, "/machine/soc/usart[0]", "rts");
+    pmc_write_pcr(qts, 5, PMC_PCR_EN);
+    qtest_writel(qts, base + US_MR, US_MR_HWHS);
+    qtest_writel(qts, base + US_BRGR, 217);
+    qtest_writel(qts, base + US_CR, US_CR_FIFOEN | US_CR_RXEN);
+    qtest_writel(qts, base + US_FMR, fifo_mode);
+    g_assert_cmphex(qtest_readl(qts, base + US_FMR), ==, fifo_mode);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    for (i = 0; i < 2; i++) {
+        g_assert_cmpint(send(sock_fd, &input[i], 1, 0), ==, 1);
+        usart_wait_fifo_level(qts, base, 0, i + 1);
+        g_assert_false(qtest_get_irq(qts, 0));
+    }
+
+    g_assert_cmpint(send(sock_fd, &input[2], 1, 0), ==, 1);
+    usart_wait_fifo_level(qts, base, 0, 3);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    /* FRTSC owns the pin; software commands only update their latent state. */
+    qtest_writel(qts, base + US_CR, US_CR_RTSDIS);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_cmphex(qtest_readb(qts, base + US_RHR), ==, input[0]);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_cmphex(qtest_readb(qts, base + US_RHR), ==, input[1]);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_writel(qts, base + US_CR, US_CR_RTSEN);
+    g_assert_false(qtest_get_irq(qts, 0));
+    for (i = 3; i < ARRAY_SIZE(input); i++) {
+        g_assert_cmpint(send(sock_fd, &input[i], 1, 0), ==, 1);
+        usart_wait_fifo_level(qts, base, 0, i - 1);
+    }
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    /* Disabling FRTSC immediately returns ownership to software RTS. */
+    qtest_writel(qts, base + US_FMR, fifo_mode & ~US_FMR_FRTSC);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_writel(qts, base + US_CR, US_CR_RTSDIS);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_writel(qts, base + US_CR, US_CR_RXDIS | US_CR_FIFODIS);
+    g_assert_cmphex(qtest_readl(qts, base + US_FMR), ==, 0);
+    qtest_system_reset(qts);
+    /* Reset leaves normal-mode, inactive (physically high) RTS. */
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    close(sock_fd);
+    qtest_quit(qts);
+}
+
+static void test_flexcom_usart_hwhs_migration(void)
+{
+    const uint64_t base = SAM9X7_USART0_BASE;
+    const char *path = "/machine/soc/usart[0]";
+    const uint32_t fifo_mode = US_FMR_FRTSC |
+                               US_FMR_RXFTHRES(3) |
+                               US_FMR_RXFTHRES2(1);
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+    uint64_t character_ns;
+    int64_t from_clock = 0;
+    uint32_t status;
+    unsigned int i;
+
+    qtest_irq_intercept_out_named(from, path, "rts");
+    qtest_irq_intercept_out_named(to, path, "rts");
+    pmc_write_pcr(from, 5, PMC_PCR_EN);
+    aic_configure(from, 5, AIC_SMR_LEVEL_HIGH | 3, 0x50050005);
+    qtest_writel(from, base + US_MR, US_MR_HWHS_LOCAL);
+    qtest_writel(from, base + US_BRGR, 217);
+    qtest_writel(from, base + US_CR,
+                 US_CR_FIFOEN | US_CR_RXEN | US_CR_TXEN);
+    qtest_writel(from, base + US_FMR, fifo_mode);
+    qtest_writel(from, base + US_IER, US_INT_CTSIC);
+    character_ns = usart_cycles_to_ns(from, 5, 16 * 217 * 10);
+
+    for (i = 0; i < 3; i++) {
+        qtest_writeb(from, base + US_THR, 0x60 + i);
+        from_clock = qtest_clock_step(from, character_ns);
+    }
+    g_assert_cmphex(qtest_readl(from, base + US_FLR), ==, 3U << 16);
+    g_assert_true(qtest_get_irq(from, 0));
+
+    /* Migrate inside the hysteresis window with the high RTS latch held. */
+    g_assert_cmphex(qtest_readb(from, base + US_RHR), ==, 0x60);
+    g_assert_cmphex(qtest_readl(from, base + US_FLR), ==, 2U << 16);
+    g_assert_true(qtest_get_irq(from, 0));
+
+    /* Preserve an unread CTS edge and a byte blocked behind high CTS. */
+    qtest_set_irq_in(from, path, "cts", 0, 1);
+    qtest_writeb(from, base + US_THR, 0xa5);
+    g_assert_cmphex(qtest_readl(from, base + US_FLR), ==,
+                    (2U << 16) | 1);
+    g_assert_true(qtest_readl(from, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(5));
+
+    sam9x75_migrate(from, to);
+
+    /* qtest virtual clocks are independent; align the destination clock. */
+    g_assert_cmpint(qtest_clock_set(to, from_clock), ==, from_clock);
+    g_assert_cmphex(qtest_readl(to, base + US_MR), ==, US_MR_HWHS_LOCAL);
+    g_assert_cmphex(qtest_readl(to, base + US_FMR), ==, fifo_mode);
+    g_assert_cmphex(qtest_readl(to, base + US_FLR), ==,
+                    (2U << 16) | 1);
+    g_assert_true(qtest_get_irq(to, 0));
+    g_assert_true(qtest_readl(to, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(5));
+
+    status = qtest_readl(to, base + US_CSR);
+    g_assert_cmphex(status & (US_STATUS_CTS | US_INT_CTSIC), ==,
+                    US_STATUS_CTS | US_INT_CTSIC);
+    g_assert_false(qtest_readl(to, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(5));
+
+    qtest_clock_step(to, character_ns * 2);
+    g_assert_cmphex(qtest_readl(to, base + US_FLR), ==,
+                    (2U << 16) | 1);
+    qtest_set_irq_in(to, path, "cts", 0, 0);
+    qtest_readl(to, base + US_CSR);
+    qtest_clock_step(to, character_ns);
+    g_assert_cmphex(qtest_readl(to, base + US_FLR), ==, 3U << 16);
+    g_assert_true(qtest_get_irq(to, 0));
+
+    for (i = 0; i < 2; i++) {
+        g_assert_cmphex(qtest_readb(to, base + US_RHR), ==, 0x61 + i);
+    }
+    g_assert_cmphex(qtest_readl(to, base + US_FLR), ==, 1U << 16);
+    g_assert_false(qtest_get_irq(to, 0));
+    g_assert_cmphex(qtest_readb(to, base + US_RHR), ==, 0xa5);
 
     qtest_quit(to);
     qtest_quit(from);
@@ -23200,6 +23492,12 @@ int main(int argc, char **argv)
                    test_flexcom_usart_rs485_rts);
     qtest_add_func("sam9x75/flexcom-usart/rs485-migration",
                    test_flexcom_usart_rs485_migration);
+    qtest_add_func("sam9x75/flexcom-usart/hwhs-cts-and-tx",
+                   test_flexcom_usart_hwhs_cts_and_tx);
+    qtest_add_func("sam9x75/flexcom-usart/hwhs-fifo-rts",
+                   test_flexcom_usart_hwhs_fifo_rts);
+    qtest_add_func("sam9x75/flexcom-usart/hwhs-migration",
+                   test_flexcom_usart_hwhs_migration);
     qtest_add_func("sam9x75/flexcom-usart/fifo-loopback-and-timeout",
                    test_flexcom_usart_fifo_loopback_and_timeout);
     qtest_add_func("sam9x75/flexcom-usart/chardev",

@@ -83,6 +83,7 @@ struct AT91USARTState {
     bool tx_break;
     bool cts_level;
     bool rts_enabled;
+    bool fifo_rts_level;
     bool tx_request_level;
     bool rx_request_level;
 };

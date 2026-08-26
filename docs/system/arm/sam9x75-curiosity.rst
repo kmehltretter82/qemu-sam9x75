@@ -227,6 +227,11 @@ Support matrix
        transfers, clocked character-backend transmission and reception,
        local/automatic/remote loopback, timeout and comparison events, write
        protection, migration and its documented XDMAC transmit/receive pair.
+       Hardware-handshake mode samples the live CTS input, latches read-clear
+       CTS change events, finishes an in-flight character before a CTS-high
+       stop and resumes on CTS-low.  With FIFOs enabled, ``FMR.FRTSC`` drives
+       RTS through the two receive thresholds with hysteresis; the pin and
+       latch states survive migration.
        The silicon implements Basic, hardware-handshake and RS485 USART modes
        on all thirteen instances.  FLEXCOM0--3 additionally implement
        ISO7816, LIN, IrDA, Manchester and LON; FLEXCOM4--5 implement the same
@@ -252,7 +257,7 @@ Support matrix
        SPI client mode and pin-level mode-fault/framing input, CRC and two-pin
        engines, bit-level USART framing and synchronous/protocol engines,
        per-instance USART feature enforcement,
-       complete flow-control endpoints, TWI client mode, SMBus/PEC,
+       external chardev modem-line plumbing, TWI client mode, SMBus/PEC,
        high-speed timing, separately timed address/START/STOP phases and
        arbitration fidelity remain missing.  SAM9X7 documentation and its
        device pack do not define the legacy SPI version word at offset
