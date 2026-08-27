@@ -227,6 +227,15 @@ Support matrix
        transfers, clocked character-backend transmission and reception,
        local/automatic/remote loopback, timeout and comparison events, write
        protection, migration and its documented XDMAC transmit/receive pair.
+       Character-backend input is admitted one character at a time at the
+       baud, framing and clock interval programmed by the guest; timer expiry
+       wakes the backend for the next byte.  Reset, receiver disable, clock
+       loss and wrapper personality changes cancel the interval, while a
+       half-expired interval migrates.  This prevents an unpaced host socket
+       burst from wrapping Linux's 4 KiB cyclic receive-DMA ring before its
+       period tasklet can observe progress.  The exact Linux4Microchip 2026.04
+       combined gate passed the full 27-frame, 65,536-byte-boundary UART
+       protocol in both directions with deliberate backpressure.
        Hardware-handshake mode samples the live CTS input, latches read-clear
        CTS change events, finishes an in-flight character before a CTS-high
        stop and resumes on CTS-low.  With FIFOs enabled, ``FMR.FRTSC`` drives
@@ -696,6 +705,15 @@ Support matrix
        remain for board validation; that work needs the appropriate header
        pinmux and a CAN transceiver rather than a direct connection to the SoC
        pins.
+       The exact Linux4Microchip 2026.04 combined gate also passed 1,000
+       bidirectional protocol stress frames between ``can0`` and ``can1`` on
+       one internal QEMU CAN bus, with classic, RTR, CAN-FD/BRS and 64-byte
+       payload coverage and no duplicate, gap, corruption, queue overflow or
+       controller error.  This topology cannot inject ESI from userspace:
+       Linux's real-controller API treats ESI as controller-generated and its
+       M_CAN transmit path ignores that request.  ESI reception remains
+       covered with a virtual host ``vcan`` peer; one internal bus is not proof
+       of two independent external board paths.
    * - Crypto, TRNG, OTP and PUF
      - Initial
      - AES has 128/192/256-bit keys; ECB, CBC, OFB, CFB8/16/32/64/128, CTR,
@@ -961,6 +979,14 @@ disposable stress target.  A normal RAM/device migration does not transfer
 this raw backing file; arrange coordinated shared storage or explicit block
 migration before testing migration with a writable USB disk.  UHPHS accesses
 guest memory as a USB bus master; its traffic does not traverse XDMAC.
+
+Do not use a writable directory export such as ``fat:rw:payload`` as the
+result disk for a stress run.  An earlier combined run triggered the generic
+``block/vvfat.c`` assertion while creating and renaming its guest result tree:
+``handle_renames_and_mkdirs`` assertion ``j < s->mapping.next``.  Keep the
+payload ``fat:ro:`` and attach a separate disposable raw ext4 USB disk for
+results.  The passing combined gate copied its reports there, unmounted it,
+powered down cleanly and passed host-side ``e2fsck -fn``.
 
 UDPHS is present, but a cable is not created automatically and QEMU does not
 yet expose it directly to a physical host.  For controller development, its
@@ -1371,8 +1397,14 @@ and BCH8-limit eight-bit-error media; all three reached a byte-identical U-Boot
 prompt with an empty diagnostic log.  GEM/LAN8840 discovery, PHY-interrupt
 bring-up, DHCP, ICMP and deterministic full-duplex TCP/UDP packet exchange are
 achieved with the exact Linux4Microchip image and unchanged shipped overlay.
-The other remaining integration gates include full guest ``mmc_spi``
-operation through J24, the remaining board jumper and mux behavior, genuine
-QSPI and NAND RomBOOT, USB, CAN, expansion buses, multimedia/security,
-whole-machine migration and finally hardware differential validation.  Normal
-supported boots must be clean with ``-d unimp,guest_errors``.
+The concurrent Linux4Microchip gate is also achieved: GEM TCP/UDP, both M_CAN
+controllers, FLEXCOM1 UART, SHA/HMAC/AES/TDES, CPU, memory and filesystem
+integrity all passed in one bounded run.  A separate UHPHS ext4 result disk
+was written, cleanly unmounted and passed host-side filesystem checking, with
+an empty QEMU diagnostic log.  Remaining integration gates include full guest
+``mmc_spi`` operation through J24, independent external CAN paths and their
+long/canfdtest profiles, the remaining board jumper and mux behavior, genuine
+QSPI and NAND RomBOOT, broader USB hotplug/error/migration behavior, expansion
+buses, multimedia/security, whole-machine migration and finally hardware
+differential validation.  Normal supported boots must be clean with
+``-d unimp,guest_errors``.

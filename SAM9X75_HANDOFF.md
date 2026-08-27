@@ -13,17 +13,19 @@ this file current whenever a new checkpoint is committed.
 - Published branch: `main`
 - Local source tree: `/home/karl/linux-work/qemu-SAM9X75/qemu`
 - Local development branch: `sam9x75-curiosity`
-- Last implementation checkpoint: `49e71bb614`
-  (`tests/guest: add SAM9X75 gadget serial self-loop`)
-- Preceding UDPHS implementation checkpoint: `4aebd91443`
-  (`hw/usb: support multi-packet AT91 UDPHS transfers`)
-- Latest tested source: `56a14d47d0`
-  (`docs: record SAM9X75 gadget serial reconnect validation`)
-- The current test binary reports implementation source `8af5934947`; the
-  commits through `56a14d47d0` after that build are documentation-only.
+- Last implementation checkpoint: `dff47e3418`
+  (`hw/char: Pace AT91 USART receive characters`)
+- Preceding generic QEMU fix: `569ca3a66d`
+  (`chardev: Avoid unregistering yank after failed reconnect`)
+- Latest tested source: `1851743e84`
+  (`tests/guest: Make network frame idle bound configurable`)
+- `build-verify-serial/qemu-system-arm --version` reports exact source
+  `v11.1.0-417-g1851743e84`; the handoff and proven-timeout updates after that
+  checkpoint do not change the emulated machine.
 
-The documentation-only commits at current `main` follow the two implementation
-commits above.  Do not reset to `49e71bb614`; continue from the tip of `main`.
+Do not reset to an older UDPHS or crypto checkpoint; continue from the tip of
+`main` after fetching.  Verify that all three commits above are present in the
+published history before starting a new implementation slice.
 
 On this workstation the only expected untracked item at handoff time was
 `build-verify-serial/`.  It is a build directory, not source, and must never be
@@ -48,21 +50,27 @@ build directory or workspace test artifact.
 
 ## What is validated at this checkpoint
 
-The QEMU implementation at `8af5934947` compiled cleanly in
-`build-verify-serial`; source through tested checkpoint `56a14d47d0` only
-changes documentation.
+The QEMU implementation at `1851743e84` compiled cleanly in
+`build-verify-serial`.
 
-- The complete SAM9X75 Curiosity qtest binary passed **237/237**.
+- The complete SAM9X75 Curiosity qtest binary passed **238/238**.
+- The complete generic chardev unit binary passed **42/42**.  The new TCP and
+  Unix reconnect cases prove that a failed reconnect after a previous client
+  closes no longer tries to unregister an unregistered yank callback; the old
+  code deterministically aborted in this test.
 - The LAN8840 EEPROM and separate SAM9X7 ADC suites passed **7/7** and
-  **9/9** respectively.
-- The focused UDPHS subgroup passed **20/20**, and the UART partner host suite
-  passed **16/16**.
-- `git diff --check` was clean before the validation-only run.
-- Independent reviews of the UDPHS deferred-DMA, replacement-SETUP and
-  migration changes found no remaining memory-safety or migration-ABI defect.
-- The exact Linux4Microchip 2026.04 UDPHS gadget-serial loop passed at that
-  same source revision in two fresh sessions separated by `g_serial` removal
-  and reload.  All four endpoints passed TAP `1..7`, 27 DATA frames and 27
+  **9/9** respectively.  The focused UDPHS subgroup passed **20/20**.
+- The UART partner host suite passed **16/16**, and the network partner suite
+  passed **22/22** after adding the independently configurable TCP frame-idle
+  deadline.
+- The paced USART qtests cover two queued backend bytes separated by one exact
+  programmed character interval and migration of a half-expired receive
+  timer with a pending destination byte.
+- `git diff --check` was clean before the documentation update.
+- The exact Linux4Microchip 2026.04 UDPHS gadget-serial loop remains validated
+  from its earlier exact-head run: two fresh sessions were separated by
+  `g_serial` removal and reload.  All four endpoints passed TAP `1..7`, 27 DATA
+  frames and 27
   acknowledgements, the 65,536-byte boundary and 210,478 received wire bytes
   with no protocol error.  USB device number 3 disappeared and re-enumerated
   as 4; UHPHS and UDPHS interrupts advanced in both sessions, Linux's global
@@ -72,27 +80,43 @@ changes documentation.
   workers and requests through 65,536 bytes.  TAP was 6/6 for 85 SHA, 34 HMAC,
   32 AES and 12 TDES jobs; XDMAC advanced by 8,808 and SHA by 10,034
   interrupts; QEMU's `unimp,guest_errors` log was empty.
-
-No successful full *multi-subsystem* Linux4Microchip stress run is documented.
-The standalone full crypto release gate is now green after fixing two Linux
-driver bugs; the earlier combined attempt predates those fixes.  Reduced
-Linux4Microchip GEM, USB storage, USB serial and FLEXCOM1 UART gates have older
-passing evidence.  CAN has newer-mainline guest evidence, but no completed
-Linux4Microchip partner-fixture release result.  Repeat each affected gate
-before describing it as current-head coverage.
+- The full multi-subsystem Linux4Microchip 2026.04 release gate passed at
+  `1851743e84`.  Aggregate TAP was **23/23**: two simultaneous 2 MiB-per-
+  direction GEM streams plus 128 UDP packets; 1,000 bidirectional stress
+  frames through each of `can0` and `can1`; the full 27-frame UART boundary
+  matrix through 65,536 bytes with six induced backpressure pauses; two
+  workers over 85 SHA, 34 HMAC, 32 AES and 12 TDES jobs; and deterministic
+  CPU, memory and filesystem integrity loads.  The guest, network peer and
+  UART peer all exited zero.  QEMU's `unimp,guest_errors` log was empty, all
+  reports were copied to a separate USB ext4 disk, the disk was cleanly
+  unmounted, and host `e2fsck -fn` passed.
+- The authoritative combined evidence is workspace-local at
+  `/home/karl/linux-work/qemu-SAM9X75/t/linux4sam-combined-20260827/release-r4/`.
+  The exact kernel is
+  `/home/karl/linux-work/qemu-SAM9X75/t/linux4microchip-tdes-diag-build-20260827/arch/arm/boot/zImage`
+  and the CAN-enabled DTB is
+  `/home/karl/linux-work/qemu-SAM9X75/t/linux4microchip-2026.04-can01.dtb`.
+- A preceding run exposed a generic writable-vvfat assertion in
+  `block/vvfat.c:2758` after the guest created and renamed a result tree.  This
+  is not a SAM9X75 USB-model failure.  Keep directory-export payloads
+  read-only and use a separate disposable raw ext4 result disk as in
+  `release-r4`.
 
 ## Immediate continuation order
 
 Do these steps before starting another device model or another operating
 system.
 
-1. Run the combined GEM, CAN, UART and crypto stress runner with all host peers
-   and its independent TAP/JSON oracles.  Then repeat the remaining P0
-   consumers, starting with disposable USB mass storage.
-2. Finish with one AT91Bootstrap to U-Boot to disk-root Linux4Microchip boot
-   that also exercises GEM traffic and leaves `-d unimp,guest_errors` empty.
+1. Run one AT91Bootstrap-to-U-Boot-to-disk-root Linux4Microchip boot at the
+   current head that also exercises deterministic GEM traffic and leaves
+   `-d unimp,guest_errors` empty.  The passing combined gate used direct
+   `-kernel`, so it does not replace this firmware-chain gate.
+2. Extend the remaining P0 external-path coverage: a larger disposable UHPHS
+   mass-storage hash/hotplug run, independent host connections for both CAN
+   controllers, the 10,000-frame CAN profile and separate `canfdtest`.
 3. Add quiescent whole-machine migration at the documented partner barriers,
-   then carefully controlled in-flight migration.
+   then carefully controlled in-flight migration.  The USART receive timer
+   itself already has qtest migration coverage.
 4. In parallel, the physical-board agent can run the safe crypto validation in
    `artifacts/linux4microchip-crypto-fixes-20260827/REAL-HARDWARE-TESTS.md`.
 5. Only after the remaining integration gates are green, take the next bounded
@@ -154,8 +178,8 @@ env TMPDIR=/home/karl/linux-work/qemu-SAM9X75/t/qtest-tmp \
   ./build-verify-serial/tests/qtest/sam9x7-adc-test
 ```
 
-At the validated source the Curiosity binary reports 237 tests.  Record the
-resulting count on every later revision rather than assuming it remains 237.
+At the validated source the Curiosity binary reports 238 tests.  Record the
+resulting count on every later revision rather than assuming it remains 238.
 
 ### Exact Linux4Microchip UDPHS gate
 
@@ -268,18 +292,21 @@ ADMA NOP issue.
 
 ### P0: current Linux4Microchip integration
 
-- Run UHPHS with a newly created disposable USB mass-storage image through the
-  real Linux block/filesystem stack; verify payload hashes, clean unmount and
-  a host-side filesystem check.
-- Repeat GEM/LAN8840 deterministic TCP and UDP traffic, CAN-FD, FLEXCOM UART
-  and crypto concurrently through the combined stress runner.
-  The checked-in example's two-iteration/two-worker crypto entry is diagnostic
-  and does not replace the four-iteration/three-worker/65,536-byte crypto
-  release profile.
-- Complete the Linux4Microchip CAN partner fixture first with one controller
-  and 1,000 frames, then independent host connections for both controllers,
+- The basic UHPHS writable-media gate is achieved by the combined run's fresh
+  128 MiB ext4 result disk: Linux mounted it read/write, copied the evidence,
+  synced and cleanly unmounted it, and host `e2fsck -fn` passed.  Still run a
+  larger payload-hash and hotplug/error profile on a newly created disposable
+  disk.
+- The concurrent GEM/LAN8840, CAN-FD, FLEXCOM UART, crypto, CPU, memory and
+  filesystem gate is achieved at `1851743e84`.  Preserve `release-r4` and its
+  independent host/guest TAP and JSON.  The two-iteration/two-worker crypto
+  entry remains a combined-contention profile and does not replace the
+  standalone four-iteration/three-worker/65,536-byte crypto release gate.
+- The Linux4Microchip CAN fixture passed 1,000 frames per role on one shared
+  internal bus.  Next add independent host connections for both controllers,
   the 10,000-frame gate and a separate `canfdtest` interoperability run.  Do
-  not use one shared guest CAN bus as proof of two independent external paths.
+  not use the shared bus as proof of two independent external paths, and do
+  not request ESI injection from the Linux M_CAN used as its peer.
 - Run normal firmware-to-disk-root boot with `-d unimp,guest_errors`, then
   include current GEM traffic and confirm the log contains no SAM9X75 model
   diagnostics.
@@ -387,13 +414,16 @@ support matrix/execution roadmap and the relevant Linux4SAM consumer README.
 Verify the Git head and preserve unrelated/untracked files.  Do not stage any
 build or evidence directory.
 
-The current-head SAM9X75, LAN8840, ADC, UDPHS and UART regressions and the
-two-session Linux4Microchip UDPHS g_serial reconnect gate are complete.  The
-Atmel SHA/TDES Linux fixes and complete standalone crypto release profile are
-also validated in QEMU; read the dated crypto-fixes artifact and do not add a
-QEMU workaround for those Linux bugs.  The immediate task is the combined
-GEM, CAN, UART, crypto, CPU, memory and filesystem stress gate, followed by
-the remaining P0 Linux4Microchip consumer matrix.  Keep other operating
+The current-head SAM9X75 qtests pass 238/238 and the chardev unit tests pass
+42/42.  The exact Linux4Microchip 2026.04 combined release gate is green:
+GEM, both M_CAN controllers, paced FLEXCOM1 UART, all crypto engines, CPU,
+memory, filesystem and a separate UHPHS result disk passed together with an
+empty QEMU diagnostic log.  Preserve the release-r4 evidence.  The two-session
+UDPHS g_serial reconnect gate and standalone crypto release profile are also
+green.  Read the dated crypto-fixes artifact and do not add a QEMU workaround
+for the two Linux driver bugs.  The immediate task is a current-head
+AT91Bootstrap-to-U-Boot-to-disk-root boot with GEM traffic, followed by the
+remaining external CAN, USB and migration gates.  Keep other operating
 systems deferred.
 
 Use the r5 hardware handoff only for sanitized evidence, safety rules and

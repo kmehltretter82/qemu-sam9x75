@@ -148,6 +148,15 @@ peer-to-guest CAN-FD frames, covering SFF/EFF with BRS off/on.  Omit it on
 physical adapters which cannot request ESI from userspace; the normal matrix
 always tests ESI clear.
 
+The same restriction applies when a second Linux M_CAN interface is used as
+the peer on an internal QEMU CAN bus.  Linux documents ``CANFD_ESI`` as
+controller-generated for real CAN devices, and the ``m_can`` transmit path
+does not copy a userspace ESI request into the transmit element.  Therefore a
+healthy, error-active ``can1`` cannot inject the supplemental ESI frames into
+``can0``.  Omit ``--include-esi`` for that two-controller topology.  Retain it
+when the peer is a virtual SocketCAN interface such as host ``vcan``, which is
+able to inject the flag and remains the ESI receive-path gate.
+
 Without ``--configure``, perform the equivalent setup explicitly::
 
   ip link set can0 down 2>/dev/null || true

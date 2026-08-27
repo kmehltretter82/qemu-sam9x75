@@ -91,6 +91,32 @@ The process exits nonzero on a framing, CRC, payload, direction, sequence or
 timeout failure.  Use ``peer --sessions 2`` and restart the guest exerciser
 after a reset to require two complete, separately identified sessions.
 
+Timed receive behavior and validation
+-------------------------------------
+
+The AT91 USART accepts at most one character from a QEMU chardev per
+guest-programmed character interval.  When that interval expires it wakes the
+frontend for the next byte.  The timer is cancelled on reset, receiver
+disable, clock loss and FLEXCOM personality changes; a half-expired interval
+and its pending byte migrate.
+
+This pacing is required even for an AF_UNIX peer.  Without it, a host socket
+could deliver one complete 4,096-byte burst into Linux's 4,096-byte cyclic
+XDMAC receive ring before the guest tasklet observed a period.  The DMA
+position and residue then wrapped to their previous values and the full UART
+fixture stalled after sequence 20 despite having received more data.  QEMU
+commit ``dff47e3418`` fixes that model error and adds exact character-spacing
+and half-expired-timer migration qtests.
+
+At QEMU ``1851743e84``, the exact Linux4Microchip 2026.04 combined release
+gate passed TAP ``1..7`` at both UART endpoints.  Each direction covered all
+27 boundary frames and acknowledgements through 65,536 bytes, 210,478 wire
+bytes and six deliberate 32-KiB backpressure pauses.  The peer then closed its
+socket; QEMU's configured reconnect failed as expected but did not abort, also
+exercising the generic chardev reconnect fix in ``569ca3a66d``.  The complete
+SAM9X75 qtest binary passed 238 tests and the complete chardev unit binary
+passed 42 tests at this checkpoint.
+
 QEMU four-wire serial partner
 -----------------------------
 

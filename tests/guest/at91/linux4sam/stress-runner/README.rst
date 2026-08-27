@@ -49,11 +49,13 @@ see its README for the newer-mainline AF_ALG compatibility boundary.
 
 Start all requested host peers before QEMU.  For the example, use the normal
 commands from their READMEs with matching arguments and sessions.  Give both
-network roles ``--tcp-idle-timeout 300``: the standalone default remains a
+network roles ``--tcp-idle-timeout 600``: the standalone default remains a
 strict 30 seconds, while one TCP frame can legitimately wait longer when the
 single emulated CPU is shared with all consumers and three integrity loads.
-The overall 900-second network deadline remains authoritative.  Then run
-inside Linux4SAM::
+The example gives each long-running consumer a 1,800-second internal deadline
+and a 1,900-second runner deadline.  Give host peers at least 2,400 seconds
+from pre-boot startup and retain an independent outer QEMU/job deadline.  Then
+run inside Linux4SAM::
 
   mkdir -p /root/sam9x75-stress/logs /root/sam9x75-stress/scratch
   systemctl stop serial-getty@ttyS1.service 2>/dev/null || true
@@ -93,6 +95,23 @@ The atomic JSON report contains argv, timing, exit status, bounded-log hashes
 and the internal workload byte counts and hashes.  The selected host peers'
 final TAP/JSON gates remain independently required; one aggregate guest
 report cannot substitute for their view of delivered traffic.
+
+Keep a directory-export payload read-only.  An earlier combined run completed
+its guest workload and then hit the generic ``block/vvfat.c`` assertion
+``j < s->mapping.next`` while copying the result tree back to a writable
+``fat:rw:`` export.  Use ``fat:ro:`` for scripts and a
+separate, disposable raw ext4 USB disk for result JSON and logs.  Cleanly
+unmount that disk in the guest and run host-side ``e2fsck -fn`` after QEMU has
+exited.  This isolates a QEMU vvfat issue from the SAM9X75 USB model and also
+leaves recoverable evidence if a later consumer fails.
+
+The exact Linux4Microchip 2026.04 combined release at QEMU ``1851743e84``
+passed TAP ``23/23`` with the bounds above.  It ran two 2-MiB full-duplex GEM
+streams plus 128 UDP packets, 1,000 bidirectional stress frames between the
+two M_CAN controllers, the full UART boundary/backpressure matrix, two
+workers over every crypto engine, and the documented CPU, memory and storage
+loads.  All host peers and the guest exited zero, the QEMU diagnostic log was
+empty, and the ext4 result disk passed ``e2fsck -fn``.
 
 Timeout cleanup sends TERM and then KILL to the child's process group.  Every
 wait remains bounded; if a process cannot be reaped after KILL, its result is

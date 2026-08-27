@@ -29,12 +29,12 @@
         "python3", "/mnt/payload/sam9x75_network_partner.py", "guest",
         "--host", "10.0.2.2", "--tcp-port", "19091", "--udp-port", "19092",
         "--streams", "2", "--bytes-per-direction", "2097152",
-        "--udp-packets", "128", "--timeout", "900",
-        "--tcp-idle-timeout", "300",
+        "--udp-packets", "128", "--timeout", "1800",
+        "--tcp-idle-timeout", "600",
         "--session", "0x202608260101",
         "--json", "/root/sam9x75-network-guest.json"
       ],
-      "timeout": 950
+      "timeout": 1900
     },
     {
       "name": "mcan0",
@@ -43,21 +43,21 @@
         "--interface", "can0", "--configure", "--bitrate", "500000",
         "--data-bitrate", "2000000", "--txqueuelen", "4096",
         "--frames", "1000", "--window", "16", "--include-esi",
-        "--timeout", "900", "--session", "0x202608260102",
+        "--timeout", "1800", "--session", "0x202608260102",
         "--json", "/root/sam9x75-can0-guest.json"
       ],
-      "timeout": 950
+      "timeout": 1900
     },
     {
       "name": "flexcom1-uart",
       "argv": [
         "python3", "/mnt/payload/sam9x75_uart_partner.py", "guest",
-        "--device", "/dev/ttyS1", "--timeout", "900",
+        "--device", "/dev/ttyS1", "--timeout", "1800",
         "--session", "0x202608260103",
         "--backpressure-every-bytes", "32768", "--backpressure-ms", "20",
         "--json", "/root/sam9x75-uart-guest.json"
       ],
-      "timeout": 950
+      "timeout": 1900
     },
     {
       "name": "crypto-engines",
@@ -66,7 +66,7 @@
         "--iterations", "2", "--workers", "2", "--max-bytes", "65536",
         "--json", "/root/sam9x75-crypto.json"
       ],
-      "timeout": 950
+      "timeout": 1900
     }
   ],
   "postflight": [
