@@ -65,7 +65,7 @@ guest wait, so a timeout implemented only inside the guest is not sufficient::
   timeout --foreground --signal=TERM --kill-after=30s 900s \
       ./run-linux4microchip-crypto-vm
 
-On a kernel with the concurrency fix described below, the command emits TAP
+On a kernel with both Linux fixes described below, the command emits TAP
 6/6 plus a JSON record.  The default matrix covers all five SHA widths,
 including both SHA-2 padding transitions, HMAC-SHA256/SHA512, AES-128 ECB,
 AES-128/192/256 CBC, AES-256 CTR, and 24-byte three-key TDES through the
@@ -103,8 +103,40 @@ ordinary SHA request may follow HMAC state, but must be guarded by
 Do not reduce ``--workers`` in a release result.  ``--workers 1`` is useful
 only to isolate the QEMU data path while the kernel fix is being reviewed.
 The full concurrent gate remains intentionally capable of detecting the
-driver bug.  The proposed fix still needs the same stress run on physical
-SAM9X75 silicon before it is submitted upstream.
+driver bug.  The proposed fix passed the complete release profile in QEMU but
+still needs the same stress run on physical SAM9X75 silicon before upstream
+submission.
+
+Linux atmel-tdes uninitialized device state
+--------------------------------------------
+
+The unmodified Linux4Microchip 2026.04 TDES driver allocates
+``struct atmel_tdes_dev`` with ``devm_kmalloc()``.  It then reads
+``dd->flags`` during probe and relies on zero defaults in the embedded DMA
+configuration.  The allocation is not initialized.  On a captured failing
+boot, ``dd->flags`` began as ``0x4f79c83c``, which already contained
+``TDES_FLAGS_BUSY``.  Two valid AF_ALG requests were queued with
+``-EINPROGRESS`` forever; neither the TDES engine nor XDMAC channels 7/8 were
+started.  The TDES mode register stayed at reset value ``0x00000002`` and the
+XDMAC interrupt count did not advance.
+
+This is an upstream Linux bug, not a QEMU request-line or DMA bug.  It dates
+to commit ``7608a43d8f2e`` (``crypto: atmel-tdes - Switch to managed version
+of kzalloc``): the stated conversion to zeroed managed allocation accidentally
+used ``devm_kmalloc()``.  Linux 7.2 still has the same allocation.  Change it
+to ``devm_kzalloc()``, matching the Atmel AES and SHA drivers.
+
+With that one-line fix and the SHA fix above, the formerly failing two-worker
+TDES test passed all 12 ECB/CBC jobs, including 65,536-byte requests, with
+exact OpenSSL and decrypt-round-trip equality and 88 XDMAC completions.  The
+complete release profile then passed all four engine families with four
+iterations and three workers in 77.874097 seconds.  It covered 85 SHA, 34
+HMAC, 32 AES and 12 TDES jobs; XDMAC advanced by 8,808 and the SHA interrupt
+by 10,034; the QEMU ``unimp,guest_errors`` log remained empty.
+
+The fix needs a repeatability run on physical SAM9X75 silicon.  Because the
+failure depends on allocator contents, use at least 20 cold boots and retain
+two or more workers; a single passing unpatched boot does not disprove it.
 
 The JSON ``gate_profile`` is ``release`` only when all four families are
 selected, interrupt checks and empty messages remain enabled, and

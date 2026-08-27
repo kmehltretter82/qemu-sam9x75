@@ -719,22 +719,29 @@ Support matrix
        request 34, write protection, security-access reports and migration.
        Known-answer coverage includes every hash width, RFC HMAC-SHA256,
        software and automatic padding, both check modes, timing and multi-block
-       DMA.  The unmodified Linux driver probes version 0x700 and acquires its
-       DMA channel.  SHA double-buffer performance, Always-On dummy processing,
-       exact check latency, tamper/fault injection and the AES/SHA protocol path
-       remain incomplete; version and timing values require hardware
-       confirmation.  TDES supports DES, two- and three-key TDES and XTEA;
+       DMA.  The Linux4Microchip driver probes version 0x700 and acquires its
+       DMA channel.  Its generic-request state restoration must clear stale
+       automatic-padding ``MSR``/``BCR`` state after interleaved HMAC requests;
+       the patched driver passed the complete concurrent AF_ALG release gate.
+       SHA double-buffer performance, Always-On dummy processing, exact check
+       latency, tamper/fault injection and the AES/SHA protocol path remain
+       incomplete; version and timing values require hardware confirmation.
+       TDES supports DES, two- and three-key TDES and XTEA;
        ECB, CBC, OFB and CFB8/16/32/64; manual, automatic and DMA start modes;
        the CBC-MAC last-output path; clocked 18/50-cycle DES/TDES processing;
        AIC source 40; XDMAC requests 31/30; write protection, security-access
        reports and migration.  Known-answer tests cover encryption and
        decryption for every algorithm and mode, exact DES/TDES completion
-       timing, paired DMA and TX-only CBC-MAC.  The unmodified Linux driver
-       probes version 0x700 and acquires both DMA channels.  XTEA register-word
-       ordering and timing, the version value, private-key bus, tamper and
-       fault-injection behavior require hardware confirmation.  OTPC is
-       mapped at ``0xeff00000``.  With no backing image it provides a blank,
-       VM-local 10 KiB physical OTP array on each QEMU launch.  An optional
+       timing, paired DMA and TX-only CBC-MAC.  The Linux driver probes version
+       0x700 and acquires both DMA channels, but its upstream
+       ``devm_kmalloc()`` device-state allocation can inherit a false busy bit
+       and queue every request forever.  With the allocation corrected to
+       ``devm_kzalloc()``, the Linux4Microchip driver passed the concurrent
+       ECB/CBC AF_ALG release gate through 65,536-byte requests.  XTEA
+       register-word ordering and timing, the version value, private-key bus,
+       tamper and fault-injection behavior require hardware confirmation.
+       OTPC is mapped at ``0xeff00000``.  With no backing image it provides a
+       blank, VM-local 10 KiB physical OTP array on each QEMU launch.  An optional
        raw backend can seed or persist that array; it must contain exactly
        10240 bytes, interpreted as 2560 little-endian 32-bit words.  A backend
        is immutable to the guest by default.  Persistent mutation requires

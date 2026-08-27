@@ -17,12 +17,13 @@ this file current whenever a new checkpoint is committed.
   (`tests/guest: add SAM9X75 gadget serial self-loop`)
 - Preceding UDPHS implementation checkpoint: `4aebd91443`
   (`hw/usb: support multi-packet AT91 UDPHS transfers`)
-- Latest exact validation source: `8af5934947`
-  (`docs: add SAM9X75 continuation handoff`)
+- Latest tested source: `56a14d47d0`
+  (`docs: record SAM9X75 gadget serial reconnect validation`)
+- The current test binary reports implementation source `8af5934947`; the
+  commits through `56a14d47d0` after that build are documentation-only.
 
-The documentation-only commit containing this handoff at current `main`
-follows the two implementation commits above.  Do not reset to `49e71bb614`;
-continue from the tip of `main`.
+The documentation-only commits at current `main` follow the two implementation
+commits above.  Do not reset to `49e71bb614`; continue from the tip of `main`.
 
 On this workstation the only expected untracked item at handoff time was
 `build-verify-serial/`.  It is a build directory, not source, and must never be
@@ -47,7 +48,9 @@ build directory or workspace test artifact.
 
 ## What is validated at this checkpoint
 
-The source at `8af5934947` compiled cleanly in `build-verify-serial`.
+The QEMU implementation at `8af5934947` compiled cleanly in
+`build-verify-serial`; source through tested checkpoint `56a14d47d0` only
+changes documentation.
 
 - The complete SAM9X75 Curiosity qtest binary passed **237/237**.
 - The LAN8840 EEPROM and separate SAM9X7 ADC suites passed **7/7** and
@@ -64,10 +67,15 @@ The source at `8af5934947` compiled cleanly in `build-verify-serial`.
   with no protocol error.  USB device number 3 disappeared and re-enumerated
   as 4; UHPHS and UDPHS interrupts advanced in both sessions, Linux's global
   error count stayed zero, and QEMU's `unimp,guest_errors` log was empty.
+- A Linux4Microchip kernel containing the separately packaged Atmel SHA and
+  TDES fixes passed the full crypto release profile: four iterations, three
+  workers and requests through 65,536 bytes.  TAP was 6/6 for 85 SHA, 34 HMAC,
+  32 AES and 12 TDES jobs; XDMAC advanced by 8,808 and SHA by 10,034
+  interrupts; QEMU's `unimp,guest_errors` log was empty.
 
-No successful full combined Linux4Microchip stress run is documented.  The
-prior combined attempt reached the known SHA/HMAC problem; a later patched run
-exposed the separately unresolved two-worker TDES stall.  Reduced
+No successful full *multi-subsystem* Linux4Microchip stress run is documented.
+The standalone full crypto release gate is now green after fixing two Linux
+driver bugs; the earlier combined attempt predates those fixes.  Reduced
 Linux4Microchip GEM, USB storage, USB serial and FLEXCOM1 UART gates have older
 passing evidence.  CAN has newer-mainline guest evidence, but no completed
 Linux4Microchip partner-fixture release result.  Repeat each affected gate
@@ -78,20 +86,19 @@ before describing it as current-head coverage.
 Do these steps before starting another device model or another operating
 system.
 
-1. Validate the Linux4Microchip `atmel-sha` concurrency patch with the full
-   release profile and classify the independent TDES stall with bounded
-   one-worker/two-worker diagnostics.  Do not add a QEMU workaround without
-   evidence that the model is at fault.
-2. Run the combined GEM, CAN, UART and crypto stress runner with all host peers
+1. Run the combined GEM, CAN, UART and crypto stress runner with all host peers
    and its independent TAP/JSON oracles.  Then repeat the remaining P0
    consumers, starting with disposable USB mass storage.
-3. Finish with one AT91Bootstrap to U-Boot to disk-root Linux4Microchip boot
+2. Finish with one AT91Bootstrap to U-Boot to disk-root Linux4Microchip boot
    that also exercises GEM traffic and leaves `-d unimp,guest_errors` empty.
-4. Add quiescent whole-machine migration at the documented partner barriers,
+3. Add quiescent whole-machine migration at the documented partner barriers,
    then carefully controlled in-flight migration.
-5. Only after those gates are green, take the next bounded implementation
-   slice.  Keep Linux4Microchip as the primary OS; NetBSD, FreeBSD and other
-   guests and the separate newer-mainline matrix are deliberately deferred.
+4. In parallel, the physical-board agent can run the safe crypto validation in
+   `artifacts/linux4microchip-crypto-fixes-20260827/REAL-HARDWARE-TESTS.md`.
+5. Only after the remaining integration gates are green, take the next bounded
+   implementation slice.  Keep Linux4Microchip as the primary OS; NetBSD,
+   FreeBSD and other guests and the separate newer-mainline matrix are
+   deliberately deferred.
 
 ### Focused build and host tests
 
@@ -196,6 +203,7 @@ workspace-local inputs include:
 /home/karl/linux-work/qemu-SAM9X75/t/linux4microchip-2026.04-rootfs.ext4
 /home/karl/linux-work/qemu-SAM9X75/t/at91bootstrap-v4.0.13-prosd-validation-20260826/build/binaries/sam9x7-sdcardboot-uboot-4.0.13.elf
 /home/karl/linux-work/qemu-SAM9X75/t/LINUX4SAM_USERSPACE_STRESS_MATRIX_20260826.md
+/home/karl/linux-work/qemu-SAM9X75/artifacts/linux4microchip-crypto-fixes-20260827/
 ```
 
 The 554,696,704-byte plain `.img` is the immutable official image, the
@@ -224,8 +232,9 @@ Read these tracked files in this order:
 3. `tests/guest/at91/linux4sam/stress-runner/README.rst`
    - concurrent GEM, CAN, UART, crypto, CPU, memory and filesystem pressure.
 4. `tests/guest/at91/linux4sam/crypto-consumer/README.rst`
-   - exact AF_ALG/XDMAC coverage and the Linux4Microchip `atmel-sha`
-     concurrency bug that still needs physical-board confirmation.
+   - exact AF_ALG/XDMAC coverage and the Linux `atmel-sha` state-restoration
+     and upstream `atmel-tdes` uninitialized-allocation bugs; both fixes still
+     need physical-board confirmation.
 5. `tests/guest/at91/linux4sam/network-partner/README.rst` and
    `tests/guest/at91/linux4sam/can-partner/README.rst`
    - real external peers and data-integrity oracles.
@@ -297,17 +306,20 @@ ADMA NOP issue.
 ### P1: known Linux work, kept separate from QEMU
 
 - The Linux4Microchip `atmel-sha` concurrent HMAC state-restoration fix must be
-  validated with the full AF_ALG stress profile on QEMU and physical silicon
-  before upstream submission.
-- A separate two-worker TDES run stalls before completing any TDES job.  It is
-  not yet classified as a Linux or QEMU bug.  First compare TDES-only runs with
-  one and two workers, then capture worker stacks/wchan, TDES and XDMAC IRQ
-  deltas, DMA-engine state, and TDES plus active-channel registers before any
-  recovery write.  Repeat the same consumer on silicon before changing QEMU.
-  The preserved investigation is in
-  `/home/karl/linux-work/qemu-SAM9X75/artifacts/linux4sam-atmel-sha-fix-20260826/UNRESOLVED-TDES-CONCURRENCY.md`.
-- The full SHA patch evidence is beside it in
-  `/home/karl/linux-work/qemu-SAM9X75/artifacts/linux4sam-atmel-sha-fix-20260826/VALIDATION.md`.
+  validated on physical silicon before upstream submission.  It already
+  passes the complete QEMU AF_ALG release profile.
+- The TDES stall is classified as an upstream Linux bug.  Commit
+  `7608a43d8f2e` accidentally changed zeroed allocation to
+  `devm_kmalloc()`, leaving `TDES_FLAGS_BUSY` and DMA configuration
+  uninitialized.  The one-line `devm_kzalloc()` fix passed the targeted
+  two-worker run and the complete QEMU release profile; Linux 7.2 still has
+  the bug.  Run the packaged 20-cold-boot silicon repeatability gate, then
+  prepare upstream submission.
+- The two-patch series, fixed `zImage`, diagnosis, QEMU evidence and physical
+  procedure are in
+  `/home/karl/linux-work/qemu-SAM9X75/artifacts/linux4microchip-crypto-fixes-20260827/`.
+- The older, pre-classification evidence remains in
+  `/home/karl/linux-work/qemu-SAM9X75/artifacts/linux4sam-atmel-sha-fix-20260826/`.
 - The Linux `i2c-at91` driver configures XDMAC before reading
   `atmel,fifo-size`; the documented 12-byte receive case can stall with three
   bytes left.  Validate the ordering fix on the board.  Do not weaken QEMU to
@@ -377,11 +389,12 @@ build or evidence directory.
 
 The current-head SAM9X75, LAN8840, ADC, UDPHS and UART regressions and the
 two-session Linux4Microchip UDPHS g_serial reconnect gate are complete.  The
-immediate task is to validate the atmel-sha concurrency patch with its full
-release profile and classify the separate two-worker TDES stall.  Then run
-the combined GEM, CAN, UART, crypto, CPU, memory and filesystem stress gate
-and continue through the remaining P0 Linux4Microchip consumer matrix.  Keep
-other operating systems deferred.
+Atmel SHA/TDES Linux fixes and complete standalone crypto release profile are
+also validated in QEMU; read the dated crypto-fixes artifact and do not add a
+QEMU workaround for those Linux bugs.  The immediate task is the combined
+GEM, CAN, UART, crypto, CPU, memory and filesystem stress gate, followed by
+the remaining P0 Linux4Microchip consumer matrix.  Keep other operating
+systems deferred.
 
 Use the r5 hardware handoff only for sanitized evidence, safety rules and
 physical-test design because its software head is older than current main.
