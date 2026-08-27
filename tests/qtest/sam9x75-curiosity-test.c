@@ -1858,7 +1858,8 @@ static uint32_t usart_wait_fifo_level(QTestState *qts, uint64_t base,
             "(level 0x%08x)", expected, level);
 }
 
-static QTestState *qtest_init_with_flexcom0_serial(int *sock_fd)
+static QTestState *qtest_init_with_flexcom0_serial_args(const char *extra,
+                                                        int *sock_fd)
 {
     g_autofree char *sock_dir = NULL;
     g_autofree char *sock_path = NULL;
@@ -1871,14 +1872,19 @@ static QTestState *qtest_init_with_flexcom0_serial(int *sock_fd)
     server_fd = qtest_socket_server(sock_path);
 
     qts = qtest_initf("-chardev socket,id=s1,path=%s "
-                      "-serial null -serial chardev:s1 %s",
-                      sock_path, SAM9X75_MACHINE);
+                      "-serial null -serial chardev:s1 %s %s",
+                      sock_path, SAM9X75_MACHINE, extra);
     *sock_fd = accept(server_fd, NULL, NULL);
     g_assert_cmpint(*sock_fd, >=, 0);
     close(server_fd);
     unlink(sock_path);
     rmdir(sock_dir);
     return qts;
+}
+
+static QTestState *qtest_init_with_flexcom0_serial(int *sock_fd)
+{
+    return qtest_init_with_flexcom0_serial_args("", sock_fd);
 }
 
 static void usart_assert_no_serial_data(int sock_fd)
@@ -4101,6 +4107,7 @@ static void test_flexcom_usart_hwhs_fifo_rts(void)
                                US_FMR_RXFTHRES2(1);
     const uint8_t input[] = { 0x11, 0x22, 0x33, 0x44, 0x55 };
     QTestState *qts;
+    uint64_t character_ns;
     int sock_fd;
     unsigned int i;
 
@@ -4111,6 +4118,7 @@ static void test_flexcom_usart_hwhs_fifo_rts(void)
     qtest_writel(qts, base + US_BRGR, 217);
     qtest_writel(qts, base + US_CR, US_CR_FIFOEN | US_CR_RXEN);
     qtest_writel(qts, base + US_FMR, fifo_mode);
+    character_ns = usart_cycles_to_ns(qts, 5, 16 * 217 * 10);
     g_assert_cmphex(qtest_readl(qts, base + US_FMR), ==, fifo_mode);
     g_assert_false(qtest_get_irq(qts, 0));
 
@@ -4118,11 +4126,13 @@ static void test_flexcom_usart_hwhs_fifo_rts(void)
         g_assert_cmpint(send(sock_fd, &input[i], 1, 0), ==, 1);
         usart_wait_fifo_level(qts, base, 0, i + 1);
         g_assert_false(qtest_get_irq(qts, 0));
+        qtest_clock_step(qts, character_ns);
     }
 
     g_assert_cmpint(send(sock_fd, &input[2], 1, 0), ==, 1);
     usart_wait_fifo_level(qts, base, 0, 3);
     g_assert_true(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, character_ns);
 
     /* FRTSC owns the pin; software commands only update their latent state. */
     qtest_writel(qts, base + US_CR, US_CR_RTSDIS);
@@ -4137,6 +4147,7 @@ static void test_flexcom_usart_hwhs_fifo_rts(void)
     for (i = 3; i < ARRAY_SIZE(input); i++) {
         g_assert_cmpint(send(sock_fd, &input[i], 1, 0), ==, 1);
         usart_wait_fifo_level(qts, base, 0, i - 1);
+        qtest_clock_step(qts, character_ns);
     }
     g_assert_true(qtest_get_irq(qts, 0));
 
@@ -4341,6 +4352,7 @@ static void test_flexcom_usart_fifo_loopback_and_timeout(void)
 
 static void test_flexcom_usart_chardev(void)
 {
+    const uint8_t input[] = { 0xa5, 0x5a };
     QTestState *qts;
     uint64_t character_ns;
     uint8_t value;
@@ -4355,11 +4367,18 @@ static void test_flexcom_usart_chardev(void)
                  US_CR_RXEN | US_CR_TXEN);
     character_ns = usart_cycles_to_ns(qts, 5, 16 * 217 * 10);
 
-    value = 0xa5;
-    g_assert_cmpint(send(sock_fd, &value, 1, 0), ==, 1);
+    g_assert_cmpint(send(sock_fd, input, sizeof(input), 0), ==,
+                    sizeof(input));
     usart_wait_status(qts, SAM9X7_USART0_BASE, US_INT_RXRDY);
     g_assert_cmphex(qtest_readb(qts, SAM9X7_USART0_BASE + US_RHR), ==,
-                    value);
+                    input[0]);
+    qtest_clock_step(qts, character_ns - 1);
+    g_assert_false(qtest_readl(qts, SAM9X7_USART0_BASE + US_CSR) &
+                   US_INT_RXRDY);
+    qtest_clock_step(qts, 1);
+    usart_wait_status(qts, SAM9X7_USART0_BASE, US_INT_RXRDY);
+    g_assert_cmphex(qtest_readb(qts, SAM9X7_USART0_BASE + US_RHR), ==,
+                    input[1]);
 
     qtest_writeb(qts, SAM9X7_USART0_BASE + US_THR, 0x3c);
     qtest_clock_step(qts, character_ns);
@@ -4368,6 +4387,63 @@ static void test_flexcom_usart_chardev(void)
 
     close(sock_fd);
     qtest_quit(qts);
+}
+
+static void test_flexcom_usart_chardev_migration(void)
+{
+    const uint8_t source_input[] = { 0xa5, 0x5a };
+    const uint8_t target_input = source_input[1];
+    QTestState *from;
+    QTestState *to;
+    uint64_t character_ns;
+    uint64_t elapsed_ns;
+    int64_t from_clock;
+    int from_fd;
+    int to_fd;
+
+    from = qtest_init_with_flexcom0_serial_args("", &from_fd);
+    to = qtest_init_with_flexcom0_serial_args("-incoming defer", &to_fd);
+    pmc_write_pcr(from, 5, PMC_PCR_EN);
+    qtest_writel(from, SAM9X7_USART0_BASE + US_MR, US_MR_NORMAL);
+    qtest_writel(from, SAM9X7_USART0_BASE + US_BRGR, 217);
+    qtest_writel(from, SAM9X7_USART0_BASE + US_CR, US_CR_RXEN);
+    character_ns = usart_cycles_to_ns(from, 5, 16 * 217 * 10);
+    elapsed_ns = character_ns / 2;
+    g_assert_cmpuint(elapsed_ns, >, 0);
+
+    g_assert_cmpint(send(from_fd, source_input, sizeof(source_input), 0), ==,
+                    sizeof(source_input));
+    usart_wait_status(from, SAM9X7_USART0_BASE, US_INT_RXRDY);
+    g_assert_cmphex(qtest_readb(from, SAM9X7_USART0_BASE + US_RHR), ==,
+                    source_input[0]);
+    g_assert_cmpint(send(to_fd, &target_input, 1, 0), ==, 1);
+    from_clock = qtest_clock_step(from, elapsed_ns);
+    g_assert_false(qtest_readl(from, SAM9X7_USART0_BASE + US_CSR) &
+                   US_INT_RXRDY);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_cmphex(qtest_readl(to, SAM9X7_USART0_BASE + US_MR), ==,
+                    US_MR_NORMAL);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_USART0_BASE + US_BRGR), ==, 217);
+    g_assert_cmpint(qtest_clock_set(to, from_clock), ==, from_clock);
+    g_assert_false(qtest_readl(to, SAM9X7_USART0_BASE + US_CSR) &
+                   US_INT_RXRDY);
+    qtest_clock_step(to, character_ns - elapsed_ns - 1);
+    g_assert_false(qtest_readl(to, SAM9X7_USART0_BASE + US_CSR) &
+                   US_INT_RXRDY);
+    qtest_clock_step(to, 1);
+    usart_wait_status(to, SAM9X7_USART0_BASE, US_INT_RXRDY);
+    g_assert_cmphex(qtest_readb(to, SAM9X7_USART0_BASE + US_RHR), ==,
+                    target_input);
+
+    close(to_fd);
+    close(from_fd);
+    qtest_quit(to);
+    qtest_quit(from);
 }
 
 static void test_flexcom_usart_migration(void)
@@ -24965,6 +25041,8 @@ int main(int argc, char **argv)
                    test_flexcom_usart_fifo_loopback_and_timeout);
     qtest_add_func("sam9x75/flexcom-usart/chardev",
                    test_flexcom_usart_chardev);
+    qtest_add_func("sam9x75/flexcom-usart/chardev-migration",
+                   test_flexcom_usart_chardev_migration);
     qtest_add_func("sam9x75/flexcom-usart/migration",
                    test_flexcom_usart_migration);
     qtest_add_func("sam9x75/flexcom-usart/xdmac-and-mode-gating",

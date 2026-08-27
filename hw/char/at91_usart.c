@@ -304,6 +304,14 @@ static uint64_t at91_usart_character_ns(AT91USARTState *s)
     return MAX(clock_ticks_to_ns(at91_usart_baud_clock(s), cycles), 1);
 }
 
+static uint64_t at91_usart_rx_character_ns(AT91USARTState *s)
+{
+    uint64_t cycles = at91_usart_bit_cycles(s) *
+                      at91_usart_character_bits(s);
+
+    return MAX(clock_ticks_to_ns(at91_usart_baud_clock(s), cycles), 1);
+}
+
 static void at91_usart_update_parameters(AT91USARTState *s)
 {
     QEMUSerialSetParams params;
@@ -772,10 +780,13 @@ static int at91_usart_can_receive(void *opaque)
     if (!at91_usart_clocked(s)) {
         return 0;
     }
+    if (timer_pending(s->rx_spacing_timer)) {
+        return 0;
+    }
     if ((s->mode & US_MR_CHMODE_MASK) == US_MR_CHMODE_REMOTE) {
         return 1;
     }
-    return s->receiver_enabled ? limit - s->rx_count : 0;
+    return s->receiver_enabled ? MIN(1U, limit - s->rx_count) : 0;
 }
 
 static void at91_usart_receive(void *opaque, const uint8_t *buf, int size)
@@ -783,9 +794,22 @@ static void at91_usart_receive(void *opaque, const uint8_t *buf, int size)
     AT91USARTState *s = opaque;
     int i;
 
+    g_assert(size <= 1);
     for (i = 0; i < size; i++) {
         at91_usart_receive_value(s, buf[i]);
     }
+    if (size) {
+        timer_mod_ns(s->rx_spacing_timer,
+                     qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                     at91_usart_rx_character_ns(s));
+    }
+}
+
+static void at91_usart_rx_spacing_elapsed(void *opaque)
+{
+    AT91USARTState *s = opaque;
+
+    qemu_chr_fe_accept_input(&s->chr);
 }
 
 static void at91_usart_event(void *opaque, QEMUChrEvent event)
@@ -950,6 +974,7 @@ static void at91_usart_reset_receiver(AT91USARTState *s)
     s->receiver_enabled = false;
     s->timeout_running = false;
     s->timeout_waiting = false;
+    timer_del(s->rx_spacing_timer);
     timer_del(s->timeout_timer);
     s->status &= ~(US_INT_RXRDY | US_INT_OVRE | US_INT_FRAME |
                    US_INT_PARE);
@@ -983,6 +1008,7 @@ static void at91_usart_write_control(AT91USARTState *s, uint32_t value)
     if (value & US_CR_RXDIS) {
         s->receiver_enabled = false;
         s->timeout_running = false;
+        timer_del(s->rx_spacing_timer);
         timer_del(s->timeout_timer);
     } else if (value & US_CR_RXEN) {
         s->receiver_enabled = true;
@@ -1344,6 +1370,7 @@ static void at91_usart_set_enabled(void *opaque, int n, int level)
     s->flexcom_enabled = level;
     if (!level) {
         timer_del(s->tx_timer);
+        timer_del(s->rx_spacing_timer);
         timer_del(s->timeout_timer);
     } else {
         at91_usart_refresh_tiocm(s, true);
@@ -1375,6 +1402,7 @@ static void at91_usart_clock_changed(void *opaque, ClockEvent event)
 
     if (!at91_usart_clocked(s)) {
         timer_del(s->tx_timer);
+        timer_del(s->rx_spacing_timer);
         timer_del(s->timeout_timer);
     } else {
         at91_usart_start_tx(s);
@@ -1391,6 +1419,7 @@ static void at91_usart_reset(DeviceState *dev)
     AT91USARTState *s = AT91_USART(dev);
 
     timer_del(s->tx_timer);
+    timer_del(s->rx_spacing_timer);
     timer_del(s->timeout_timer);
     timer_del(s->modem_status_poll);
     s->mode = US_MR_RESET;
@@ -1464,6 +1493,9 @@ static int at91_usart_post_load(void *opaque, int version_id)
         /* Older streams used effective CTS as the named GPIO level. */
         s->cts_gpio_level = s->cts_level;
     }
+    if (version_id < 4) {
+        timer_del(s->rx_spacing_timer);
+    }
 
     s->mode &= US_MR_MODE_MASK;
     s->interrupt_mask &= US_INT_VALID_MASK;
@@ -1498,13 +1530,16 @@ static int at91_usart_post_load(void *opaque, int version_id)
     } else if (!timer_pending(s->timeout_timer) && at91_usart_clocked(s)) {
         at91_usart_schedule_timeout(s);
     }
+    if (!s->receiver_enabled || !at91_usart_clocked(s)) {
+        timer_del(s->rx_spacing_timer);
+    }
     at91_usart_update_parameters(s);
     return 0;
 }
 
 static const VMStateDescription at91_usart_vmstate = {
     .name = TYPE_AT91_USART,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .post_load = at91_usart_post_load,
     .fields = (const VMStateField[]) {
@@ -1562,6 +1597,7 @@ static const VMStateDescription at91_usart_vmstate = {
         VMSTATE_CLOCK(pclk, AT91USARTState),
         VMSTATE_CLOCK(gclk, AT91USARTState),
         VMSTATE_TIMER_PTR(tx_timer, AT91USARTState),
+        VMSTATE_TIMER_PTR_V(rx_spacing_timer, AT91USARTState, 4),
         VMSTATE_TIMER_PTR(timeout_timer, AT91USARTState),
         VMSTATE_END_OF_LIST()
     },
@@ -1623,6 +1659,8 @@ static void at91_usart_init(Object *obj)
                                  s, ClockUpdate);
     s->tx_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                at91_usart_tx_complete, s);
+    s->rx_spacing_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                       at91_usart_rx_spacing_elapsed, s);
     s->timeout_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                     at91_usart_timeout, s);
     s->modem_status_poll = timer_new_ns(QEMU_CLOCK_VIRTUAL,

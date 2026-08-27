@@ -30,6 +30,7 @@ struct AT91USARTState {
     qemu_irq rx_request;
     qemu_irq rts;
     QEMUTimer *tx_timer;
+    QEMUTimer *rx_spacing_timer;
     QEMUTimer *timeout_timer;
     QEMUTimer *modem_status_poll;
 
