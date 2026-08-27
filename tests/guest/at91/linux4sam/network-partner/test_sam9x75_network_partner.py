@@ -146,6 +146,32 @@ class StreamTests(unittest.TestCase):
 
 
 class UtilityTests(unittest.TestCase):
+    def test_tcp_idle_timeout_is_positive_and_configurable(self):
+        parser = partner.build_parser()
+        peer = parser.parse_args([
+            "peer", "--tcp-idle-timeout", "180",
+        ])
+        guest = parser.parse_args([
+            "guest", "--tcp-idle-timeout", "240",
+        ])
+        self.assertEqual(peer.tcp_idle_timeout, 180)
+        self.assertEqual(guest.tcp_idle_timeout, 240)
+        self.assertEqual(parser.parse_args(["peer"]).tcp_idle_timeout, 30)
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["peer", "--tcp-idle-timeout", "0"])
+
+    def test_tcp_idle_timeout_reaches_socket_reads(self):
+        sock = mock.Mock()
+        sock.recv.return_value = b"x"
+        with mock.patch.object(
+                partner, "remaining_timeout", return_value=17.0) as timeout:
+            self.assertEqual(
+                partner.recv_exact(sock, 1, 123.0, idle_timeout=180.0),
+                b"x",
+            )
+        timeout.assert_called_once_with(123.0, 180.0)
+        sock.settimeout.assert_called_once_with(17.0)
+
     def test_udp_boundary_payloads_fit_ethernet_mtu(self):
         session = 1
         for sequence in range(len(partner.UDP_PAYLOAD_SIZES)):
@@ -303,7 +329,8 @@ class LocalPeerTests(unittest.TestCase):
                 bind="127.0.0.1", tcp_port=blocker.getsockname()[1],
                 udp_port=0, sessions=1, streams=2,
                 bytes_per_direction=1024, udp_packets=4, timeout=10,
-                fragments=(1,), ready_file=str(ready), json=str(result),
+                tcp_idle_timeout=30, fragments=(1,),
+                ready_file=str(ready), json=str(result),
             )
             try:
                 self.assertEqual(partner.peer_main(args), 1)

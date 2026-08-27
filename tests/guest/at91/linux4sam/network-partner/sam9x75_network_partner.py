@@ -206,10 +206,10 @@ def remaining_timeout(deadline, maximum=None):
     return remaining
 
 
-def recv_exact(sock, length, deadline):
+def recv_exact(sock, length, deadline, idle_timeout=30.0):
     result = bytearray()
     while len(result) < length:
-        sock.settimeout(remaining_timeout(deadline, 30.0))
+        sock.settimeout(remaining_timeout(deadline, idle_timeout))
         data = sock.recv(length - len(result))
         if not data:
             raise EOFError("connection closed during a frame")
@@ -217,12 +217,14 @@ def recv_exact(sock, length, deadline):
     return bytes(result)
 
 
-def recv_frame(sock, deadline):
-    header = recv_exact(sock, HEADER.size, deadline)
+def recv_frame(sock, deadline, idle_timeout=30.0):
+    header = recv_exact(sock, HEADER.size, deadline, idle_timeout)
     length = HEADER.unpack(header)[7]
     if length > MAX_PAYLOAD:
         raise ProtocolError("payload exceeds protocol maximum")
-    return Frame.decode(header + recv_exact(sock, length, deadline))
+    return Frame.decode(
+        header + recv_exact(sock, length, deadline, idle_timeout)
+    )
 
 
 def send_fragmented(sock, data, fragments):
@@ -275,11 +277,12 @@ def send_tcp_data(sock, session, stream, direction, total, fragments,
     }
 
 
-def receive_tcp_data(sock, session, stream, direction, total, deadline):
+def receive_tcp_data(sock, session, stream, direction, total, deadline,
+                     idle_timeout=30.0):
     started = time.monotonic()
     frames = 0
     for sequence, length in iter_lengths(total, TCP_CHUNK_SIZES):
-        frame = recv_frame(sock, deadline)
+        frame = recv_frame(sock, deadline, idle_timeout)
         validate_frame(
             frame, Kind.DATA, direction, stream, session, sequence,
         )
@@ -292,7 +295,7 @@ def receive_tcp_data(sock, session, stream, direction, total, deadline):
                 (stream, sequence),
             )
         frames += 1
-    done = recv_frame(sock, deadline)
+    done = recv_frame(sock, deadline, idle_timeout)
     validate_frame(done, Kind.DONE, direction, stream, session, frames)
     if done.payload != DONE_PAYLOAD.pack(total, frames):
         raise ProtocolError("DONE counters mismatch")
@@ -304,7 +307,7 @@ def receive_tcp_data(sock, session, stream, direction, total, deadline):
 
 
 def run_duplex(sock, session, stream, send_direction, receive_direction,
-               total, fragments, deadline):
+               total, fragments, deadline, idle_timeout=30.0):
     sender_result = queue.Queue()
 
     def sender():
@@ -325,6 +328,7 @@ def run_duplex(sock, session, stream, send_direction, receive_direction,
     try:
         received = receive_tcp_data(
             sock, session, stream, receive_direction, total, deadline,
+            idle_timeout=idle_timeout,
         )
     except BaseException as receive_error:
         try:
@@ -347,7 +351,7 @@ def run_duplex(sock, session, stream, send_direction, receive_direction,
 
 
 def server_tcp_connection(sock, hello, total, streams, fragments, gate,
-                          deadline):
+                          deadline, idle_timeout=30.0):
     stream = hello.stream
     validate_frame(
         hello, Kind.HELLO, Direction.GUEST_TO_PEER, stream, hello.session, 0,
@@ -362,13 +366,15 @@ def server_tcp_connection(sock, hello, total, streams, fragments, gate,
     result = run_duplex(
         sock, hello.session, stream, Direction.PEER_TO_GUEST,
         Direction.GUEST_TO_PEER, total, fragments, deadline,
+        idle_timeout=idle_timeout,
     )
     result["stream"] = stream
     return result
 
 
 def client_tcp_connection(host, port, session, stream, total, streams,
-                          fragments, gate, deadline, source=None):
+                          fragments, gate, deadline, source=None,
+                          idle_timeout=30.0):
     sock = socket.create_connection(
         (host, port), timeout=remaining_timeout(deadline, 10.0),
         source_address=(source, 0) if source else None,
@@ -380,7 +386,7 @@ def client_tcp_connection(host, port, session, stream, total, streams,
             Kind.HELLO, Direction.GUEST_TO_PEER, stream, session, 0,
             hello_payload,
         ).encode())
-        reply = recv_frame(sock, deadline)
+        reply = recv_frame(sock, deadline, idle_timeout)
         validate_frame(
             reply, Kind.HELLO_ACK, Direction.PEER_TO_GUEST, stream,
             session, 0,
@@ -391,6 +397,7 @@ def client_tcp_connection(host, port, session, stream, total, streams,
         result = run_duplex(
             sock, session, stream, Direction.GUEST_TO_PEER,
             Direction.PEER_TO_GUEST, total, fragments, deadline,
+            idle_timeout=idle_timeout,
         )
         result["stream"] = stream
         return result
@@ -399,7 +406,7 @@ def client_tcp_connection(host, port, session, stream, total, streams,
 
 
 def run_tcp_client(host, port, session, streams, total, fragments, deadline,
-                   source=None):
+                   source=None, idle_timeout=30.0):
     gate = threading.Barrier(streams)
     results = queue.Queue()
 
@@ -407,7 +414,7 @@ def run_tcp_client(host, port, session, streams, total, fragments, deadline,
         try:
             value = client_tcp_connection(
                 host, port, session, stream, total, streams, fragments, gate,
-                deadline, source,
+                deadline, source=source, idle_timeout=idle_timeout,
             )
             results.put((stream, True, value))
         except BaseException as exc:
@@ -441,7 +448,8 @@ def run_tcp_client(host, port, session, streams, total, fragments, deadline,
     return sorted(values, key=lambda item: item["stream"])
 
 
-def run_tcp_server(listener, streams, total, fragments, deadline):
+def run_tcp_server(listener, streams, total, fragments, deadline,
+                   idle_timeout=30.0):
     gate = threading.Barrier(streams + 1)
     results = queue.Queue()
     workers = []
@@ -452,6 +460,7 @@ def run_tcp_server(listener, streams, total, fragments, deadline):
         try:
             value = server_tcp_connection(
                 sock, hello, total, streams, fragments, gate, deadline,
+                idle_timeout=idle_timeout,
             )
             results.put((hello.stream, True, value))
         except BaseException as exc:
@@ -467,7 +476,7 @@ def run_tcp_server(listener, streams, total, fragments, deadline):
         listener.settimeout(remaining_timeout(deadline))
         sock, _address = listener.accept()
         try:
-            hello = recv_frame(sock, deadline)
+            hello = recv_frame(sock, deadline, idle_timeout)
             if hello.kind != Kind.HELLO:
                 raise ProtocolError("first TCP frame is not HELLO")
             if session is None:
@@ -918,6 +927,7 @@ def peer_main(args):
             "streams": args.streams,
             "bytes_per_direction_per_stream": args.bytes_per_direction,
             "udp_packets": args.udp_packets,
+            "tcp_idle_timeout": args.tcp_idle_timeout,
         },
         "sessions": [],
     }
@@ -946,6 +956,7 @@ def peer_main(args):
             session, tcp = run_tcp_server(
                 listener, args.streams, args.bytes_per_direction,
                 args.fragments, deadline,
+                idle_timeout=args.tcp_idle_timeout,
             )
             if session in seen_sessions:
                 raise ProtocolError("guest reused a session identifier")
@@ -1015,6 +1026,7 @@ def guest_main(args):
             "streams": args.streams,
             "bytes_per_direction_per_stream": args.bytes_per_direction,
             "udp_packets": args.udp_packets,
+            "tcp_idle_timeout": args.tcp_idle_timeout,
         },
         "tests": [],
     }
@@ -1072,7 +1084,8 @@ def guest_main(args):
             "concurrent full-duplex deterministic TCP integrity",
             lambda: run_tcp_client(
                 args.host, args.tcp_port, session, args.streams,
-                args.bytes_per_direction, args.fragments, deadline, source,
+                args.bytes_per_direction, args.fragments, deadline,
+                source=source, idle_timeout=args.tcp_idle_timeout,
             ),
         )
         udp = guest_case(
@@ -1185,6 +1198,10 @@ def build_parser():
     peer.add_argument("--udp-packets", type=positive_int, default=128)
     peer.add_argument("--timeout", type=positive_int, default=900)
     peer.add_argument(
+        "--tcp-idle-timeout", type=positive_int, default=30,
+        help="maximum idle seconds within one TCP frame (default: 30)",
+    )
+    peer.add_argument(
         "--fragments", type=parse_fragment_pattern,
         default=DEFAULT_FRAGMENTS,
     )
@@ -1203,6 +1220,10 @@ def build_parser():
     )
     guest.add_argument("--udp-packets", type=positive_int, default=128)
     guest.add_argument("--timeout", type=positive_int, default=900)
+    guest.add_argument(
+        "--tcp-idle-timeout", type=positive_int, default=30,
+        help="maximum idle seconds within one TCP frame (default: 30)",
+    )
     guest.add_argument("--link-timeout", type=positive_int, default=60)
     guest.add_argument("--udp-timeout", type=float, default=2.0)
     guest.add_argument("--udp-retries", type=int, default=4)

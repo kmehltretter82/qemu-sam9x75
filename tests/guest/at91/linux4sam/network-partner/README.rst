@@ -143,6 +143,11 @@ passes the interface explicitly to ``ping``, and requires ``ethtool -i`` to
 identify the ``macb`` driver.  Traffic on another guest NIC therefore cannot
 satisfy this test accidentally.  The 900-second guest timeout is intentional:
 TCG can require several minutes for the default 2 MiB in each direction.
+Each TCP frame also has a 30-second idle bound by default, so a stalled stream
+fails well before that overall deadline.  For the deliberately oversubscribed
+combined stress profile, pass the same larger bounded value (for example
+``--tcp-idle-timeout 300``) to both roles; this does not change byte, frame,
+CRC, sequence or overall-deadline validation.
 
 Optional iperf3 phase
 ---------------------

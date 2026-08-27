@@ -48,7 +48,11 @@ The crypto fixture is intentionally pinned to the Linux4Microchip 6.18 image;
 see its README for the newer-mainline AF_ALG compatibility boundary.
 
 Start all requested host peers before QEMU.  For the example, use the normal
-commands from their READMEs with matching arguments and sessions.  Then run
+commands from their READMEs with matching arguments and sessions.  Give both
+network roles ``--tcp-idle-timeout 300``: the standalone default remains a
+strict 30 seconds, while one TCP frame can legitimately wait longer when the
+single emulated CPU is shared with all consumers and three integrity loads.
+The overall 900-second network deadline remains authoritative.  Then run
 inside Linux4SAM::
 
   mkdir -p /root/sam9x75-stress/logs /root/sam9x75-stress/scratch
