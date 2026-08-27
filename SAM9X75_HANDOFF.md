@@ -17,6 +17,8 @@ this file current whenever a new checkpoint is committed.
   (`tests/guest: add SAM9X75 gadget serial self-loop`)
 - Preceding UDPHS implementation checkpoint: `4aebd91443`
   (`hw/usb: support multi-packet AT91 UDPHS transfers`)
+- Latest exact validation source: `8af5934947`
+  (`docs: add SAM9X75 continuation handoff`)
 
 The documentation-only commit containing this handoff at current `main`
 follows the two implementation commits above.  Do not reset to `49e71bb614`;
@@ -45,27 +47,23 @@ build directory or workspace test artifact.
 
 ## What is validated at this checkpoint
 
-The source at `49e71bb614` compiled cleanly in `build-verify-serial`.
+The source at `8af5934947` compiled cleanly in `build-verify-serial`.
 
-- The focused SAM9X75 UDPHS qtest group passed **20/20**.
-- The UART partner host suite passed **16/16**.
-- `git diff --check` was clean.
+- The complete SAM9X75 Curiosity qtest binary passed **237/237**.
+- The LAN8840 EEPROM and separate SAM9X7 ADC suites passed **7/7** and
+  **9/9** respectively.
+- The focused UDPHS subgroup passed **20/20**, and the UART partner host suite
+  passed **16/16**.
+- `git diff --check` was clean before the validation-only run.
 - Independent reviews of the UDPHS deferred-DMA, replacement-SETUP and
   migration changes found no remaining memory-safety or migration-ABI defect.
-- The earlier exact Linux4Microchip 2026.04 UDPHS gadget-serial loop passed
-  with a frozen `a867911380-dirty` QEMU binary at
-  both protocol endpoints: TAP `1..7`, 27 DATA frames and 27 acknowledgements
-  in each direction, a 65,536-byte boundary frame, 210,478 wire bytes, no
-  protocol error, advancing UHPHS and UDPHS interrupts, and an empty QEMU
-  `unimp,guest_errors` log.
-
-Important qualification: the exact Linux4Microchip gadget-serial run predates
-both final commits and is **not** current-head validation.  The focused qtests
-cover the later edge-case changes, but the full guest run must be repeated at
-current `main` before the latest UDPHS slice is called integration-complete.
-
-The complete SAM9X75 qtest suite was not repeated after the final two commits.
-Do not quote the older **202/202** result as a current-head result.
+- The exact Linux4Microchip 2026.04 UDPHS gadget-serial loop passed at that
+  same source revision in two fresh sessions separated by `g_serial` removal
+  and reload.  All four endpoints passed TAP `1..7`, 27 DATA frames and 27
+  acknowledgements, the 65,536-byte boundary and 210,478 received wire bytes
+  with no protocol error.  USB device number 3 disappeared and re-enumerated
+  as 4; UHPHS and UDPHS interrupts advanced in both sessions, Linux's global
+  error count stayed zero, and QEMU's `unimp,guest_errors` log was empty.
 
 No successful full combined Linux4Microchip stress run is documented.  The
 prior combined attempt reached the known SHA/HMAC problem; a later patched run
@@ -80,26 +78,18 @@ before describing it as current-head coverage.
 Do these steps before starting another device model or another operating
 system.
 
-1. Rebuild current `main`; repeat the focused UDPHS and UART host suites, then
-   run the SAM9X75 Curiosity, LAN8840 and separate SAM9X7 ADC qtests.
-2. Repeat the exact Linux4Microchip 2026.04 `g_serial` self-loop at current
-   `main`, following the repository recipe named below.  Save a fresh evidence
-   directory; do not overwrite the prior passing run.
-3. Exercise disconnect/re-enumeration by unloading and reloading `g_serial`,
-   rediscovering the host `ttyACM` node, and completing a second protocol
-   session.
-4. Validate the Linux4Microchip `atmel-sha` concurrency patch with the full
+1. Validate the Linux4Microchip `atmel-sha` concurrency patch with the full
    release profile and classify the independent TDES stall with bounded
    one-worker/two-worker diagnostics.  Do not add a QEMU workaround without
    evidence that the model is at fault.
-5. Run the combined GEM, CAN, UART and crypto stress runner with all host peers
+2. Run the combined GEM, CAN, UART and crypto stress runner with all host peers
    and its independent TAP/JSON oracles.  Then repeat the remaining P0
    consumers, starting with disposable USB mass storage.
-6. Finish with one AT91Bootstrap to U-Boot to disk-root Linux4Microchip boot
+3. Finish with one AT91Bootstrap to U-Boot to disk-root Linux4Microchip boot
    that also exercises GEM traffic and leaves `-d unimp,guest_errors` empty.
-7. Add quiescent whole-machine migration at the documented partner barriers,
+4. Add quiescent whole-machine migration at the documented partner barriers,
    then carefully controlled in-flight migration.
-8. Only after those gates are green, take the next bounded implementation
+5. Only after those gates are green, take the next bounded implementation
    slice.  Keep Linux4Microchip as the primary OS; NetBSD, FreeBSD and other
    guests and the separate newer-mainline matrix are deliberately deferred.
 
@@ -157,7 +147,8 @@ env TMPDIR=/home/karl/linux-work/qemu-SAM9X75/t/qtest-tmp \
   ./build-verify-serial/tests/qtest/sam9x7-adc-test
 ```
 
-Record the resulting test count rather than assuming it is still 202.
+At the validated source the Curiosity binary reports 237 tests.  Record the
+resulting count on every later revision rather than assuming it remains 237.
 
 ### Exact Linux4Microchip UDPHS gate
 
@@ -172,28 +163,24 @@ It connects the modeled UDPHS gadget to UHPHS Port B using
 `ttyACM` endpoint.  Both TAP plans, both JSON reports, interrupt deltas,
 post-test `dmesg`, and the QEMU diagnostic log are release artifacts.
 
-The previous passing evidence and a reusable Expect-based launch recipe are
-workspace-local at:
+The current two-session passing evidence, frozen binary, input hashes,
+Expect-based launch recipe and result summary are workspace-local at:
 
 ```text
-/home/karl/linux-work/qemu-SAM9X75/t/udphs-gserial-e2e-20260826/post-queued-nak-fix/
+/home/karl/linux-work/qemu-SAM9X75/t/udphs-gserial-e2e-20260827/current-main-8af5934947-two-session/
 ```
 
-Copy the recipe into a new directory such as:
+For a future source revision, copy only the runner, guest helper and current
+tracked fixture into a new, empty evidence directory.  Never overwrite the
+passing result or copy its ``payload/results`` directory.  Freeze and hash the
+newly built QEMU binary before boot.
 
-```text
-/home/karl/linux-work/qemu-SAM9X75/t/udphs-gserial-e2e-20260827/current-main/
-```
-
-Update every embedded binary, payload and output path to current `main`.
-Use the old Expect script only as a launch template: its guest helper selects
-the first `ttyACM` node, uses a fixed session and performs only one session.
-Replace that with the tracked README's VID:PID `0525:a4a7` identity discovery,
-choose fresh nonzero session IDs, and extend it through the second
-reload/re-enumeration session.
-Archive `git rev-parse HEAD`, the complete QEMU command line, image hashes,
-guest `uname -a`, TAP, JSON, interrupt snapshots, new `dmesg` lines and
-`qemu.log`.  Do not report a pass merely because both TTY devices appeared.
+The current runner uses VID:PID `0525:a4a7` identity discovery, fresh session
+IDs, proof of a complete detach interval, and a changed USB device number on
+reload.  Preserve those gates.  Archive `git rev-parse HEAD`, the complete
+QEMU command line, image hashes, guest `uname -a`, TAP, JSON, interrupt
+snapshots, new `dmesg` lines and `qemu.log`.  Do not report a pass merely
+because both TTY devices appeared.
 
 ## Linux4Microchip images and local evidence
 
@@ -272,8 +259,6 @@ ADMA NOP issue.
 
 ### P0: current Linux4Microchip integration
 
-- Repeat the exact UDPHS `g_serial` self-loop and reconnect gate at current
-  `main`.
 - Run UHPHS with a newly created disposable USB mass-storage image through the
   real Linux block/filesystem stack; verify payload hashes, clean unmount and
   a host-side filesystem check.
@@ -390,12 +375,13 @@ support matrix/execution roadmap and the relevant Linux4SAM consumer README.
 Verify the Git head and preserve unrelated/untracked files.  Do not stage any
 build or evidence directory.
 
-The immediate task is to rebuild current main, repeat the 20-test UDPHS group
-and 16-test UART partner suite, and run the full SAM9X75, LAN8840 and SAM9X7
-ADC qtests.  Then rerun the exact Linux4Microchip 2026.04 UDPHS g_serial loop plus
-disconnect/re-enumeration at current main.  Save new TAP, JSON, IRQ, dmesg and
-unimp/guest_errors evidence on disk, then proceed through the P0
-Linux4Microchip consumer matrix.  Keep other operating systems deferred.
+The current-head SAM9X75, LAN8840, ADC, UDPHS and UART regressions and the
+two-session Linux4Microchip UDPHS g_serial reconnect gate are complete.  The
+immediate task is to validate the atmel-sha concurrency patch with its full
+release profile and classify the separate two-worker TDES stall.  Then run
+the combined GEM, CAN, UART, crypto, CPU, memory and filesystem stress gate
+and continue through the remaining P0 Linux4Microchip consumer matrix.  Keep
+other operating systems deferred.
 
 Use the r5 hardware handoff only for sanitized evidence, safety rules and
 physical-test design because its software head is older than current main.

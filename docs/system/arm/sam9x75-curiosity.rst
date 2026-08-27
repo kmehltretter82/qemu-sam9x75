@@ -584,6 +584,16 @@ Support matrix
        board's active-high VBUS sense on PC8.  The controller, shared-port mux,
        VBUS path and DMA behavior still need comparison with the physical
        board.
+
+       The exact Linux4Microchip 2026.04 guest has exercised the optional
+       UDPHS-to-UHPHS Port B bridge with the real ``atmel_usba_udc``,
+       ``g_serial`` and ``cdc_acm`` drivers at QEMU ``8af5934947``.  Two fresh
+       full-duplex sessions separated by ``g_serial`` removal and reload each
+       passed at both endpoints through the 65,536-byte boundary.  The
+       identity-matched ``0525:a4a7`` device disappeared and re-enumerated at
+       480 Mb/s with USB device number 3 advancing to 4; both controller IRQs
+       advanced in both sessions, Linux reported no protocol or global error,
+       and QEMU's ``unimp,guest_errors`` log stayed empty.
    * - I2C board devices
      - Initial
      - The exact MCP16502TAB-E/S8B PMIC is present on FLEXCOM6 with OTP

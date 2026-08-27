@@ -252,7 +252,7 @@ load the UDC before its legacy gadget function, and wait for enumeration::
   modprobe g_serial
 
   n=0
-  while test ! -e /sys/class/tty/ttyGS0/device && test "$n" -lt 30; do
+  while test ! -c /dev/ttyGS0 && test "$n" -lt 30; do
       sleep 1
       n=$((n + 1))
   done
@@ -349,15 +349,15 @@ and the UHPHS schedule.  Check that traffic reached both controllers::
   test "$UHPHS_AFTER" -gt "$UHPHS_BEFORE"
   test "$UDPHS_AFTER" -gt "$UDPHS_BEFORE"
   dmesg | tail -n +$((DMESG_LINES + 1)) > /root/udphs-acm-dmesg-new.txt
-  ! grep -Ei 'usb.*(error|fail|timeout|stall)|dma.*error' \
+  ! grep -Ei 'usb.*(error|fail|timeout|stall|reset)|dma.*error' \
       /root/udphs-acm-dmesg-new.txt
 
-The exact Linux4Microchip 2026.04 self-loop gate passed TAP plan ``1..7`` at
-both endpoints.  Each side validated 27 DATA frames and 27 acknowledgements,
-including the 65,536-byte boundary, with 210,478 received wire bytes and no
-CRC, framing, discard, duplicate or protocol error.  The shared UHPHS IRQ
-advanced by 6,361, the UDPHS UDC IRQ by 3,903, Linux reported no error IRQ,
-and QEMU's ``unimp,guest_errors`` log remained empty.
+At QEMU ``8af5934947``, the exact Linux4Microchip 2026.04 first session passed
+TAP plan ``1..7`` at both endpoints.  Each side validated 27 DATA frames and
+27 acknowledgements, including the 65,536-byte boundary, with 210,478
+received wire bytes and no CRC, framing, discard, duplicate or protocol
+error.  The shared UHPHS IRQ advanced by 6,435, the UDPHS UDC IRQ by 3,898,
+and Linux's global error count stayed zero.
 
 After the guest and peer processes have closed both ttys, a second session
 checks a deliberate pull-up disconnect and fresh enumeration.  Unload only
@@ -407,6 +407,15 @@ Do not reuse the old host tty name: Linux may allocate a different
 An expected disconnect message is not an error.  Require the second pair of
 TAP/JSON reports, no unexpected reset or DMA error, and an empty QEMU
 ``unimp,guest_errors`` log after a clean shutdown.
+
+That same exact-head run passed the reconnect gate.  The identity-matched
+device and tty disappeared after ``rmmod``, both module operations returned
+zero, and the fresh device reused Port B and ``ttyACM0`` while its USB device
+number changed from 3 to 4.  Both second-session endpoints again passed TAP
+``1..7``, all 27 frames and acknowledgements, the 65,536-byte boundary and
+210,478 received wire bytes.  UHPHS and UDPHS interrupts advanced by 6,347
+and 3,893 respectively, the Linux error count remained zero, and QEMU's
+diagnostic log was empty.
 
 This first gate is bounded data-path and reconnect coverage.  SOF timing,
 suspend/resume, isochronous transfers and migration with in-flight USB
