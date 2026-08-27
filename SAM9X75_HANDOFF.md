@@ -96,6 +96,19 @@ The QEMU implementation at `1851743e84` compiled cleanly in
   `/home/karl/linux-work/qemu-SAM9X75/t/linux4microchip-tdes-diag-build-20260827/arch/arm/boot/zImage`
   and the CAN-enabled DTB is
   `/home/karl/linux-work/qemu-SAM9X75/t/linux4microchip-2026.04-can01.dtb`.
+- The larger UHPHS Linux4Microchip gate passed at repository checkpoint
+  `9f424139aa`.  A fresh 768 MiB ext4 disk carried a deterministic 256 MiB
+  file across three high-speed enumerations.  All three SHA-256 values were
+  `486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0`.
+  One clean detach/re-attach preserved the hash and a rename; a second detach
+  occurred only after the guest had opened the unmounted raw block device and
+  produced the required `EIO`.  The final re-attach preserved the hash,
+  UHPHS reached 45,877 interrupts, QEMU's diagnostic log was exactly empty,
+  and host `e2fsck -fn` passed.
+- Preserve the authoritative UHPHS evidence at
+  `/home/karl/linux-work/qemu-SAM9X75/t/linux4microchip-uhphs-20260827/release-r4/`
+  and the separately packaged Linux EHCI fix at
+  `/home/karl/linux-work/qemu-SAM9X75/artifacts/linux4microchip-ehci-fix-20260827/`.
 - A preceding run exposed a generic writable-vvfat assertion in
   `block/vvfat.c:2758` after the guest created and renamed a result tree.  This
   is not a SAM9X75 USB-model failure.  Keep directory-export payloads
@@ -118,9 +131,9 @@ The QEMU implementation at `1851743e84` compiled cleanly in
 Do these steps before starting another device model or another operating
 system.
 
-1. Extend the remaining P0 external-path coverage: a larger disposable UHPHS
-   mass-storage hash/hotplug run, independent host connections for both CAN
-   controllers, the 10,000-frame CAN profile and separate `canfdtest`.
+1. Extend the remaining P0 external-path coverage with independent host
+   connections for both CAN controllers, the 10,000-frame CAN profile and a
+   separate `canfdtest` interoperability run.
 2. Add quiescent whole-machine migration at the documented partner barriers,
    then carefully controlled in-flight migration.  The USART receive timer
    itself already has qtest migration coverage.
@@ -235,6 +248,7 @@ workspace-local inputs include:
 /home/karl/linux-work/qemu-SAM9X75/t/at91bootstrap-v4.0.13-prosd-validation-20260826/build/binaries/sam9x7-sdcardboot-uboot-4.0.13.elf
 /home/karl/linux-work/qemu-SAM9X75/t/LINUX4SAM_USERSPACE_STRESS_MATRIX_20260826.md
 /home/karl/linux-work/qemu-SAM9X75/artifacts/linux4microchip-crypto-fixes-20260827/
+/home/karl/linux-work/qemu-SAM9X75/artifacts/linux4microchip-ehci-fix-20260827/
 ```
 
 The 554,696,704-byte plain `.img` is the immutable official image, the
@@ -299,11 +313,12 @@ ADMA NOP issue.
 
 ### P0: current Linux4Microchip integration
 
-- The basic UHPHS writable-media gate is achieved by the combined run's fresh
-  128 MiB ext4 result disk: Linux mounted it read/write, copied the evidence,
-  synced and cleanly unmounted it, and host `e2fsck -fn` passed.  Still run a
-  larger payload-hash and hotplug/error profile on a newly created disposable
-  disk.
+- The larger UHPHS writable-media and hotplug/error gate is achieved.  The
+  authoritative `release-r4` used a fresh 768 MiB ext4 disk, preserved one
+  deterministic 256 MiB payload hash across three high-speed enumerations,
+  returned `EIO` for removal during a proven-active raw read while unmounted,
+  recovered the same hash, and passed host `e2fsck -fn`.  Preserve the raw
+  evidence and use a new disposable disk for any extension.
 - The concurrent GEM/LAN8840, CAN-FD, FLEXCOM UART, crypto, CPU, memory and
   filesystem gate is achieved at `1851743e84`.  Preserve `release-r4` and its
   independent host/guest TAP and JSON.  The two-iteration/two-worker crypto
@@ -341,6 +356,15 @@ ADMA NOP issue.
 
 ### P1: known Linux work, kept separate from QEMU
 
+- Generic Linux `ehci_bus_resume()` writes `CTRLDSSEGMENT` even when
+  `HCCPARAMS` does not advertise 64-bit addressing.  EHCI 1.0 forbids that
+  access; the initial run path already guards it.  Applying the same
+  capability guard to resume removed two QEMU guest-error diagnostics and
+  passed the full UHPHS release gate.  Upstream Linux master inspected on
+  2026-08-27 still has the bug.  The patch, exact config, fixed `zImage` and
+  evidence map are in
+  `/home/karl/linux-work/qemu-SAM9X75/artifacts/linux4microchip-ehci-fix-20260827/`.
+  Do not silence QEMU's standards-based diagnostic.
 - The Linux4Microchip `atmel-sha` concurrent HMAC state-restoration fix must be
   validated on physical silicon before upstream submission.  It already
   passes the complete QEMU AF_ALG release profile.
@@ -432,9 +456,12 @@ UDPHS g_serial reconnect gate and standalone crypto release profile are also
 green.  The current-head AT91Bootstrap-to-U-Boot-to-FIT-to-ext4-root plus GEM
 gate is green at repository checkpoint 9665c77235; preserve its release-r4
 evidence.  Read the dated crypto-fixes artifact and do not add a QEMU
-workaround for the two Linux driver bugs.  The immediate tasks are the
-remaining external CAN and larger UHPHS USB profiles, followed by quiescent
-and controlled in-flight migration.  Keep other operating systems deferred.
+workaround for the documented Linux driver bugs.  The larger UHPHS
+write/hash, clean hotplug and proven-active raw-read removal gate is also
+green; preserve its release-r4 evidence and the dated EHCI-fix artifact.  The
+immediate tasks are independent external CAN paths, the 10,000-frame and
+`canfdtest` profiles, followed by quiescent and controlled in-flight
+migration.  Keep other operating systems deferred.
 
 Use the r5 hardware handoff only for sanitized evidence, safety rules and
 physical-test design because its software head is older than current main.

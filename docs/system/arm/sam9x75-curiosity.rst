@@ -988,6 +988,27 @@ payload ``fat:ro:`` and attach a separate disposable raw ext4 USB disk for
 results.  The passing combined gate copied its reports there, unmounted it,
 powered down cleanly and passed host-side ``e2fsck -fn``.
 
+At repository checkpoint ``9f424139aa`` (machine binary source
+``1851743e84``), a larger Linux4Microchip UHPHS gate used a fresh 768 MiB ext4
+disk and a deterministic 256 MiB payload.  One clean delete/re-add preserved
+the complete payload hash and a synced rename.  With the filesystem then
+cleanly unmounted, a second removal occurred after the guest had opened the
+raw block device; the outstanding read returned the expected ``EIO``.  A
+third high-speed enumeration recovered the renamed file with the same
+SHA-256,
+``486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0``.
+The shared UHPHS interrupt reached 45,877, Linux's global interrupt-error
+count stayed zero, QEMU's ``unimp,guest_errors`` log was empty and host
+``e2fsck -fn`` passed.
+
+That hotplug profile also exposed a generic Linux EHCI bug.  EHCI 1.0 says
+software cannot write ``CTRLDSSEGMENT`` when ``HCCPARAMS`` does not advertise
+64-bit addressing.  Linux checks the capability in ``ehci_run()`` but wrote
+the register unconditionally in ``ehci_bus_resume()``.  Applying the same
+``HCC_64BIT_ADDR`` guard to the resume path removed the otherwise reproducible
+QEMU guest-error diagnostic.  Do not weaken the QEMU model to hide that guest
+driver error.
+
 UDPHS is present, but a cable is not created automatically and QEMU does not
 yet expose it directly to a physical host.  For controller development, its
 raw-token bridge can be linked to an emulated USB host bus; this loopback
