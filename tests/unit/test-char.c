@@ -8,6 +8,7 @@
 #include "qemu/sockets.h"
 #include "chardev/char-fe.h"
 #include "chardev/char-serial.h"
+#include "chardev/char-socket.h"
 #include "system/system.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-char.h"
@@ -1506,6 +1507,78 @@ static void char_socket_client_test(gconstpointer opaque)
     g_free(optstr);
 }
 
+static void char_socket_stop_main_loop(void *opaque)
+{
+    quit = true;
+}
+
+static void char_socket_client_failed_reconnect_test(gconstpointer opaque)
+{
+    SocketAddress *listen_addr = (gpointer)opaque;
+    QIOChannelSocket *listener = qio_channel_socket_new();
+    QIOChannelSocket *server;
+    SocketAddress *addr;
+    g_autofree char *optstr = NULL;
+    QemuOpts *opts;
+    Chardev *chr;
+    SocketChardev *socket_chr;
+    CharFrontend frontend = { 0 };
+    CharSocketTestData data = { .event = -1 };
+    QEMUTimer *stop_timer;
+
+    g_setenv("QTEST_SILENT_ERRORS", "1", 1);
+    qio_channel_socket_listen_sync(listener, listen_addr, 1, &error_abort);
+    addr = qio_channel_socket_get_local_address(listener, &error_abort);
+    g_assert_nonnull(addr);
+    optstr = char_socket_addr_to_opt_str(addr, false,
+                                         ",reconnect-ms=1", false);
+    opts = qemu_opts_parse_noisily(qemu_find_opts("chardev"),
+                                   optstr, true);
+    g_assert_nonnull(opts);
+    chr = qemu_chr_new_from_opts(opts, NULL, &error_abort);
+    qemu_opts_del(opts);
+    g_assert_nonnull(chr);
+    socket_chr = SOCKET_CHARDEV(chr);
+
+    data.fe = &frontend;
+    qemu_chr_fe_init(&frontend, chr, &error_abort);
+    qemu_chr_fe_set_handlers(&frontend, char_socket_can_read,
+                             char_socket_read, char_socket_event,
+                             NULL, &data, NULL, true);
+    server = qio_channel_socket_accept(listener, &error_abort);
+    g_assert_nonnull(server);
+    qemu_chr_wait_connected(chr, &error_abort);
+    g_assert_true(object_property_get_bool(OBJECT(chr), "connected",
+                                           &error_abort));
+    g_assert_cmpint(data.event, ==, CHR_EVENT_OPENED);
+    data.event = -1;
+
+    /* Make every automatic reconnect fail after this live peer vanishes. */
+    qio_channel_shutdown(QIO_CHANNEL(listener),
+                         QIO_CHANNEL_SHUTDOWN_BOTH, &error_abort);
+    object_unref(OBJECT(listener));
+    qio_channel_shutdown(QIO_CHANNEL(server),
+                         QIO_CHANNEL_SHUTDOWN_BOTH, &error_abort);
+    object_unref(OBJECT(server));
+
+    stop_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
+                              char_socket_stop_main_loop, NULL);
+    timer_mod(stop_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 10000);
+    quit = false;
+    while (!socket_chr->connect_err_reported && !quit) {
+        main_loop_wait(false);
+    }
+    timer_del(stop_timer);
+    timer_free(stop_timer);
+
+    g_assert_true(socket_chr->connect_err_reported);
+    g_assert_false(object_property_get_bool(OBJECT(chr), "connected",
+                                            &error_abort));
+    qemu_chr_fe_deinit(&frontend, true);
+    qapi_free_SocketAddress(addr);
+    g_unsetenv("QTEST_SILENT_ERRORS");
+}
+
 static void
 count_closed_event(void *opaque, QEMUChrEvent event)
 {
@@ -2000,10 +2073,16 @@ int main(int argc, char **argv)
     if (has_ipv4) {
         SOCKET_SERVER_TEST(tcp, &tcpaddr);
         SOCKET_CLIENT_TEST(tcp, &tcpaddr);
+        g_test_add_data_func(
+            "/char/socket/client/failed-reconnect-no-yank/tcp",
+            &tcpaddr, char_socket_client_failed_reconnect_test);
     }
 #ifndef WIN32
     SOCKET_SERVER_TEST(unix, &unixaddr);
     SOCKET_CLIENT_TEST(unix, &unixaddr);
+    g_test_add_data_func(
+        "/char/socket/client/failed-reconnect-no-yank/unix",
+        &unixaddr, char_socket_client_failed_reconnect_test);
 #endif
 
     g_test_add_func("/char/udp", char_udp_test);
