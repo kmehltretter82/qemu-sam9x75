@@ -1056,11 +1056,26 @@ SHA-256
 
 The diagnostic log remained clean of SAM9X75 MMIO warnings; it contained one
 generic CMD1, two CMD52 and four CMD5 failed media probes while firmware and
-Linux distinguished the memory-only SD card from MMC/SDIO.  This exact-head
-run did not repeat DHCP or packet exchange, and the base Linux DT did not probe
-GEM.  A future complete integration regression must add current GEM traffic
-without losing the firmware and disk-root results.  ``-kernel`` remains a
-development entry path and is not a substitute for ROM media selection.
+Linux distinguished the memory-only SD card from MMC/SDIO.
+
+At machine source ``1851743e84`` (repository checkpoint ``9665c77235``), the
+firmware path was repeated with the 1 GiB two-partition derivative and current
+GEM traffic.  AT91Bootstrap 4.0.13 loaded U-Boot through SD/ADMA.  U-Boot
+initialized DDR, NAND, MMC, QSPI and GEM, then verified SHA-256 for the kernel,
+base DT, LAN8840 overlay and WILC overlay in the 6,057,012-byte FIT.  Linux
+6.18.17-linux4microchip-2026.04 mounted partition 2 as ext4 root.  The network
+fixture passed guest TAP ``11/11`` and peer TAP ``1/1`` with DHCP, carrier,
+route, ping, 1 MiB full-duplex deterministic TCP and 64 bidirectional UDP
+packets.  It recorded no payload, sequence, retry, stale-response, kernel-
+counter or MAC-statistics error or drop.  A separate USB ext4 evidence disk
+was cleanly unmounted and passed host ``e2fsck -fn``; the QEMU diagnostic log
+was empty.  The SD image was attached with ``snapshot=on`` and its post-run
+SHA-256 remained
+``d657498f3c442a33480c8e917ffe8f10263eea89b9ad8c27111e48f459c947e3``.
+
+Using ``-kernel`` to enter the AT91Bootstrap ELF remains a development
+substitute for the unimplemented mask-ROM media-selection state machine; it
+does not claim genuine RomBOOT.
 
 The populated raw NAND path can be exercised independently with the pinned
 NAND AT91Bootstrap.  Authentic pre-populated PMECC and correction validation

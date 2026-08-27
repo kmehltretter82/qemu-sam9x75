@@ -218,3 +218,14 @@ is Up``, carrier one and IRQ count two.  A three-packet ping and another
 complete TCP/UDP integrity session passed after recovery.  This closes the
 earlier polling-DTB isolation, where an undriven-low PD5 caused an IRQ storm
 and locked Linux in the GPIO mask/unmask path while opening ``eth0``.
+
+On 2026-08-27, the same exact Linux4Microchip release passed from the full
+AT91Bootstrap 4.0.13 to U-Boot to FIT to ext4 disk-root path at QEMU machine
+source ``1851743e84``.  U-Boot verified the kernel, base DT and LAN8840/WILC
+overlay hashes before Linux mounted ``/dev/mmcblk0p2`` as ``/``.  The guest
+passed TAP ``11/11`` and the independent host peer passed ``1/1`` for one
+1 MiB full-duplex TCP stream and 64 bidirectional UDP packets.  Both directions
+transferred exactly 1,048,576 TCP bytes; UDP needed no retry and saw no stale
+response.  Kernel and MAC counters reported no error or drop, the QEMU
+``unimp,guest_errors`` log was empty, the evidence disk passed ``e2fsck -fn``,
+and ``snapshot=on`` preserved the SD image hash.

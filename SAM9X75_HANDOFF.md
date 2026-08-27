@@ -17,11 +17,11 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested source: `1851743e84`
-  (`tests/guest: Make network frame idle bound configurable`)
+- Latest tested repository checkpoint: `9665c77235`
+  (`tests/guest: Record SAM9X75 combined release gate`)
 - `build-verify-serial/qemu-system-arm --version` reports exact source
-  `v11.1.0-417-g1851743e84`; the handoff and proven-timeout updates after that
-  checkpoint do not change the emulated machine.
+  `v11.1.0-417-g1851743e84`; commits through the repository checkpoint after
+  that implementation source change only documentation and test profiles.
 
 Do not reset to an older UDPHS or crypto checkpoint; continue from the tip of
 `main` after fetching.  Verify that all three commits above are present in the
@@ -70,8 +70,8 @@ The QEMU implementation at `1851743e84` compiled cleanly in
 - The exact Linux4Microchip 2026.04 UDPHS gadget-serial loop remains validated
   from its earlier exact-head run: two fresh sessions were separated by
   `g_serial` removal and reload.  All four endpoints passed TAP `1..7`, 27 DATA
-  frames and 27
-  acknowledgements, the 65,536-byte boundary and 210,478 received wire bytes
+  frames and 27 acknowledgements, the 65,536-byte boundary and 210,478 received
+  wire bytes
   with no protocol error.  USB device number 3 disappeared and re-enumerated
   as 4; UHPHS and UDPHS interrupts advanced in both sessions, Linux's global
   error count stayed zero, and QEMU's `unimp,guest_errors` log was empty.
@@ -101,25 +101,32 @@ The QEMU implementation at `1851743e84` compiled cleanly in
   is not a SAM9X75 USB-model failure.  Keep directory-export payloads
   read-only and use a separate disposable raw ext4 result disk as in
   `release-r4`.
+- The full firmware-chain/GEM gate passed from repository checkpoint
+  `9665c77235` using the same machine binary at `1851743e84`.  AT91Bootstrap
+  4.0.13 loaded U-Boot through SD/ADMA; U-Boot initialized DDR, NAND, MMC,
+  QSPI and GEM and verified every selected FIT hash; Linux mounted
+  `/dev/mmcblk0p2` as ext4 `/`.  Guest TAP **11/11** and host TAP **1/1**
+  covered DHCP, LAN8840 carrier, route, ping, 1 MiB deterministic TCP in each
+  direction and 64 bidirectional UDP packets with no retry, stale response,
+  error or drop.  QEMU's diagnostic log was empty, the evidence filesystem
+  passed `e2fsck -fn`, and the snapshot-backed SD hash remained unchanged.
+- The authoritative firmware-chain evidence is workspace-local at
+  `/home/karl/linux-work/qemu-SAM9X75/t/linux4microchip-firmware-gem-20260827/release-r4/`.
 
 ## Immediate continuation order
 
 Do these steps before starting another device model or another operating
 system.
 
-1. Run one AT91Bootstrap-to-U-Boot-to-disk-root Linux4Microchip boot at the
-   current head that also exercises deterministic GEM traffic and leaves
-   `-d unimp,guest_errors` empty.  The passing combined gate used direct
-   `-kernel`, so it does not replace this firmware-chain gate.
-2. Extend the remaining P0 external-path coverage: a larger disposable UHPHS
+1. Extend the remaining P0 external-path coverage: a larger disposable UHPHS
    mass-storage hash/hotplug run, independent host connections for both CAN
    controllers, the 10,000-frame CAN profile and separate `canfdtest`.
-3. Add quiescent whole-machine migration at the documented partner barriers,
+2. Add quiescent whole-machine migration at the documented partner barriers,
    then carefully controlled in-flight migration.  The USART receive timer
    itself already has qtest migration coverage.
-4. In parallel, the physical-board agent can run the safe crypto validation in
+3. In parallel, the physical-board agent can run the safe crypto validation in
    `artifacts/linux4microchip-crypto-fixes-20260827/REAL-HARDWARE-TESTS.md`.
-5. Only after the remaining integration gates are green, take the next bounded
+4. Only after the remaining integration gates are green, take the next bounded
    implementation slice.  Keep Linux4Microchip as the primary OS; NetBSD,
    FreeBSD and other guests and the separate newer-mainline matrix are
    deliberately deferred.
@@ -307,9 +314,11 @@ ADMA NOP issue.
   the 10,000-frame gate and a separate `canfdtest` interoperability run.  Do
   not use the shared bus as proof of two independent external paths, and do
   not request ESI injection from the Linux M_CAN used as its peer.
-- Run normal firmware-to-disk-root boot with `-d unimp,guest_errors`, then
-  include current GEM traffic and confirm the log contains no SAM9X75 model
-  diagnostics.
+- The current-head firmware-to-disk-root plus GEM gate is achieved at
+  repository checkpoint `9665c77235`.  Preserve
+  `linux4microchip-firmware-gem-20260827/release-r4`; do not confuse its
+  `-kernel` entry into AT91Bootstrap with the still-unimplemented mask-ROM
+  media-selection state machine.
 - Add/reset/migrate tests for any divergence found.  Fix the model, not the
   guest device tree, unless the same issue is proven to be a Linux bug.
 
@@ -420,11 +429,12 @@ GEM, both M_CAN controllers, paced FLEXCOM1 UART, all crypto engines, CPU,
 memory, filesystem and a separate UHPHS result disk passed together with an
 empty QEMU diagnostic log.  Preserve the release-r4 evidence.  The two-session
 UDPHS g_serial reconnect gate and standalone crypto release profile are also
-green.  Read the dated crypto-fixes artifact and do not add a QEMU workaround
-for the two Linux driver bugs.  The immediate task is a current-head
-AT91Bootstrap-to-U-Boot-to-disk-root boot with GEM traffic, followed by the
-remaining external CAN, USB and migration gates.  Keep other operating
-systems deferred.
+green.  The current-head AT91Bootstrap-to-U-Boot-to-FIT-to-ext4-root plus GEM
+gate is green at repository checkpoint 9665c77235; preserve its release-r4
+evidence.  Read the dated crypto-fixes artifact and do not add a QEMU
+workaround for the two Linux driver bugs.  The immediate tasks are the
+remaining external CAN and larger UHPHS USB profiles, followed by quiescent
+and controlled in-flight migration.  Keep other operating systems deferred.
 
 Use the r5 hardware handoff only for sanitized evidence, safety rules and
 physical-test design because its software head is older than current main.
