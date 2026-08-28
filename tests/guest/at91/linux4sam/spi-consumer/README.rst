@@ -244,6 +244,49 @@ state on that byte and otherwise consumes the next command's opcode.
 ``sam9x75/sdcard/spi-block-transfer-and-data-migration`` at `0469ae3b29` now covers
 single-block read and write and a migration at a command boundary.
 
+That candidate bug was confirmed and fixed at `a07f50cd94`.  ``data_size``
+bounds every data phase and returns the card to transfer state once
+``data_offset`` reaches it, but it was never migrated.  A destination
+loaded zero, computed ``data_size - data_offset`` as a huge unsigned value,
+served one more byte and declared the phase complete, silently truncating
+the block.  It is now sent in its own subsection, needed only while a phase
+is in progress.  This was a generic ``hw/sd`` fault affecting any host
+controller migrated mid-phase, not only SPI, and
+``sam9x75/sdcard/spi-block-transfer-and-data-migration`` now migrates 100
+bytes into a 512-byte read and requires the remaining 412.
+
+Reset and migration follow-up
+-----------------------------
+
+Two of these are done at `5bcb06b161`:
+``sam9x75/sdcard/spi-reset-and-partial-command-migration`` covers a machine
+reset taken with a command half sent, after which a complete CMD0 is
+accepted with no stale argument bytes, and a migration taken with four of
+six command bytes transferred, which the destination completes.
+
+The release gate still needs qtests that complete SPI-mode card
+initialization and single/multiple-block reads and writes, then migrate
+during a partial response, data read, data write, CRC and stop-command
+phase.
+
+That question is answered.  Tracing the working gate with
+``-trace enable=sdcard_normal_command -trace enable=sdcard_app_command``
+showed the real sequence: ``ACMD41`` reaches ``sd_ready_state`` and
+**CMD10 (SEND_CID) is what advances to** ``sd_transfer_state``, because
+``spi_cmd_SEND_CxD()`` switches state on the grounds that SPI returns the
+CID and CSD on the data lines.  CMD1 is accepted but shares the ACMD41
+handler, so it leaves the card idle, and CMD16 is refused outside transfer
+state.  A direct qtest sequence that omits CMD9 or CMD10 therefore cannot
+reach block I/O, which is what made this look like a model gap.  Evidence:
+``t/linux4microchip-mmc-spi-20260828/trace-r1``.
+
+One further detail costs time if unknown: every command helper must clock
+one extra byte after the R1 answer, because the card returns to its command
+state on that byte and otherwise consumes the next command's opcode.
+
+``sam9x75/sdcard/spi-block-transfer-and-data-migration`` at `0469ae3b29` now covers
+single-block read and write and a migration at a command boundary.
+
 Candidate bug, not yet confirmed: migration taken *inside* a read data
 phase did not resume correctly.  With 100 bytes of a 512-byte block already
 clocked out on the source, the destination continued at byte 48 rather than

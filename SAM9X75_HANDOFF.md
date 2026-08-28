@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `0469ae3b29`
+- Latest tested repository checkpoint: `a07f50cd94`
+  (`hw/sd: Migrate the data-phase size`)
+- Preceding test checkpoint: `0469ae3b29`
   (`tests/qtest/sam9x75: Cover SPI-mode block read, write and migration`)
 - Preceding test checkpoint: `5bcb06b161`
   (`tests/qtest/sam9x75: Cover SPI-mode card reset and partial-command
@@ -400,6 +402,11 @@ that workstation.
   the wire".  Statistics now count the wire length, which also moves a
   64-octet buffer into the 65--127 bucket where silicon puts it.  The fix is
   in the shared Cadence GEM, so the Xilinx boards get it too.
+- A third generic QEMU bug came out of this work, at `a07f50cd94`: `hw/sd` never
+  migrated `data_size`, which bounds every data phase.  A machine migrated
+  mid-transfer served one more byte and then silently truncated the block.
+  Any host controller is affected, not only SPI; it was found by migrating
+  100 bytes into a 512-byte SPI read and is now covered by a qtest.
 - **QSPI and NAND on the tested unit**: JEDEC identity read all ones with no
   MTD device, and no NAND device was found with the shipped device tree.
   Check J10 and J9 (and NAND enablement in that DTB) before treating the
@@ -538,9 +545,9 @@ silicon-confirmed.  Do these steps next.
    gate itself is achieved (above).  Its reset and partial-command migration
    follow-ups are done at `5bcb06b161`, and card initialization, single-block
    read and write and command-boundary migration at `0469ae3b29`.  What remains is
-   multiple-block coverage and migration during a partial response, data or
-   CRC phase -- and the mid-data-phase candidate bug the consumer README
-   records, which should be settled before writing that last one.
+   multiple-block coverage and migration during a partial response or CRC
+   phase.  The mid-data-phase case is done: chasing it found a generic
+   `hw/sd` migration fault, fixed at `a07f50cd94`.
 1a. Prepare upstream submission of the two Linux patches in
    `artifacts/linux4microchip-crypto-fixes-20260827/`; both are now
    hardware-confirmed (see the results section above).
