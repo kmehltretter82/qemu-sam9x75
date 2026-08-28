@@ -753,10 +753,16 @@ Support matrix
        instead: it advances one count per edge, with ``CLKI`` selecting
        which edge, and ``BMR`` routes each XC from a ``TCLK`` pin or from
        another channel's TIOA, so channels chain internally.  TCLK is a
-       named input per channel, which this board also does not route.  The
+       named input per channel, which this board also does not route.
        ``EEVT`` selects TIOB or any of XC0--XC2 as the external event, so a
        chained TIOA or a ``TCLK`` pin can drive one channel's waveform from
-       another.  The common TCB model does not yet cover QDEC.  The SAM9X7 ADC is
+       another.  ``QDEN`` enables the quadrature decoder on channel 0's TIOA and
+       TIOB with ``SWAP``, ``INVA`` and ``INVB``, reporting direction in
+       ``DIR`` and reversals in ``DIRCHG``, and with ``POSEN`` driving the
+       position counter, ``EDGPHA`` selecting one or both phases.  ``QERR``
+       is never reported: it marks both phases moving at once, which cannot
+       be observed because phase inputs arrive one GPIO event at a time.
+       Speed measurement and the index input remain.  The SAM9X7 ADC is
        mapped at ``0xf804c000`` with its eight physical inputs, PID/AIC source
        19, peripheral and generic clocks, and XDMAC receive request 40.  It
        models numeric and programmable channel sequences, software, external,

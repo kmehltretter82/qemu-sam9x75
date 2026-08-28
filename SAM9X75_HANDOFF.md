@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `76011576d9`
+- Latest tested repository checkpoint: `e1c545f5e4`
+  (`hw/timer/at91_tcb: Add the quadrature decoder`)
+- Preceding implementation checkpoint: `76011576d9`
   (`hw/timer/at91_tcb: Accept XC0-XC2 as external event sources`)
 - Preceding implementation checkpoint: `46d4328430`
   (`hw/timer/at91_tcb: Clock channels from XC0-XC2`)
@@ -604,8 +606,13 @@ silicon-confirmed.  Do these steps next.
    trigger, the waveform-mode external event, all four `WAVSEL` behaviours
    including UPDOWN, and XC edge clocking with the `BMR` cross-connect, and
    every XDMAC request has a source.
-   What remains there is QDEC.  The XC external-event sources are accepted
-   at `76011576d9`.  The edge-counting rework that
+   QDEC landed at `e1c545f5e4`, which was the last TCB gap on the list.  What is
+   left in that model is narrow and was never on it: SPEEDEN speed
+   measurement and the index input, which count rotations on channel 1.
+   `QERR` is deliberately absent -- it needs both phases to move at once,
+   and phase inputs arrive one GPIO event at a time, so a branch for it
+   would be untestable dead code.  The XC external-event sources are
+   accepted at `76011576d9`.  The edge-counting rework that
    TCLK and the `BMR` cross-connect needed is done at `46d4328430`: an XC-clocked
    channel advances per edge and keeps its own counter, reusing the same
    boundary handling as the ptimer path, so QDEC now has the counting
@@ -1025,7 +1032,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 266/266 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 267/267 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two
 full Curiosity runs on 2026-08-28 aborted at QEMU startup; that was host
 memory pressure, not a model fault, and the rule it implies is below.
