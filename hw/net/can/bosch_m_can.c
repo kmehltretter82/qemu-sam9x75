@@ -120,7 +120,7 @@ enum {
 /* Error counter thresholds from ISO 11898-1 error confinement. */
 #define MCAN_ERROR_WARNING_LIMIT  96
 #define MCAN_ERROR_PASSIVE_LIMIT  128
-#define MCAN_BUS_OFF_LIMIT        256
+#define MCAN_ERROR_COUNTER_MAX    255
 #define MCAN_TX_ERROR_STEP        8
 
 #define MCAN_PSR_LEC_MASK   MAKE_64BIT_MASK(0, 3)
@@ -339,7 +339,7 @@ static void bosch_m_can_update_error_state(BoschMCanState *s)
         s->rec >= MCAN_ERROR_PASSIVE_LIMIT) {
         next |= MCAN_PSR_EP;
     }
-    if (s->tec >= MCAN_BUS_OFF_LIMIT) {
+    if (s->tx_error_overflow) {
         next |= MCAN_PSR_BO;
     }
 
@@ -373,8 +373,15 @@ static void bosch_m_can_record_ack_error(BoschMCanState *s)
 {
     MCAN_REG(s, MCAN_PSR) = deposit32(MCAN_REG(s, MCAN_PSR), 0, 3,
                                       MCAN_PSR_LEC_ACK);
-    if (s->tec < MCAN_BUS_OFF_LIMIT) {
-        s->tec = MIN(s->tec + MCAN_TX_ERROR_STEP, MCAN_BUS_OFF_LIMIT);
+    /*
+     * Measured on a SAM9X75: after the attempt that crosses 255 the ECR
+     * still reads 248, i.e. the counter keeps its last in-range value while
+     * the controller enters bus-off.
+     */
+    if (s->tec + MCAN_TX_ERROR_STEP > MCAN_ERROR_COUNTER_MAX) {
+        s->tx_error_overflow = true;
+    } else {
+        s->tec += MCAN_TX_ERROR_STEP;
     }
     bosch_m_can_count_error(s);
     bosch_m_can_raise_ir(s, MCAN_IR_PEA);
@@ -409,6 +416,7 @@ static void bosch_m_can_recover_from_bus_off(BoschMCanState *s)
 {
     s->tec = 0;
     s->rec = 0;
+    s->tx_error_overflow = false;
     bosch_m_can_update_error_state(s);
 }
 
@@ -1404,12 +1412,9 @@ static uint64_t bosch_m_can_read(void *opaque, hwaddr offset,
     case MCAN_ECR: {
         uint32_t value = MCAN_REG(s, offset) & MCAN_ECR_CEL_MASK;
 
-        /*
-         * While bus-off, TEC would count recessive-bit sequences during
-         * recovery; the model reports it saturated instead.
-         */
+        /* TEC keeps its last in-range value through bus-off and INIT. */
         value = deposit32(value, MCAN_ECR_TEC_SHIFT, MCAN_ECR_TEC_LEN,
-                          MIN(s->tec, 0xff));
+                          s->tec);
         value = deposit32(value, MCAN_ECR_REC_SHIFT, MCAN_ECR_REC_LEN,
                           MIN(s->rec, 0x7f));
         if (s->rec >= MCAN_ERROR_PASSIVE_LIMIT) {
@@ -1640,6 +1645,7 @@ static void bosch_m_can_reset(DeviceState *dev)
     s->timestamp_counter = 0;
     s->tec = 0;
     s->rec = 0;
+    s->tx_error_overflow = false;
     /* Shared system SRAM is deliberately not cleared by peripheral reset. */
     bosch_m_can_update_irq(s);
 }
@@ -1733,7 +1739,11 @@ static int bosch_m_can_post_load(void *opaque, int version_id)
     MCAN_REG(s, MCAN_RWD) &= MCAN_RWD_WDC_MASK;
     MCAN_REG(s, MCAN_TOCV) &= 0xffff;
     MCAN_REG(s, MCAN_TSU_TSCFG) &= MCAN_TSCFG_MASK;
-    s->tec = MIN(s->tec, MCAN_BUS_OFF_LIMIT);
+    if (s->tec > MCAN_ERROR_COUNTER_MAX) {
+        /* A version-3 stream stored 256 for bus-off; keep silicon's value. */
+        s->tec = MCAN_ERROR_COUNTER_MAX + 1 - MCAN_TX_ERROR_STEP;
+        s->tx_error_overflow = true;
+    }
     s->rec = MIN(s->rec, 0x7f);
     if (MCAN_REG(s, MCAN_CCCR) & MCAN_CCCR_TEST) {
         MCAN_REG(s, MCAN_TEST) &= MCAN_TEST_WRITABLE_MASK;
@@ -1784,7 +1794,7 @@ static int bosch_m_can_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_bosch_m_can = {
     .name = TYPE_BOSCH_M_CAN,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .post_load = bosch_m_can_post_load,
     .fields = (const VMStateField[]) {
@@ -1803,6 +1813,7 @@ static const VMStateDescription vmstate_bosch_m_can = {
         VMSTATE_UINT16(timestamp_counter, BoschMCanState),
         VMSTATE_UINT16_V(tec, BoschMCanState, 3),
         VMSTATE_UINT8_V(rec, BoschMCanState, 3),
+        VMSTATE_BOOL_V(tx_error_overflow, BoschMCanState, 4),
         VMSTATE_CLOCK(hclk, BoschMCanState),
         VMSTATE_CLOCK(cclk, BoschMCanState),
         VMSTATE_END_OF_LIST(),

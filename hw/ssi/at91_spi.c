@@ -122,6 +122,16 @@ enum {
 #define SPI_TPMR_MASK           0x0000000f
 #define SPI_TPHR_MASK           0x0000007f
 
+/*
+ * SPI_VERSION at +0xfc.  The SAM9X7 data sheet marks the word reserved,
+ * but the Linux spi-atmel driver reads it to choose the FIFO/XDMAC path
+ * over the legacy PDC window.  Measured read-only on a SAM9X75 Curiosity
+ * with FLEXCOM4 runtime-active: 0x00000410, stable, no abort; a 16-bit read
+ * returned 0x0410 and an 8-bit read 0x10.
+ */
+#define SPI_VERSION             0xfc
+#define SPI_VERSION_SAM9X7      0x00000410
+
 #define SPI_WPMR_WPEN           BIT(0)
 #define SPI_WPMR_WPITEN         BIT(1)
 #define SPI_WPMR_WPCREN         BIT(2)
@@ -852,8 +862,10 @@ static uint32_t at91_spi_raw_read(AT91SPIState *s, hwaddr reg)
     case SPI_IDR:
     case SPI_TDR:
         return 0;
+    case SPI_VERSION:
+        return SPI_VERSION_SAM9X7;
     default:
-        /* 0xfc and other reserved words are zero on the SAM9X7 model. */
+        /* Other reserved words read as zero on the SAM9X7 model. */
         return 0;
     }
 }
@@ -955,6 +967,7 @@ static void at91_spi_write(void *opaque, hwaddr offset, uint64_t value,
     case SPI_FLR:
     case SPI_TPHR:
     case SPI_WPSR:
+    case SPI_VERSION:
         break;
     default:
         qemu_log_mask(LOG_GUEST_ERROR,

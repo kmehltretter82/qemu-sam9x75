@@ -503,6 +503,7 @@
 #define SPI_IDR                 0x18
 #define SPI_IMR                 0x1c
 #define SPI_CSR(n)              (0x30 + (n) * 4)
+#define SPI_VERSION             0xfc
 #define SPI_FMR                 0x40
 #define SPI_FLR                 0x44
 #define SPI_CMPR                0x48
@@ -4545,7 +4546,16 @@ static void test_flexcom_spi_registers_irq_and_protection(void)
     g_assert_cmphex(qtest_readl(qts, base + SPI_FMR), ==, 0);
     g_assert_cmphex(qtest_readl(qts, base + SPI_FLR), ==, 0);
     g_assert_cmphex(qtest_readl(qts, base + SPI_WPMR), ==, 0);
-    g_assert_cmphex(qtest_readl(qts, base + 0xfc), ==, 0);
+    /*
+     * SPI_VERSION was measured read-only on silicon as 0x410 with byte
+     * lanes; the driver selects FIFO/XDMAC from it instead of legacy PDC.
+     */
+    g_assert_cmphex(qtest_readl(qts, base + SPI_VERSION), ==, 0x410);
+    g_assert_cmphex(qtest_readw(qts, base + SPI_VERSION), ==, 0x0410);
+    g_assert_cmphex(qtest_readb(qts, base + SPI_VERSION), ==, 0x10);
+    g_assert_cmphex(qtest_readb(qts, base + SPI_VERSION + 1), ==, 0x04);
+    qtest_writel(qts, base + SPI_VERSION, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, base + SPI_VERSION), ==, 0x410);
 
     qtest_writel(qts, base + SPI_MR, UINT32_MAX);
     qtest_writel(qts, base + SPI_CSR(0), UINT32_MAX);
@@ -24380,15 +24390,16 @@ static void test_mcan_error_confinement_and_bus_off(void)
     g_assert_true(qtest_readl(qts, base + MCAN_CCCR) & MCAN_CCCR_INIT);
     g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) & MCAN_IR_ERROR_STATE,
                     ==, MCAN_IR_BO);
+    /* Silicon reads 248 after bus-off: the counter never carries past 255. */
     g_assert_cmpuint(MCAN_ECR_TEC(qtest_readl(qts, base + MCAN_ECR)), ==,
-                     0xff);
+                     248);
     g_assert_cmphex(qtest_readl(qts, base + MCAN_TXBRP), ==, BIT(0));
     qtest_writel(qts, base + MCAN_IR, MCAN_IR_BO | MCAN_IR_PEA);
 
-    /* While stopped in INIT, further requests change nothing. */
+    /* While stopped in INIT, further requests change nothing; TEC holds. */
     mcan_attempt_tx(qts, base, 4);
     g_assert_cmpuint(MCAN_ECR_TEC(qtest_readl(qts, base + MCAN_ECR)), ==,
-                     0xff);
+                     248);
     g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) &
                     (MCAN_IR_PEA | MCAN_IR_ERROR_STATE), ==, 0);
 

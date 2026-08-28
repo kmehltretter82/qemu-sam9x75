@@ -67,6 +67,12 @@ struct BoschMCanState {
      */
     uint16_t tec;
     uint8_t rec;
+    /*
+     * Set when a transmit error would carry TEC past 255.  Silicon keeps the
+     * last in-range value (248 was measured after one unacknowledged frame)
+     * and reports bus-off separately, so TEC itself never overflows.
+     */
+    bool tx_error_overflow;
 
     bool resources_ready;
 };
