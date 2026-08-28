@@ -746,10 +746,12 @@ Support matrix
        driven by ``BCPB``, ``BCPC``, ``BSWTRG`` and ``BEEVT``, except while
        ``EEVT`` selects it as the external event, when it is an input and
        the channel does not drive it.  The common
+       ``WAVSEL`` selects all four waveform behaviours: the UP modes restart
+       at the period end while the UPDOWN modes reverse there and again at
+       zero, so RA and RB compare once on each leg.  The common
        TCB model does not yet cover TCLK inputs, the
        ``BMR`` XC0--XC2 cross-connect that can clock one channel from
-       another's TIOA or supply an external event, up/down modes or
-       QDEC.  The SAM9X7 ADC is
+       another's TIOA or supply an external event, or QDEC.  The SAM9X7 ADC is
        mapped at ``0xf804c000`` with its eight physical inputs, PID/AIC source
        19, peripheral and generic clocks, and XDMAC receive request 40.  It
        models numeric and programmable channel sequences, software, external,
