@@ -1279,6 +1279,10 @@
 #define TCB_INT_ETRGS           BIT(7)
 #define TCB_CMR_ABETRG          BIT(10)
 #define TCB_CMR_ETRGEDG(v)      ((uint32_t)(v) << 8)
+#define TCB_CMR_AEEVT(v)        ((uint32_t)(v) << 20)
+#define TCB_CMR_ENETRG          BIT(12)
+#define TCB_CMR_EEVT(v)         ((uint32_t)(v) << 10)
+#define TCB_CMR_EEVTEDG(v)      ((uint32_t)(v) << 8)
 #define TCB_CMR_ACPA(v)         ((uint32_t)(v) << 16)
 #define TCB_CMR_ACPC(v)         ((uint32_t)(v) << 18)
 #define TCB_CMR_ASWTRG(v)       ((uint32_t)(v) << 22)
@@ -7635,6 +7639,75 @@ static void test_tcb_tioa_waveform_and_capture(void)
  * ETRGEDG selects the edge.  The trigger restarts the counter, reports
  * itself in the read-to-clear ETRGS bit and drives XDMAC request 49.
  */
+/*
+ * A waveform-mode external event acts on TIOA through AEEVT, and restarts
+ * the counter as well when ENETRG is set.  Only TIOB is modeled as a
+ * source; the counter effect is what ENETRG gates, not the TIOA effect.
+ */
+static void test_tcb_external_event(void)
+{
+    const uint64_t ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
+    const char *tcb = "/machine/soc/tcb";
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t counter;
+    bool tioa;
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MCKR, 1);
+    pmc_write_pcr(qts, 17, PMC_PCR_EN);
+    qtest_irq_intercept_out_named(qts, tcb, "tioa");
+
+    /* TIOB rising sets TIOA; ENETRG clear leaves the counter alone. */
+    qtest_writel(qts, ch0 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE | TCB_CMR_WAVESEL_UP_RC |
+                 TCB_CMR_EEVT(0) | TCB_CMR_EEVTEDG(1) | TCB_CMR_AEEVT(1));
+    qtest_writel(qts, ch0 + TCB_RC, 40000);
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_clock_step(qts, 120000);
+    counter = qtest_readl(qts, ch0 + TCB_CV);
+    g_assert_cmpuint(counter, >, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_set_irq_in(qts, tcb, "tiob-in", 0, 1);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_cmpuint(qtest_readl(qts, ch0 + TCB_CV), >=, counter);
+
+    /* The falling edge is not selected, so TIOA holds. */
+    qtest_set_irq_in(qts, tcb, "tiob-in", 0, 0);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    /* With ENETRG the same event also restarts the counter. */
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKDIS);
+    qtest_writel(qts, ch0 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE | TCB_CMR_WAVESEL_UP_RC |
+                 TCB_CMR_ENETRG | TCB_CMR_EEVT(0) | TCB_CMR_EEVTEDG(1) |
+                 TCB_CMR_AEEVT(3));
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_clock_step(qts, 120000);
+    counter = qtest_readl(qts, ch0 + TCB_CV);
+    g_assert_cmpuint(counter, >, 0);
+    qtest_set_irq_in(qts, tcb, "tiob-in", 0, 1);
+    g_assert_cmpuint(qtest_readl(qts, ch0 + TCB_CV), <, counter);
+
+    /*
+     * A capture-mode channel takes no external event: a TIOB edge leaves
+     * TIOA alone.  Note bits 9:8 are EEVTEDG in waveform mode but ETRGEDG
+     * in capture mode, so this configuration deliberately leaves both at
+     * zero to isolate the event path from the trigger path.
+     */
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKDIS);
+    qtest_writel(qts, ch0 + TCB_CMR, TCB_CMR_CLOCK2 | TCB_CMR_AEEVT(3));
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_clock_step(qts, 120000);
+    counter = qtest_readl(qts, ch0 + TCB_CV);
+    tioa = qtest_get_irq(qts, 0);
+    qtest_set_irq_in(qts, tcb, "tiob-in", 0, 0);
+    qtest_set_irq_in(qts, tcb, "tiob-in", 0, 1);
+    g_assert_cmpint(qtest_get_irq(qts, 0), ==, tioa);
+    g_assert_cmpuint(qtest_readl(qts, ch0 + TCB_CV), >=, counter);
+
+    qtest_quit(qts);
+}
+
 static void test_tcb_external_trigger(void)
 {
     const uint64_t ch1 = SAM9X7_TCB_BASE + TCB_CHANNEL(1);
@@ -27229,6 +27302,8 @@ int main(int argc, char **argv)
                    test_tcb_capture_xdmac_request);
     qtest_add_func("sam9x75/tcb/external-trigger",
                    test_tcb_external_trigger);
+    qtest_add_func("sam9x75/tcb/external-event",
+                   test_tcb_external_event);
     qtest_add_func("sam9x75/tcb1/reset-masks-and-independence",
                    test_tcb1_reset_masks_and_independence);
     qtest_add_func("sam9x75/tcb1/clock-gating-and-irq",

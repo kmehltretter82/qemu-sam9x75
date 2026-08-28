@@ -56,6 +56,14 @@
 #define TCB_CMR_ACPA_SHIFT      16
 #define TCB_CMR_ACPC_SHIFT      18
 #define TCB_CMR_ASWTRG_SHIFT    22
+#define TCB_CMR_AEEVT_SHIFT     20
+/* Waveform mode external event: source, edge, and whether it triggers. */
+#define TCB_CMR_ENETRG          BIT(12)
+#define TCB_CMR_EEVT_SHIFT      10
+#define TCB_CMR_EEVT_MASK       3
+#define TCB_CMR_EEVT_TIOB       0
+#define TCB_CMR_EEVTEDG_SHIFT   8
+#define TCB_CMR_EEVTEDG_MASK    3
 #define TCB_TIOA_EFFECT_NONE    0
 #define TCB_TIOA_EFFECT_SET     1
 #define TCB_TIOA_EFFECT_CLEAR   2
@@ -404,6 +412,35 @@ static void at91_tcb_external_trigger(AT91TCBChannel *ch, bool from_tioa,
     at91_tcb_configure_channel(ch, 0);
 }
 
+/*
+ * In waveform mode an external event acts on TIOA through AEEVT and, when
+ * ENETRG is set, also restarts the counter.  Only TIOB is modeled as an
+ * event source; XC0 to XC2 need the block cross-connect, which this model
+ * does not have.  A TIOB chosen as the event source is an input, so the
+ * channel does not drive it.
+ */
+static void at91_tcb_external_event(AT91TCBChannel *ch, bool from_tioa,
+                                    bool rising)
+{
+    unsigned int source = (ch->cmr >> TCB_CMR_EEVT_SHIFT) &
+                          TCB_CMR_EEVT_MASK;
+    unsigned int edge = (ch->cmr >> TCB_CMR_EEVTEDG_SHIFT) &
+                        TCB_CMR_EEVTEDG_MASK;
+
+    if (!(ch->cmr & TCB_CMR_WAVE) || from_tioa ||
+        source != TCB_CMR_EEVT_TIOB) {
+        return;
+    }
+    if (edge == TCB_LDR_NONE ||
+        !(edge == TCB_LDR_EDGE || (edge == TCB_LDR_RISING) == rising)) {
+        return;
+    }
+    at91_tcb_apply_tioa_effect(ch, TCB_CMR_AEEVT_SHIFT);
+    if (ch->cmr & TCB_CMR_ENETRG) {
+        at91_tcb_configure_channel(ch, 0);
+    }
+}
+
 static void at91_tcb_pin_input(AT91TCBState *s, unsigned int index,
                                bool from_tioa, int level)
 {
@@ -422,6 +459,7 @@ static void at91_tcb_pin_input(AT91TCBState *s, unsigned int index,
         at91_tcb_capture_edge(ch, value);
     }
     at91_tcb_external_trigger(ch, from_tioa, value);
+    at91_tcb_external_event(ch, from_tioa, value);
     at91_tcb_update_irq(s);
 }
 
