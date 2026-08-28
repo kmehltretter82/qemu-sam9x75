@@ -16106,6 +16106,114 @@ static void sdcard_qmp_insert(QTestState *qts, const char *path)
     qobject_unref(response);
 }
 
+/*
+ * SPI-mode card protocol state must survive a machine reset and a
+ * migration taken part way through a command.  The card is addressed
+ * through the board's FLEXCOM4 route, so this also covers the pad mux and
+ * the SPI FIFO path carrying a real multi-byte protocol.
+ */
+static void spi_sd_begin_command(QTestState *qts, uint8_t command,
+                                 unsigned int bytes)
+{
+    const uint8_t request[] = { 0x40 | command, 0, 0, 0, 0,
+                                command == 0 ? 0x95 : 0xff };
+    unsigned int i;
+
+    g_assert_cmpuint(bytes, <=, ARRAY_SIZE(request));
+    for (i = 0; i < bytes; i++) {
+        g_assert_cmphex(flexcom_spi_transfer_byte(qts, SAM9X7_SPI4_BASE,
+                                                 13, request[i], 217),
+                        ==, 0xff);
+    }
+}
+
+static void spi_sd_configure(QTestState *qts)
+{
+    pmc_write_pcr(qts, 13, PMC_PCR_EN);
+    qtest_writeb(qts, SAM9X7_FLEXCOM4_BASE + FLEX_MR, FLEX_MODE_SPI);
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_MR,
+                 SPI_MR_MSTR | SPI_MR_PCS(0xd));
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_CSR(1),
+                 SPI_CSR_CSAAT | SPI_CSR_BITS(8) |
+                 SPI_CSR_SCBR(217) | SPI_CSR_DLYBS(1));
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_CR, SPI_CR_SPIEN);
+}
+
+static void test_sdcard_spi_reset_and_partial_command_migration(void)
+{
+    g_autofree char *sd_path = NULL;
+    QTestState *from;
+    QTestState *to;
+    GError *error = NULL;
+    unsigned int i;
+    int fd;
+    int ret;
+
+    fd = g_file_open_tmp("sam9x75-spi-sd-part-XXXXXX", &sd_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = ftruncate(fd, 1 << 20);
+    g_assert_cmpint(ret, ==, 0);
+    close(fd);
+
+    /* A machine reset must return the card protocol to idle. */
+    from = qtest_initf(SAM9X75_MACHINE ",m2-interface=spi"
+                       " -drive file=%s,if=sd,index=1,format=raw,"
+                       "auto-read-only=off,file.locking=off", sd_path);
+    spi_sd_configure(from);
+    for (i = 0; i < 10; i++) {
+        g_assert_cmphex(flexcom_spi_transfer_byte(from, SAM9X7_SPI4_BASE,
+                                                 13, 0xff, 217), ==, 0xff);
+    }
+    g_assert_cmphex(flexcom_spi_sd_command(from, 0), ==, 0x01);
+    /* Leave CMD0 half sent, then reset. */
+    spi_sd_begin_command(from, 0, 3);
+    qtest_system_reset(from);
+    spi_sd_configure(from);
+    for (i = 0; i < 10; i++) {
+        g_assert_cmphex(flexcom_spi_transfer_byte(from, SAM9X7_SPI4_BASE,
+                                                 13, 0xff, 217), ==, 0xff);
+    }
+    /* A complete CMD0 is accepted, so no stale argument bytes remain. */
+    g_assert_cmphex(flexcom_spi_sd_command(from, 0), ==, 0x01);
+
+    /* Now migrate with a command deliberately half transferred. */
+    to = qtest_initf(SAM9X75_MACHINE ",m2-interface=spi"
+                     " -drive file=%s,if=sd,index=1,format=raw,"
+                     "auto-read-only=off,file.locking=off"
+                     " -incoming defer", sd_path);
+    spi_sd_begin_command(from, 59, 4);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    /*
+     * The destination continues the same command: the two remaining bytes
+     * complete it and the card answers, which it cannot do if the argument
+     * position or the pad mux state were lost.
+     */
+    for (i = 0; i < 2; i++) {
+        g_assert_cmphex(flexcom_spi_transfer_byte(to, SAM9X7_SPI4_BASE,
+                                                 13, 0xff, 217), ==, 0xff);
+    }
+    /* One Ncr byte, then the R1 answer, then the trailing idle byte. */
+    g_assert_cmphex(flexcom_spi_transfer_byte(to, SAM9X7_SPI4_BASE,
+                                             13, 0xff, 217), ==, 0xff);
+    g_assert_cmphex(flexcom_spi_transfer_byte(to, SAM9X7_SPI4_BASE,
+                                             13, 0xff, 217), ==, 0x01);
+    g_assert_cmphex(flexcom_spi_transfer_byte(to, SAM9X7_SPI4_BASE,
+                                             13, 0xff, 217), ==, 0xff);
+
+    /* The card keeps working on the destination. */
+    g_assert_cmphex(flexcom_spi_sd_command(to, 59), ==, 0x01);
+
+    qtest_quit(to);
+    qtest_quit(from);
+    g_assert_cmpint(g_unlink(sd_path), ==, 0);
+}
+
 static void test_sdcard_card_detect_follows_medium(void)
 {
     g_autofree char *sd_path = NULL;
@@ -26544,6 +26652,8 @@ int main(int argc, char **argv)
                    test_sdcard_card_detect_follows_medium);
     qtest_add_func("sam9x75/sdcard/card-detect-migration",
                    test_sdcard_card_detect_migration);
+    qtest_add_func("sam9x75/sdcard/spi-reset-and-partial-command-migration",
+                   test_sdcard_spi_reset_and_partial_command_migration);
     qtest_add_func("sam9x75/sdcard/spi-gpio-chip-select",
                    test_sdcard_spi_gpio_chip_select);
     qtest_add_func("sam9x75/sdcard/spi-gpio-chip-select-migration",
