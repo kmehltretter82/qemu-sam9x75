@@ -34,7 +34,28 @@ The exact kernel has ``CONFIG_SPI_ATMEL=y``, ``CONFIG_AT_XDMAC=y``,
 ``CONFIG_MMC_SPI=m`` and ``CONFIG_CRC7=m``.  Its root filesystem contains
 ``mmc_spi.ko`` and its dependencies.
 
-Both blockers are closed; the unchanged-overlay gate below can be run.
+Both blockers are closed and the gate below has passed; see
+`Achieved result`_ before repeating it.
+
+Achieved result
+---------------
+
+At QEMU checkpoint ``fcf594706b`` the gate passed with the exact
+Linux4Microchip 2026.04 kernel and the unchanged ``wilc_spi`` overlay taken
+from the shipped FIT.  The driver logged ``Atmel SPI Controller version
+0x410`` and selected FIFO plus XDMAC, ``mmc_spi`` registered its host, a
+64 MiB SPI-mode card enumerated, an 8 MiB deterministic payload wrote and
+read back with identical SHA-256, and a FAT32 filesystem was written,
+checked with ``fsck.fat -vn``, re-mounted read-only and verified against its
+own manifest.  QEMU's ``unimp,guest_errors`` log was empty and the host
+filesystem check was clean.  Evidence:
+``t/linux4microchip-mmc-spi-20260828/release-r4``.
+
+Running it first exposed two model faults, both fixed at that checkpoint: a
+spurious XDMAC request overflow caused by re-driving an already-asserted
+FLEXCOM request line, and a ``WDRBT`` stall in the FIFO PIO path.  Runs r1
+to r3 are diagnostic only.
+
 
 The first blocker is closed.  IO4/NPCS1 and PA13 are the same pad, so the
 board now models that pad with ``at91-pad-mux``: the PIO output wins whenever

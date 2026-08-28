@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `f8891de72a`
+- Latest tested repository checkpoint: `fcf594706b`
+  (`hw/arm/sam9x75: Fix two faults the mmc_spi Linux gate exposed`)
+- Preceding implementation checkpoint: `f8891de72a`
   (`hw/arm/sam9x75: Apply two SAM9X75 silicon measurements`)
 - Preceding implementation checkpoint: `73631d172f`
   (`hw/arm/sam9x75-curiosity: Let the SDMMC0 card-detect pin follow the
@@ -387,6 +389,32 @@ that workstation.
   for revert, and a byte-exact boot-partition backup exists on the macOS
   side.
 
+## The mmc_spi gate is achieved
+
+The full consumer gate passed at `fcf594706b` with the exact kernel and the
+unchanged upstream `wilc_spi` overlay: `SPI_VERSION` 0x410 read by the
+driver, FIFO/XDMAC selected, a 64 MiB SPI-mode card enumerated, an 8 MiB
+payload written and read back identically, and a FAT32 filesystem written,
+`fsck`-checked and verified against its manifest, with an empty QEMU
+diagnostic log and a clean host filesystem check.  Preserve
+`t/linux4microchip-mmc-spi-20260828/release-r4`; r1--r3 are diagnostics.
+
+Running it exposed two real model faults, now fixed and qtested:
+
+- The XDMAC treated any write of 1 on a request line as a new request, so a
+  channel with an accepted chunk outstanding reported a spurious overflow.
+  The FLEXCOM made it reachable by re-driving its shared transmit/receive
+  request lines on every update, so a change on one direction re-asserted
+  the other.  A request is a level: only a rising edge counts, and each line
+  is driven only when its level changes.
+- `WDRBT` blocked on the first unread datum, which deadlocks Linux's FIFO
+  PIO sequence (fill the transmit FIFO, wait for `RXFTHF`, only then read).
+  With the FIFOs enabled it now gates on a full receive FIFO; the non-FIFO
+  meaning is unchanged.
+
+Both were reachable only through the real driver sequence, which is the
+argument for keeping exact-guest gates alongside qtests.
+
 ## Immediate continuation order
 
 Do these steps before starting another device model or another operating
@@ -395,12 +423,11 @@ system.
 Both `mmc_spi` blockers are now closed and the crypto fixes are
 silicon-confirmed.  Do these steps next.
 
-1. Run the `mmc_spi` Linux4Microchip gate in QEMU exactly as
-   `tests/guest/at91/linux4sam/spi-consumer/README.rst` describes: merged
-   DTB from the shipped `wilc_spi` overlay, a fresh disposable card,
-   `mmc_spi.ko` from the exact rootfs.  Nothing blocks it any more.  Then the
-   remaining P0 items: board jumper and mux behavior still unmodeled, and
-   broader USB hotplug, error and migration behavior.
+1. Remaining P0 items: the board jumper and mux behavior still unmodeled,
+   and broader USB hotplug, error and migration behavior.  The `mmc_spi`
+   gate itself is achieved (above); its README lists the reset and migration
+   follow-up qtests that remain, including migration during a partial SPI
+   command, response, data and CRC phase.
 1a. Prepare upstream submission of the two Linux patches in
    `artifacts/linux4microchip-crypto-fixes-20260827/`; both are now
    hardware-confirmed (see the results section above).
@@ -815,12 +842,14 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 247/247 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 249/249 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two of
 five unfiltered full Curiosity runs on 2026-08-28 aborted while starting the
 eighth test (`rom/cpu-reset-entry`) with no message; the same sequence passes
 in isolation, under gdb and in later plain runs, so treat it as an
 unexplained intermittent harness flake to investigate, not a model failure.
+The `mmc_spi` consumer gate is achieved, and running it exposed and fixed a
+spurious XDMAC request overflow and a `WDRBT` FIFO stall.
 Physical-board results from the same day are recorded in the handoff: both
 Linux crypto fixes silicon-confirmed, `SPI_VERSION` measured as 0x410 and
 modeled, M_CAN TEC retained at 248 through bus-off and modeled, card-detect

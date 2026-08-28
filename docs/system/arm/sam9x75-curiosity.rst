@@ -251,7 +251,11 @@ Support matrix
        host transfers, fixed and variable peripheral selection, direct and
        decoded chip selects, PCLK/GCLK bit-rate selection, programmable
        chip-select and transfer delays, local loopback, comparison,
-       interrupts, migration and its documented XDMAC pair.  The host data
+       interrupts, migration and its documented XDMAC pair.  With the FIFOs
+       enabled ``WDRBT`` gates on a full receive FIFO rather than on the
+       first unread datum, which is what the Linux FIFO PIO sequence
+       requires; without the FIFOs it still waits for the single unread
+       datum.  The host data
        path uses a normal QEMU SSI bus, and FLEXCOM4 NPCS1 reaches the M.2
        socket through J24.  IO4/NPCS1 and PA13 are the same pad, so an
        ``at91-pad-mux`` models that pad: the PIO output wins whenever the PIO
@@ -313,7 +317,10 @@ Support matrix
        personalities, the
        six FLEXCOM0--5 SPI
        personalities, I2SMCC, Class-D, AES, SHA, TDES, ADC and QSPI request
-       lines are wired.  Of the 51 requests in DS60001813E Table 16.1, only
+       lines are wired.  A hardware request is a level, so a request
+       overflow is reported only on a rising edge while a channel still has
+       an accepted chunk outstanding; re-driving an already-asserted line is
+       not a new request.  Of the 51 requests in DS60001813E Table 16.1, only
        SSC transmit/receive (38, 39) and the timer lines (TC0/TC1 receive
        41--42 and the TC1/TC4 compare and external-trigger events 43--50)
        remain, because there is no SSC model yet and the TCB model does not
@@ -329,6 +336,13 @@ Support matrix
        the M.2 socket through SDMMC1.  Its SPI position electrically
        disconnects that host and attaches the same drive to FLEXCOM4 NPCS1;
        a board qtest clocks the card and receives its SPI-mode CMD0 response.
+       The full ``mmc_spi`` consumer gate now passes with the exact
+       Linux4Microchip kernel and the unchanged upstream ``wilc_spi``
+       overlay: the driver reads ``SPI_VERSION`` 0x410, selects FIFO and
+       XDMAC, enumerates a 64 MiB SPI-mode card, writes and reads back an
+       8 MiB deterministic payload identically, and writes, checks and
+       re-verifies a FAT32 filesystem with a clean host ``fsck.fat`` and an
+       empty QEMU diagnostic log.
        Separate qtests drive the same card through the PA13 GPIO chip select
        that the unchanged ``wilc_spi`` overlay uses, covering selection,
        deselection, reselection, the handover back to the peripheral function
