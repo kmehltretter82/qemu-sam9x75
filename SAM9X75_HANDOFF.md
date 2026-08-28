@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `bf926d5931`
+- Latest tested repository checkpoint: `cfc8205878`
+  (`hw/timer/at91_tcb: Add the waveform-mode external event`)
+- Preceding implementation checkpoint: `bf926d5931`
   (`hw/timer/at91_tcb: Add the capture-mode external trigger`)
 - Preceding implementation checkpoint: `4d83948c14`
   (`hw/timer/at91_tcb: Add TIOA waveform output and capture mode`)
@@ -589,9 +591,17 @@ silicon-confirmed.  Do these steps next.
 1a. Prepare upstream submission of the two Linux patches in
    `artifacts/linux4microchip-crypto-fixes-20260827/`; both are now
    hardware-confirmed (see the results section above).
-2. Then the next bounded P1 implementation slice.  The best-understood
-   remaining candidate is the UDPHS suspend/resume design decision, written
-   up above; the TCB compare slice beside it is now done.  Done this checkpoint: transmit-side
+2. Then the next bounded P1 implementation slice.  The TCB now covers RA/RB
+   compares, the TIOA output, capture loading, the external trigger and the
+   waveform-mode external event, and every XDMAC request has a source.
+   What remains there, all unblocked but unstarted: TCLK clock inputs, the
+   TIOB output, the `BMR` XC0--XC2 cross-connect (which would also supply
+   the XC external-event sources this model refuses), up/down counting and
+   QDEC.  Note the cross-connect routes TIOA as a *clock*, so wiring it
+   means teaching the channel to count edges rather than run on a ptimer --
+   a change to the counting core that Linux's clocksource depends on, so it
+   deserves its own careful slice.  The UDPHS suspend/resume design
+   decision, written up above, is still the one genuine blocker.  Done this checkpoint: transmit-side
    M_CAN error confinement, the QSPI XDMAC request lines, the SDMMC0
    card-detect path, the two mmc_spi faults and the GEM wire-length
    statistics.  Next candidates, in rough order of
@@ -1003,7 +1013,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 262/262 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 263/263 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two
 full Curiosity runs on 2026-08-28 aborted at QEMU startup; that was host
 memory pressure, not a model fault, and the rule it implies is below.

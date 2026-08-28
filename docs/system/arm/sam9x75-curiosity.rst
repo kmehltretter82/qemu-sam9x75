@@ -739,9 +739,13 @@ Support matrix
        and TIOB are exposed as named GPIOs per channel, but the Curiosity
        board routes neither, so on this machine nothing drives them and
        capture and triggering are reachable only from a test.  The common
+       A waveform-mode external event on TIOB acts on TIOA through
+       ``AEEVT`` and, with ``ENETRG``, also restarts the counter; note that
+       ``CMR`` bits 9:8 are ``EEVTEDG`` in waveform mode and ``ETRGEDG`` in
+       capture mode.  The common
        TCB model does not yet cover TCLK inputs, the TIOB output, the
        ``BMR`` XC0--XC2 cross-connect that can clock one channel from
-       another's TIOA, waveform-mode external events, up/down modes or
+       another's TIOA or supply an external event, up/down modes or
        QDEC.  The SAM9X7 ADC is
        mapped at ``0xf804c000`` with its eight physical inputs, PID/AIC source
        19, peripheral and generic clocks, and XDMAC receive request 40.  It
