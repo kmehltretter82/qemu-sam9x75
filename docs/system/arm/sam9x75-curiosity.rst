@@ -308,9 +308,13 @@ Support matrix
        work budget are also covered.  DBGU, all thirteen FLEXCOM USART and TWI
        personalities, the
        six FLEXCOM0--5 SPI
-       personalities, I2SMCC, Class-D, AES, SHA and TDES request lines are
-       wired.  GWAC pool weighting and CNDC/descriptor QOS effects, the
-       remaining peripheral request lines, security policy, bus/burst and
+       personalities, I2SMCC, Class-D, AES, SHA, TDES, ADC and QSPI request
+       lines are wired.  Of the 51 requests in DS60001813E Table 16.1, only
+       SSC transmit/receive (38, 39) and the timer lines (TC0/TC1 receive
+       41--42 and the TC1/TC4 compare and external-trigger events 43--50)
+       remain, because there is no SSC model yet and the TCB model does not
+       raise capture or compare events.  GWAC pool weighting and
+       CNDC/descriptor QOS effects, security policy, bus/burst and
        arbitration timing, and coherency effects remain missing.  DMA memory
        accesses are synchronous in QEMU, so positive RDIP/WRIP intervals can
        be too short for software to sample.
@@ -366,7 +370,15 @@ Support matrix
        address.  Controller status follows the documented read-clear and
        command-clear rules, including overrun, last-write, timeout, transmit
        readiness and chip-select autoclear flags; IRQ, reset and migration
-       tests cover those transitions.  Persistence with a drive, all protocol
+       tests cover those transitions.  The XDMAC0 request lines that
+       DS60001813E Table 16.1 assigns to QSPI, 26 for transmit and 27 for
+       receive, follow ``TDRE`` and ``RDRF`` while the controller is enabled,
+       and the register window widens the byte and halfword accesses a
+       request-paced channel issues.  Request-paced qtests read the flash
+       identity byte by byte and re-drive a pending receive request after
+       migration.  The exact Linux driver moves QSPI data with memcpy-style
+       DMA through the AHB window instead, so those lines have no Linux
+       consumer.  Persistence with a drive, all protocol
        widths, timeout generation, the enable-time ``RFRSHD`` policy with
        ``DQSDLYEN`` clear, and the ROM quad-mode erratum need further coverage.
    * - EBI/SMC and raw NAND

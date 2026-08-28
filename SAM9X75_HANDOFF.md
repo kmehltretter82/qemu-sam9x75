@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `28529c9b12`
+- Latest tested repository checkpoint: `ebe3340acc`
+  (`hw/ssi/at91_ospi: Drive the QSPI XDMAC request lines`)
+- Preceding implementation checkpoint: `28529c9b12`
   (`hw/net/can/bosch_m_can: Model error counters and error confinement`)
 - Preceding board checkpoint: `c5ee939fd0`
   (`hw/arm/sam9x75-curiosity: Route the PA13 GPIO chip select to the M.2
@@ -64,9 +66,9 @@ The QEMU implementation at `1851743e84` compiled cleanly in
 `build-verify-serial`; the host regressions below were repeated at repository
 checkpoint `fcfbe1ae0e` after relinking.
 
-- The complete SAM9X75 Curiosity qtest binary passed **243/243**, including
-  the two SPI chip-select tests and the three M_CAN error-confinement tests
-  below.
+- The complete SAM9X75 Curiosity qtest binary passed **245/245**, including
+  the two SPI chip-select tests, the three M_CAN error-confinement tests and
+  the two QSPI XDMAC request tests below.
 - The complete generic chardev unit binary passed **42/42**.  The new TCP and
   Unix reconnect cases prove that a failed reconnect after a previous client
   closes no longer tries to unregister an unregistered yank callback; the old
@@ -281,6 +283,25 @@ checkpoint `fcfbe1ae0e` after relinking.
   sequences.  The last of these is also why a real error-passive controller
   still cannot be produced for the open ESI sub-gate: it needs a receive-side
   error source first.
+- The QSPI XDMAC request lines are wired at `ebe3340acc`.  DS60001813E
+  Table 16.1 assigns XDMAC0 requests 26/27 to QSPI transmit/receive and the
+  exact sam9x7 dtsi declares them, but the SoC never connected them and the
+  OSPI model had no request outputs.  They now follow `TDRE`/`RDRF` while
+  enabled and are re-driven after migration.  The same slice fixed a real
+  defect it exposed: the OSPI register window only accepted 32-bit accesses,
+  so a request-paced channel's byte-wide TDR write faulted and the channel
+  halted; narrow accesses are now widened like the other AT91 data
+  registers.  `sam9x75/qspi/xdmac-requests` and
+  `sam9x75/qspi/xdmac-request-migration` cover request levels, byte access,
+  byte-by-byte identity reads through paced channels, a channel started
+  before `QSPIEN`, and post-migration re-drive.
+- Be precise about what that proves: the exact Linux `atmel-quadspi` driver
+  uses `dmaengine_prep_dma_memcpy` through the AHB window, not request-paced
+  transfers, so requests 26/27 have no Linux consumer and the qtests are the
+  gate.  Do not claim a Linux DMA gate for QSPI from this evidence.
+- The XDMAC request map is now complete except for lines that need models
+  first: SSC 38/39 (no SSC model) and TC 41--50 (TCB raises no capture or
+  compare events).  Those are prerequisites, not wiring gaps.
 - The host `vcan` prerequisite is an environment setup step, not a code
   change.  On this workstation the README's private-namespace recipe cannot
   work because Ubuntu sets `kernel.apparmor_restrict_unprivileged_userns=1`,
@@ -304,12 +325,15 @@ closed.  Do these steps next.
    behavior.  The `mmc_spi` consumer gate itself is blocked only on a silicon
    measurement (see item 4) and must not be forced.
 2. Then the next bounded P1 implementation slice from the machine support
-   matrix.  The transmit-side M_CAN error confinement is done; what remains
-   of roadmap phase 6 is a receive-side error source (which the CAN bus
-   abstraction does not offer today), the `PSR.ACT` field, timed bus-off
-   recovery, timestamp synchronization and debug-message behavior.  Other
-   P1 candidates are the UDPHS `NB_TRANS`/isochronous/suspend-resume work
-   and the UHPHS fidelity items.  Keep Linux4Microchip as the primary OS;
+   matrix.  Done this checkpoint: transmit-side M_CAN error confinement and
+   the QSPI XDMAC request lines.  Next candidates, in rough order of
+   boundedness: UDPHS suspend/resume/SOF signalling (`atmel_usba_udc`
+   consumes it, but it needs the gadget-bridge protocol to carry host
+   suspend/resume); TCB capture/compare events, which would then let XDMAC
+   requests 41--50 be wired; an SSC model as the prerequisite for requests
+   38/39; the remaining M_CAN items (receive-side error source, `PSR.ACT`,
+   timed bus-off recovery); UDPHS `NB_TRANS`/isochronous; and the UHPHS
+   fidelity items.  Keep Linux4Microchip as the primary OS;
    NetBSD, FreeBSD, other guests and the newer-mainline matrix remain
    deliberately deferred.
 3. In parallel, the physical-board agent can run the safe crypto validation in
@@ -670,8 +694,10 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 243/243 for Curiosity, 42/42 for chardev, 7/7
-for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  The
+The post-gate regressions pass 245/245 for Curiosity, 42/42 for chardev, 7/7
+for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  The QSPI
+XDMAC request lines 26/27 are wired and qtest-gated; Linux uses memcpy DMA
+through the AHB window, so do not claim a Linux DMA gate for them.  The
 M_CAN model now has transmit-side ISO 11898-1 error confinement: TEC/REC,
 EW/EP/BO with their interrupts, DAR cancellation, bus-off setting INIT and
 recovery on clearing it, all migrated; REC never increments because the bus
