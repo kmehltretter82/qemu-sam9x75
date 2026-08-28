@@ -746,7 +746,12 @@ Support matrix
        TD back to RD and is the only path that carries data, and the
        transmit and receive XDMAC requests 38 and 39 follow their status
        bits.  Frame timing, the sync and compare units and the external
-       TK/TF/RK/RF pins are not modeled.  Register
+       TK/TF/RK/RF pins are not modeled.  The unmodified Linux
+       ``atmel-ssc`` driver binds the device when the node is enabled by an
+       overlay, reporting ``Atmel SSC device`` with its mapped aperture and
+       interrupt and leaving QEMU's diagnostic log empty; the exact board
+       device tree ships the node disabled, so normal use needs an overlay
+       as the CAN nodes do.  Register
        tests decode reserved locations, including the absent ``0xfc`` version
        register, without guest-error logging.  The revised data sheet gives
        ``ADC_ACR`` reset value ``0x1200`` while the 2026 device pack gives

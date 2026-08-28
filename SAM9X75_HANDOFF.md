@@ -542,6 +542,24 @@ reproduce it.  So: run the qtest suite or a whole-machine gate, not both.
 If it ever reproduces on an otherwise idle machine, that would falsify this
 and make it a real bug worth chasing.
 
+## SSC probe check, 2026-08-28
+
+The new SSC model was checked against the unmodified Linux `atmel-ssc`
+driver, not only qtests.  The exact device tree ships `ssc@f0010000` with
+`status = "disabled"`, so a copy of the base DTB was patched with
+`fdtput -t s <dtb> /apb/ssc@f0010000 status okay`, exactly the technique the
+CAN README documents.  The driver bound the device and logged
+`ssc f0010000.ssc: Atmel SSC device` with its mapped aperture and
+interrupt, `/sys/bus/platform/devices/f0010000.ssc` and the `ssc` driver
+link both appeared, QEMU's `unimp,guest_errors` log was exactly empty, and
+the snapshot-backed root overlay was unchanged.
+
+That exercises the register decode and the reset values a real driver
+reads.  It does not exercise data movement: the driver binds but the model
+carries data only in loop mode, and an audio consumer would additionally
+need frame timing and the sync unit.  Evidence:
+`t/linux4microchip-ssc-probe-20260828`.
+
 ## Immediate continuation order
 
 Do these steps before starting another device model or another operating
