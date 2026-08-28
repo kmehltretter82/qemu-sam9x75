@@ -392,9 +392,14 @@ closed.  Do these steps next.
    - Optionally a read-only QSPI RDID (`9Fh`) through an XDMAC
      request-paced byte channel, to compare the narrow-access behaviour that
      QEMU now models.  RDID reads only; nothing else.
-   The datasheet used for every register claim in this checkpoint is
-   `references/SAM9X7-Series-Data-Sheet-DS60001813E.pdf` (Table 16.1 for
-   XDMAC requests, the UDPHS `INTSTA` and TC `SR` bit layouts).
+   The datasheet behind every register claim in this checkpoint is the
+   Microchip SAM9X7 Series Data Sheet, document **DS60001813E** (Table 16.1
+   for XDMAC requests, the UDPHS `INTSTA` and TC `SR` bit layouts).  It is
+   **not in Git**: on this workstation it sits outside the repository at
+   `/home/karl/linux-work/qemu-SAM9X75/references/SAM9X7-Series-Data-Sheet-DS60001813E.pdf`.
+   Another machine must obtain revision E from Microchip; an earlier or later
+   revision may renumber tables and bits, so check the document number
+   before comparing values.
 4. Also on the board, take the read-only FLEXCOM SPI `+0xfc` probe in
    `tests/guest/at91/linux4sam/spi-consumer/README.rst`.  It is the only thing
    still blocking the `mmc_spi` gate now that the chip-select routing exists.
