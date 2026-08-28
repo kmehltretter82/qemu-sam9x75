@@ -17,15 +17,18 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `95ba1ee289`
-  (`docs: record SAM9X75 long CAN gates`)
-- `build-verify-serial/qemu-system-arm --version` reports exact source
-  `v11.1.0-417-g1851743e84`; commits through the repository checkpoint after
-  that implementation source change only documentation and test profiles.
+- Latest tested repository checkpoint: `fcfbe1ae0e`
+  (`tests/guest: Add active CAN migration trigger`)
+- The frozen binary used by the Linux4Microchip integration and migration
+  evidence reports `v11.1.0-417-g1851743e84`.  Commits through the latest
+  tested repository checkpoint after that implementation source change only
+  documentation and test profiles; the full qtest was repeated after relinking
+  at `fcfbe1ae0e`.
 
 Do not reset to an older UDPHS or crypto checkpoint; continue from the tip of
-`main` after fetching.  Verify that all three commits above are present in the
-published history before starting a new implementation slice.
+`main` after fetching.  Verify that the named implementation fixes and latest
+tested checkpoint are present in the published history before starting a new
+implementation slice.
 
 On this workstation the only expected untracked item at handoff time was
 `build-verify-serial/`.  It is a build directory, not source, and must never be
@@ -51,7 +54,8 @@ build directory or workspace test artifact.
 ## What is validated at this checkpoint
 
 The QEMU implementation at `1851743e84` compiled cleanly in
-`build-verify-serial`.
+`build-verify-serial`; the host regressions below were repeated at repository
+checkpoint `fcfbe1ae0e` after relinking.
 
 - The complete SAM9X75 Curiosity qtest binary passed **238/238**.
 - The complete generic chardev unit binary passed **42/42**.  The new TCP and
@@ -168,24 +172,54 @@ The QEMU implementation at `1851743e84` compiled cleanly in
   Runs r1--r3 are diagnostics for, respectively, managed-sandbox QMP socket
   denial, QEMU's read-only SD-card rejection and missing mount directories on
   the deliberately read-only guest root.
+- Repository checkpoint `fcfbe1ae0e` adds a controlled active-stress marker to
+  the CAN partner.  The peer options `--inflight-ready-file FILE` and
+  `--inflight-at FRAMES` atomically record a live, non-pausing stress window
+  only while more traffic remains and its local outstanding-sequence set is
+  nonempty.  The marker records sent, received, acknowledged and next-sequence
+  counters plus the exact outstanding set.  It is mutually exclusive with the
+  quiescent barrier.  The complete host-only CAN fixture suite passed **25/25**.
+  That host suite validates the trigger/oracle itself; the separate
+  whole-machine result follows.
+- Controlled active-stress whole-machine migration passed at repository
+  checkpoint `fcfbe1ae0e`.  After all 86 boundary cases, the atomic marker
+  observed stress receive sequence 3000 while neither endpoint had completed
+  and 16 peer transmissions remained outstanding: sent/next 3008, received
+  3000 and acknowledged 2992, with exact outstanding sequences 2992--3007.
+  The marker did not pause traffic and the quiescent barrier was not used.
+  QMP transferred 56,553,183 bytes of the 256 MiB machine in 431 ms with
+  25 ms downtime and zero RAM remaining, then the source exited via
+  `host-qmp-quit`.  The restored destination was proven running before either
+  endpoint rc file existed.  Both roles subsequently exited zero, passed TAP
+  5/5 and completed exactly 10,000 sent, received and acknowledged stress
+  frames with zero gap, duplicate, corruption, stale/foreign frame, CAN
+  error/drop or receive-queue overflow.  Interrupts reached 40,353/40,354 and
+  both controllers remained `ERROR-ACTIVE`.  Both QEMU diagnostic logs were
+  empty, host `e2fsck -fn` and `qemu-img check` passed, and the original root
+  overlay hash was unchanged.  Preserve the authoritative evidence at
+  `/home/karl/linux-work/qemu-SAM9X75/t/linux4microchip-inflight-migration-20260828/release-r4/`.
+  Runs r1--r3 remain diagnostics for, respectively, overlong USB serial
+  strings, an overlong destination QMP socket path after an otherwise valid
+  source migration, and an external interruption before the trigger.
 
 ## Immediate continuation order
 
 Do these steps before starting another device model or another operating
 system.
 
-1. Extend the remaining P0 external-path coverage with independent host
-   connections for both CAN controllers.  Repeat the now-green 10,000-frame
-   semantic and separate `canfdtest` profiles over those isolated SocketCAN
-   paths, retaining ESI injection on the virtual host peers.
-2. Extend the now-green quiescent whole-machine migration gate to carefully
-   controlled in-flight migration.  The USART receive timer itself already
-   has qtest migration coverage; preserve the quiescent release-r4 baseline.
-3. In parallel, the physical-board agent can run the safe crypto validation in
+1. When privileged host network setup is available, extend the remaining P0
+   external-path coverage with independent host connections for both CAN
+   controllers.  Repeat the semantic and separate `canfdtest` profiles over
+   isolated SocketCAN paths, retaining ESI injection on virtual host peers.
+   The current workstation cannot create the required `vcan` interfaces as an
+   unprivileged user; this is an environment prerequisite, not evidence that
+   either backend passes or fails.
+2. In parallel, the physical-board agent can run the safe crypto validation in
    `artifacts/linux4microchip-crypto-fixes-20260827/REAL-HARDWARE-TESTS.md`.
-4. Only after the remaining integration gates are green, take the next bounded
-   implementation slice.  Keep Linux4Microchip as the primary OS; NetBSD,
-   FreeBSD and other guests and the separate newer-mainline matrix are
+3. If the host `vcan` prerequisite remains unavailable, do not stall: take the
+   next bounded implementation slice from the machine support matrix and keep
+   the external-path gate explicitly open.  Keep Linux4Microchip as the primary
+   OS; NetBSD, FreeBSD, other guests and the newer-mainline matrix remain
    deliberately deferred.
 
 ### Focused build and host tests
@@ -219,11 +253,19 @@ python3 -m py_compile \
 python3 -m unittest discover \
   -s tests/guest/at91/linux4sam/uart-partner \
   -p 'test_*.py' -v
+
+python3 -m py_compile \
+  tests/guest/at91/linux4sam/can-partner/sam9x75_can_partner.py \
+  tests/guest/at91/linux4sam/can-partner/test_sam9x75_can_partner.py
+
+python3 -m unittest discover \
+  -s tests/guest/at91/linux4sam/can-partner \
+  -p 'test_*.py' -v
 ```
 
 The UART suite uses local sockets and pseudo-terminals.  A restricted sandbox
 may need explicit permission for those resources; that is not a reason to skip
-the suite.
+the suite.  At `fcfbe1ae0e`, the CAN host-only command reports 25 tests.
 
 For the full SAM9X75/SAM9X7 regressions, omit the UDPHS path filter and then
 run the LAN8840 and ADC binaries:
@@ -375,6 +417,13 @@ ADMA NOP issue.
   `can-host-socketcan`.  Do not use the shared bus as proof of two independent
   external paths, and do not request ESI injection from the Linux M_CAN used
   as its peer; retain ESI for virtual host peers.
+- Quiescent and controlled active-stress whole-machine CAN migration are both
+  achieved.  Preserve their separate authoritative `release-r4` evidence.
+  The active run migrated with 16 peer sequences outstanding and then passed
+  the complete 10,000-frame bidirectional semantic oracle after destination
+  resume.  Keep this fully migrated internal-QEMU-bus result distinct from
+  external SocketCAN state, which lives outside the VM and is not itself
+  migrated.
 - The current-head firmware-to-disk-root plus GEM gate is achieved at
   repository checkpoint `9665c77235`.  Preserve
   `linux4microchip-firmware-gem-20260827/release-r4`; do not confuse its
@@ -386,10 +435,8 @@ ADMA NOP issue.
 ### P1: bounded QEMU improvements
 
 - Complete UDPHS `NB_TRANS`, isochronous DATAX/MDATA termination,
-  SOF/suspend/resume timing and SAM-BA, then extend the achieved
-  Linux4Microchip quiescent whole-machine migration gate to controlled
-  in-flight traffic while retaining and extending the existing low-level
-  migration qtests.  The current raw-token bridge is a
+  SOF/suspend/resume timing and SAM-BA while retaining and extending the
+  existing low-level migration qtests.  The current raw-token bridge is a
   development topology; a general host-facing cable backend remains missing.
 - Close UHPHS reset, port-power, hotplug, DMA-error and interrupt fidelity with
   Linux storage and input devices.
@@ -509,9 +556,15 @@ green; preserve its release-r4 evidence and the dated EHCI-fix artifact.  The
 standalone shared-bus 10,000-frame CAN semantic gate and separate classic plus
 CAN-FD/BRS `canfdtest` gate are green at `4ab0af5c6a`; preserve their dated
 release evidence.  Quiescent whole-machine migration plus 10,000 post-resume
-frames is green at `95ba1ee289`; preserve migration release-r4.  The immediate
-tasks are isolated external SocketCAN paths and controlled in-flight
-migration.  Keep other operating systems deferred.
+frames is green at `95ba1ee289`; preserve migration release-r4.  Controlled
+active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
+peer sequences outstanding, the source exited, the destination resumed before
+either role completed, and both roles then passed the exact 10,000-frame
+semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
+The post-gate regressions pass 238/238 for Curiosity, 42/42 for chardev, 7/7
+for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Isolated
+external SocketCAN paths remain pending privileged host `vcan` setup.  Keep
+other operating systems deferred.
 
 Use the r5 hardware handoff only for sanitized evidence, safety rules and
 physical-test design because its software head is older than current main.

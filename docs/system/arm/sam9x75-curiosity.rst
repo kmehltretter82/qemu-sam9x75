@@ -729,9 +729,17 @@ Support matrix
        direction pass with exact acknowledgements and no protocol, controller,
        queue or interrupt error.  This proves configured M_CAN, shared Message
        RAM, interrupt, Linux process and USB evidence-disk continuity at a
-       quiescent CAN boundary.  Controlled migration with CAN frames in flight
-       remains exploratory because the untimed QEMU CAN bus has no physical
-       arbitration or external-backend state to migrate.
+       quiescent CAN boundary.
+       A separate controlled active-stress profile migrated after receive
+       sequence 3000 while both roles were unfinished and 16 peer
+       transmissions remained outstanding.  The source exited, the restored
+       destination was observed before either role completed, and both roles
+       then passed the exact 10,000-frame bidirectional semantic oracle with
+       zero gap, duplicate, corruption, controller, queue or interrupt
+       failure.  Both QEMU logs and all disk-integrity gates were clean.  This
+       proves active migration on the internal QEMU bus; it does not migrate
+       external SocketCAN state or prove physical arbitration and error
+       behavior.
    * - Crypto, TRNG, OTP and PUF
      - Initial
      - AES has 128/192/256-bit keys; ECB, CBC, OFB, CFB8/16/32/64/128, CTR,
@@ -1457,11 +1465,9 @@ integrity all passed in one bounded run.  The standalone shared-bus CAN gate
 also passed 10,000 semantic frames per direction, and separate classic plus
 CAN-FD/BRS ``canfdtest`` profiles each passed 10,000 exchanges.  A separate
 UHPHS ext4 result disk was written, cleanly unmounted and passed host-side
-filesystem checking, with an empty QEMU diagnostic log.  Remaining
-integration gates include full guest
-``mmc_spi`` operation through J24, independent external CAN paths, the
-remaining board jumper and mux behavior, genuine
-QSPI and NAND RomBOOT, broader USB hotplug/error/migration behavior, expansion
-buses, multimedia/security, controlled in-flight whole-machine migration and
-finally hardware differential validation.  Normal supported boots must be
-clean with ``-d unimp,guest_errors``.
+filesystem checking, with an empty QEMU diagnostic log.  Remaining integration
+gates include full guest ``mmc_spi`` operation through J24, independent
+external CAN paths, the remaining board jumper and mux behavior, genuine QSPI
+and NAND RomBOOT, broader USB hotplug/error/migration behavior, expansion
+buses, multimedia/security and finally hardware differential validation.
+Normal supported boots must be clean with ``-d unimp,guest_errors``.

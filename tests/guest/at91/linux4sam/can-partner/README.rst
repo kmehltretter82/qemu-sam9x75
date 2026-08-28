@@ -268,11 +268,11 @@ frames in each direction.  The authoritative workspace-local evidence is
 ``migration_barrier_used: true`` and its QMP report records completed status.
 The source and destination diagnostic logs are both empty.
 
-Do not generalize this result to in-flight CAN migration.  At this barrier no
-application CAN frame is outstanding.  A controlled active-traffic profile
-must identify an observed sequence window before migration, prove that the
-source stopped, and use the existing gap/duplicate/corruption oracle after the
-destination resumes.
+The quiescent result alone does not prove in-flight CAN migration because no
+application frame is outstanding at its barrier.  The controlled profile
+below closes that separate internal-bus gate by identifying an observed
+sequence window, proving that the source stopped and applying the existing
+gap/duplicate/corruption oracle after the destination resumes.
 
 The peer can emit that non-pausing active-stress trigger explicitly::
 
@@ -290,6 +290,19 @@ migration only after observing a fresh marker, require both endpoint rc files
 to remain absent at that point, and retain QMP's completed migration report.
 The in-flight marker and quiescent barrier options are intentionally mutually
 exclusive, and each currently requires a single peer session.
+
+This controlled profile passed at repository checkpoint ``fcfbe1ae0e`` with
+the exact Linux4Microchip image.  Its marker observed receive sequence 3000
+while both roles were unfinished and 16 peer transmissions remained
+outstanding: sequences 2992--3007, with sent/next 3008, received 3000 and
+acknowledged 2992.  QMP migrated the 256 MiB machine in 431 ms with 25 ms
+downtime and zero RAM remaining, then the source exited.  The destination was
+proven running before either endpoint rc file existed.  Both roles then
+passed TAP 5/5 and exactly 10,000 sent, received and acknowledged frames with
+zero semantic, controller or queue failure.  Both QEMU diagnostic logs were
+empty and every filesystem, image and immutable-root integrity gate passed.
+The authoritative evidence is
+``t/linux4microchip-inflight-migration-20260828/release-r4``.
 
 For link recovery, operate on the host vcan only between completed sessions::
 
@@ -313,8 +326,11 @@ shared bus and must not be used for the isolated release gate.
 
 This fixture cannot make QEMU's untimed CAN model prove physical bitrate,
 arbitration, ACK/error-frame behavior, retransmission, error confinement or
-bus-off recovery.  SocketCAN backend state is also external to migration, so
-active-traffic migration is exploratory rather than a release claim.
+bus-off recovery.  The achieved active-migration profile uses one internal
+QEMU bus, so both M_CAN controllers and their bus state are inside the
+migrated VM.  SocketCAN backend state is external to migration; active traffic
+across a host backend therefore remains exploratory and is not covered by the
+internal-bus release result.
 
 Physical Curiosity board
 ------------------------
