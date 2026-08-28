@@ -370,6 +370,7 @@
 #define MCAN_TXBTO              0x0d8
 #define MCAN_TXBCF              0x0dc
 #define MCAN_TXBTIE             0x0e0
+#define MCAN_TXBCIE             0x0e4
 #define MCAN_TXEFC              0x0f0
 #define MCAN_TXEFS              0x0f4
 #define MCAN_TXEFA              0x0f8
@@ -380,12 +381,22 @@
 #define MCAN_CCCR_INIT          BIT(0)
 #define MCAN_CCCR_CCE           BIT(1)
 #define MCAN_CCCR_MON           BIT(5)
+#define MCAN_CCCR_DAR           BIT(6)
 #define MCAN_CCCR_TEST          BIT(7)
 #define MCAN_CCCR_FDOE          BIT(8)
 #define MCAN_CCCR_BRSE          BIT(9)
 #define MCAN_TEST_LBCK          BIT(4)
 #define MCAN_PSR_LEC_MASK       MAKE_64BIT_MASK(0, 3)
 #define MCAN_PSR_DLEC_MASK      MAKE_64BIT_MASK(8, 3)
+#define MCAN_PSR_EP             BIT(5)
+#define MCAN_PSR_EW             BIT(6)
+#define MCAN_PSR_BO             BIT(7)
+#define MCAN_PSR_ERROR_STATE    (MCAN_PSR_EP | MCAN_PSR_EW | MCAN_PSR_BO)
+#define MCAN_PSR_LEC(psr)       ((psr) & 7)
+#define MCAN_ECR_TEC(ecr)       ((ecr) & 0xff)
+#define MCAN_ECR_REC(ecr)       (((ecr) >> 8) & 0x7f)
+#define MCAN_ECR_RP             BIT(15)
+#define MCAN_ECR_CEL(ecr)       (((ecr) >> 16) & 0xff)
 #define MCAN_PSR_RESI           BIT(11)
 #define MCAN_PSR_RBRS           BIT(12)
 #define MCAN_PSR_RFDF           BIT(13)
@@ -399,9 +410,15 @@
 #define MCAN_IR_RF1L            BIT(7)
 #define MCAN_IR_HPM             BIT(8)
 #define MCAN_IR_TC              BIT(9)
+#define MCAN_IR_TCF             BIT(10)
 #define MCAN_IR_TEFN            BIT(12)
 #define MCAN_IR_MRAF            BIT(17)
 #define MCAN_IR_DRX             BIT(19)
+#define MCAN_IR_EP              BIT(23)
+#define MCAN_IR_EW              BIT(24)
+#define MCAN_IR_BO              BIT(25)
+#define MCAN_IR_PEA             BIT(27)
+#define MCAN_IR_ERROR_STATE     (MCAN_IR_EP | MCAN_IR_EW | MCAN_IR_BO)
 #define MCAN_ILE_EINT0          BIT(0)
 #define MCAN_ILE_EINT1          BIT(1)
 #define MCAN_ELEMENT_EFC        BIT(23)
@@ -23974,6 +23991,263 @@ static uint32_t mcan_wait_register(QTestState *qts, uint64_t address,
             address, mask, expected, value);
 }
 
+/*
+ * Error-confinement helpers.  A controller alone on its bus never receives
+ * an acknowledgement, so every transmit attempt is an acknowledge error.
+ */
+#define MCAN_ERR_TX_OFFSET      0x4000
+#define MCAN_ERR_RX_OFFSET      0x3000
+
+static void mcan_prepare_lone_transmitter(QTestState *qts, uint64_t base,
+                                          unsigned int pid)
+{
+    static const uint32_t data[2] = { 0x11223344, 0x55667788 };
+
+    mcan_enable_clocks(qts, pid);
+    mcan_configure(qts, base, MCAN_ERR_RX_OFFSET, 4,
+                   MCAN_ERR_TX_OFFSET, 1, false, false);
+    qtest_writel(qts, base + MCAN_IE,
+                 MCAN_IR_PEA | MCAN_IR_ERROR_STATE | MCAN_IR_TC |
+                 MCAN_IR_TCF);
+    qtest_writel(qts, base + MCAN_ILE, MCAN_ILE_EINT0);
+    qtest_writel(qts, base + MCAN_TXBTIE, BIT(0));
+    qtest_writel(qts, base + MCAN_TXBCIE, BIT(0));
+    mcan_write_tx_element(qts, MCAN_ERR_TX_OFFSET, 0x123U << 18,
+                          MCAN_ELEMENT_DLC(8), data, ARRAY_SIZE(data));
+}
+
+static void mcan_attempt_tx(QTestState *qts, uint64_t base,
+                            unsigned int attempts)
+{
+    while (attempts--) {
+        qtest_writel(qts, base + MCAN_TXBAR, BIT(0));
+    }
+}
+
+static void test_mcan_error_confinement_and_bus_off(void)
+{
+    const uint64_t base = SAM9X7_MCAN0_BASE;
+    QTestState *qts = qtest_init(
+        "-object can-bus,id=canbus "
+        "-machine sam9x75-curiosity,canbus0=canbus");
+    uint32_t ecr;
+    uint32_t psr;
+
+    aic_configure(qts, 29, AIC_SMR_LEVEL_HIGH | 5, 0x5d5d001d);
+    mcan_prepare_lone_transmitter(qts, base, 29);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_ECR), ==, 0);
+
+    /* One unacknowledged attempt: LEC=ACK, TEC+8, one logged error. */
+    mcan_attempt_tx(qts, base, 1);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TXBRP), ==, BIT(0));
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TXBTO), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TXBCF), ==, 0);
+    ecr = qtest_readl(qts, base + MCAN_ECR);
+    g_assert_cmpuint(MCAN_ECR_TEC(ecr), ==, 8);
+    g_assert_cmpuint(MCAN_ECR_REC(ecr), ==, 0);
+    g_assert_cmpuint(MCAN_ECR_CEL(ecr), ==, 1);
+    g_assert_false(ecr & MCAN_ECR_RP);
+    /* CEL is read-to-clear; the live counters are not. */
+    ecr = qtest_readl(qts, base + MCAN_ECR);
+    g_assert_cmpuint(MCAN_ECR_TEC(ecr), ==, 8);
+    g_assert_cmpuint(MCAN_ECR_CEL(ecr), ==, 0);
+    psr = qtest_readl(qts, base + MCAN_PSR);
+    g_assert_cmpuint(MCAN_PSR_LEC(psr), ==, 3);
+    g_assert_cmphex(psr & MCAN_PSR_ERROR_STATE, ==, 0);
+    g_assert_cmpuint(MCAN_PSR_LEC(qtest_readl(qts, base + MCAN_PSR)), ==,
+                     7);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) &
+                    (MCAN_IR_PEA | MCAN_IR_ERROR_STATE), ==, MCAN_IR_PEA);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(29));
+    qtest_writel(qts, base + MCAN_IR, MCAN_IR_PEA);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(29));
+
+    /* Error warning at TEC 96 after twelve attempts in total. */
+    mcan_attempt_tx(qts, base, 10);
+    g_assert_cmpuint(MCAN_ECR_TEC(qtest_readl(qts, base + MCAN_ECR)), ==,
+                     88);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) & MCAN_IR_ERROR_STATE,
+                    ==, 0);
+    mcan_attempt_tx(qts, base, 1);
+    g_assert_cmpuint(MCAN_ECR_TEC(qtest_readl(qts, base + MCAN_ECR)), ==,
+                     96);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_PSR) & MCAN_PSR_ERROR_STATE,
+                    ==, MCAN_PSR_EW);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) & MCAN_IR_ERROR_STATE,
+                    ==, MCAN_IR_EW);
+    qtest_writel(qts, base + MCAN_IR, MCAN_IR_EW | MCAN_IR_PEA);
+
+    /* Error passive at TEC 128 after sixteen; EW is not reported again. */
+    mcan_attempt_tx(qts, base, 3);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) & MCAN_IR_ERROR_STATE,
+                    ==, 0);
+    mcan_attempt_tx(qts, base, 1);
+    g_assert_cmpuint(MCAN_ECR_TEC(qtest_readl(qts, base + MCAN_ECR)), ==,
+                     128);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_PSR) & MCAN_PSR_ERROR_STATE,
+                    ==, MCAN_PSR_EP | MCAN_PSR_EW);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) & MCAN_IR_ERROR_STATE,
+                    ==, MCAN_IR_EP);
+    /* RP tracks the receive counter only. */
+    g_assert_false(qtest_readl(qts, base + MCAN_ECR) & MCAN_ECR_RP);
+    qtest_writel(qts, base + MCAN_IR, MCAN_IR_EP | MCAN_IR_PEA);
+
+    /* Bus-off when TEC exceeds 255: hardware sets INIT and stops. */
+    mcan_attempt_tx(qts, base, 15);
+    g_assert_cmpuint(MCAN_ECR_TEC(qtest_readl(qts, base + MCAN_ECR)), ==,
+                     248);
+    g_assert_false(qtest_readl(qts, base + MCAN_CCCR) & MCAN_CCCR_INIT);
+    mcan_attempt_tx(qts, base, 1);
+    psr = qtest_readl(qts, base + MCAN_PSR);
+    g_assert_cmphex(psr & MCAN_PSR_ERROR_STATE, ==,
+                    MCAN_PSR_BO | MCAN_PSR_EP | MCAN_PSR_EW);
+    g_assert_true(qtest_readl(qts, base + MCAN_CCCR) & MCAN_CCCR_INIT);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) & MCAN_IR_ERROR_STATE,
+                    ==, MCAN_IR_BO);
+    g_assert_cmpuint(MCAN_ECR_TEC(qtest_readl(qts, base + MCAN_ECR)), ==,
+                     0xff);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TXBRP), ==, BIT(0));
+    qtest_writel(qts, base + MCAN_IR, MCAN_IR_BO | MCAN_IR_PEA);
+
+    /* While stopped in INIT, further requests change nothing. */
+    mcan_attempt_tx(qts, base, 4);
+    g_assert_cmpuint(MCAN_ECR_TEC(qtest_readl(qts, base + MCAN_ECR)), ==,
+                     0xff);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) &
+                    (MCAN_IR_PEA | MCAN_IR_ERROR_STATE), ==, 0);
+
+    /*
+     * Clearing INIT recovers: counters clear, every state bit changes back
+     * and is reported, then the still-pending request is retried and fails
+     * again because there is still no peer.
+     */
+    qtest_writel(qts, base + MCAN_CCCR, 0);
+    g_assert_false(qtest_readl(qts, base + MCAN_CCCR) & MCAN_CCCR_INIT);
+    psr = qtest_readl(qts, base + MCAN_PSR);
+    g_assert_cmphex(psr & MCAN_PSR_ERROR_STATE, ==, 0);
+    g_assert_cmpuint(MCAN_PSR_LEC(psr), ==, 3);
+    g_assert_cmpuint(MCAN_ECR_TEC(qtest_readl(qts, base + MCAN_ECR)), ==, 8);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) &
+                    (MCAN_IR_PEA | MCAN_IR_ERROR_STATE), ==,
+                    MCAN_IR_PEA | MCAN_IR_ERROR_STATE);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TXBRP), ==, BIT(0));
+    qtest_writel(qts, base + MCAN_IR, MCAN_IR_PEA | MCAN_IR_ERROR_STATE);
+
+    /* DAR turns the failed attempt into a finished cancellation. */
+    qtest_writel(qts, base + MCAN_CCCR, MCAN_CCCR_INIT | MCAN_CCCR_CCE);
+    qtest_writel(qts, base + MCAN_CCCR,
+                 MCAN_CCCR_INIT | MCAN_CCCR_CCE | MCAN_CCCR_DAR);
+    qtest_writel(qts, base + MCAN_CCCR, MCAN_CCCR_DAR);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_CCCR), ==, MCAN_CCCR_DAR);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TXBRP), ==, 0);
+    mcan_attempt_tx(qts, base, 1);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TXBRP), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TXBTO), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_TXBCF), ==, BIT(0));
+    g_assert_cmpuint(MCAN_ECR_TEC(qtest_readl(qts, base + MCAN_ECR)), ==,
+                     16);
+    g_assert_cmphex(qtest_readl(qts, base + MCAN_IR) &
+                    (MCAN_IR_TCF | MCAN_IR_TC | MCAN_IR_PEA), ==,
+                    MCAN_IR_TCF | MCAN_IR_PEA);
+
+    qtest_quit(qts);
+}
+
+/*
+ * A peer held in INIT acknowledges nothing; releasing it makes the retried
+ * frame succeed, which decrements the transmit error counter.
+ */
+static void test_mcan_error_recovery_with_peer(void)
+{
+    static const uint32_t data[2] = { 0x11223344, 0x55667788 };
+    const uint64_t tx = SAM9X7_MCAN0_BASE;
+    const uint64_t rx = SAM9X7_MCAN1_BASE;
+    const uint32_t peer_rx_offset = 0x7800;
+    QTestState *qts = qtest_init(
+        "-object can-bus,id=canbus "
+        "-machine sam9x75-curiosity,canbus0=canbus,canbus1=canbus");
+
+    aic_configure(qts, 29, AIC_SMR_LEVEL_HIGH | 5, 0x5d5d001d);
+    mcan_prepare_lone_transmitter(qts, tx, 29);
+
+    mcan_attempt_tx(qts, tx, 1);
+    g_assert_cmpuint(MCAN_ECR_TEC(qtest_readl(qts, tx + MCAN_ECR)), ==, 8);
+    g_assert_cmphex(qtest_readl(qts, tx + MCAN_TXBRP), ==, BIT(0));
+    qtest_writel(qts, tx + MCAN_IR, MCAN_IR_PEA);
+
+    mcan_enable_clocks(qts, 30);
+    mcan_configure(qts, rx, peer_rx_offset, 4, 0, 0, false, false);
+
+    mcan_attempt_tx(qts, tx, 1);
+    g_assert_cmphex(qtest_readl(qts, tx + MCAN_TXBRP), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, tx + MCAN_TXBTO), ==, BIT(0));
+    g_assert_cmpuint(MCAN_ECR_TEC(qtest_readl(qts, tx + MCAN_ECR)), ==, 7);
+    g_assert_cmpuint(MCAN_PSR_LEC(qtest_readl(qts, tx + MCAN_PSR)), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, tx + MCAN_IR) &
+                    (MCAN_IR_TC | MCAN_IR_PEA), ==, MCAN_IR_TC);
+    g_assert_cmphex(qtest_readl(qts, rx + MCAN_RXF0S) & 0x003f3f7f, ==,
+                    0x00010001);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + peer_rx_offset + 8),
+                    ==, data[0]);
+    g_assert_cmpuint(MCAN_ECR_REC(qtest_readl(qts, rx + MCAN_ECR)), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_mcan_error_state_migration(void)
+{
+    const uint64_t base = SAM9X7_MCAN0_BASE;
+    const char *args = "-object can-bus,id=canbus "
+                       "-machine sam9x75-curiosity,canbus0=canbus";
+    g_autofree char *to_args = g_strdup_printf("%s -incoming defer", args);
+    QTestState *from = qtest_init(args);
+    QTestState *to = qtest_init(to_args);
+    uint32_t psr;
+
+    mcan_prepare_lone_transmitter(from, base, 29);
+    mcan_attempt_tx(from, base, 16);
+    g_assert_cmpuint(MCAN_ECR_TEC(qtest_readl(from, base + MCAN_ECR)), ==,
+                     128);
+    g_assert_cmphex(qtest_readl(from, base + MCAN_PSR) &
+                    MCAN_PSR_ERROR_STATE, ==, MCAN_PSR_EP | MCAN_PSR_EW);
+    qtest_writel(from, base + MCAN_IR, 0xffffffff);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    /* Counters and the error-passive state arrive intact. */
+    g_assert_cmpuint(MCAN_ECR_TEC(qtest_readl(to, base + MCAN_ECR)), ==,
+                     128);
+    g_assert_cmpuint(MCAN_ECR_REC(qtest_readl(to, base + MCAN_ECR)), ==, 0);
+    g_assert_cmphex(qtest_readl(to, base + MCAN_PSR) & MCAN_PSR_ERROR_STATE,
+                    ==, MCAN_PSR_EP | MCAN_PSR_EW);
+    g_assert_false(qtest_readl(to, base + MCAN_CCCR) & MCAN_CCCR_INIT);
+    g_assert_cmphex(qtest_readl(to, base + MCAN_IR) & MCAN_IR_ERROR_STATE,
+                    ==, 0);
+    g_assert_cmphex(qtest_readl(to, base + MCAN_TXBRP), ==, BIT(0));
+
+    /* The destination continues the same confinement sequence. */
+    mcan_attempt_tx(to, base, 15);
+    g_assert_false(qtest_readl(to, base + MCAN_CCCR) & MCAN_CCCR_INIT);
+    mcan_attempt_tx(to, base, 1);
+    psr = qtest_readl(to, base + MCAN_PSR);
+    g_assert_cmphex(psr & MCAN_PSR_ERROR_STATE, ==,
+                    MCAN_PSR_BO | MCAN_PSR_EP | MCAN_PSR_EW);
+    g_assert_true(qtest_readl(to, base + MCAN_CCCR) & MCAN_CCCR_INIT);
+    g_assert_cmphex(qtest_readl(to, base + MCAN_IR) & MCAN_IR_ERROR_STATE,
+                    ==, MCAN_IR_BO);
+
+    qtest_writel(to, base + MCAN_CCCR, 0);
+    g_assert_cmphex(qtest_readl(to, base + MCAN_PSR) & MCAN_PSR_ERROR_STATE,
+                    ==, 0);
+    g_assert_cmpuint(MCAN_ECR_TEC(qtest_readl(to, base + MCAN_ECR)), ==, 8);
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
 static void test_mcan_protocol_status(void)
 {
     const uint64_t base = SAM9X7_MCAN0_BASE;
@@ -25458,6 +25732,12 @@ int main(int argc, char **argv)
                    test_mcan_sam_register_migration);
     qtest_add_func("sam9x75/mcan/protocol-status",
                    test_mcan_protocol_status);
+    qtest_add_func("sam9x75/mcan/error-confinement-and-bus-off",
+                   test_mcan_error_confinement_and_bus_off);
+    qtest_add_func("sam9x75/mcan/error-recovery-with-peer",
+                   test_mcan_error_recovery_with_peer);
+    qtest_add_func("sam9x75/mcan/error-state-migration",
+                   test_mcan_error_state_migration);
     qtest_add_func("sam9x75/mcan/protocol-status-migration",
                    test_mcan_protocol_status_migration);
     qtest_add_func("sam9x75/mcan/tx-flag-normalization-and-timestamps",

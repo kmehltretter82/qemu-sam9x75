@@ -61,6 +61,13 @@ struct BoschMCanState {
     uint8_t txe_fill;
     uint16_t timestamp_counter;
 
+    /*
+     * ISO 11898-1 error counters.  TEC reaches 256 in bus-off; REC never
+     * exceeds 127 because the bus API has no receive-error source.
+     */
+    uint16_t tec;
+    uint8_t rec;
+
     bool resources_ready;
 };
 

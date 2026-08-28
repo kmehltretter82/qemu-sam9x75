@@ -85,6 +85,7 @@ enum {
 #define MCAN_CCCR_BRSE      BIT(9)
 #define MCAN_CCCR_FDOE      BIT(8)
 #define MCAN_CCCR_TEST      BIT(7)
+#define MCAN_CCCR_DAR       BIT(6)
 #define MCAN_CCCR_MON       BIT(5)
 #define MCAN_CCCR_CSR       BIT(4)
 #define MCAN_CCCR_CSA       BIT(3)
@@ -107,9 +108,26 @@ enum {
 #define MCAN_TOCC_TOS_LEN   2
 #define MCAN_TOCC_TOP_SHIFT 16
 
+#define MCAN_ECR_TEC_SHIFT  0
+#define MCAN_ECR_TEC_LEN    8
+#define MCAN_ECR_REC_SHIFT  8
+#define MCAN_ECR_REC_LEN    7
+#define MCAN_ECR_RP         BIT(15)
+#define MCAN_ECR_CEL_SHIFT  16
+#define MCAN_ECR_CEL_LEN    8
 #define MCAN_ECR_CEL_MASK   MAKE_64BIT_MASK(16, 8)
 
+/* Error counter thresholds from ISO 11898-1 error confinement. */
+#define MCAN_ERROR_WARNING_LIMIT  96
+#define MCAN_ERROR_PASSIVE_LIMIT  128
+#define MCAN_BUS_OFF_LIMIT        256
+#define MCAN_TX_ERROR_STEP        8
+
 #define MCAN_PSR_LEC_MASK   MAKE_64BIT_MASK(0, 3)
+#define MCAN_PSR_LEC_ACK    3
+#define MCAN_PSR_EP         BIT(5)
+#define MCAN_PSR_EW         BIT(6)
+#define MCAN_PSR_BO         BIT(7)
 #define MCAN_PSR_DLEC_MASK  MAKE_64BIT_MASK(8, 3)
 #define MCAN_PSR_RESI       BIT(11)
 #define MCAN_PSR_RBRS       BIT(12)
@@ -137,6 +155,10 @@ enum {
 #define MCAN_IR_TSW         BIT(16)
 #define MCAN_IR_MRAF        BIT(17)
 #define MCAN_IR_DRX         BIT(19)
+#define MCAN_IR_EP          BIT(23)
+#define MCAN_IR_EW          BIT(24)
+#define MCAN_IR_BO          BIT(25)
+#define MCAN_IR_PEA         BIT(27)
 #define MCAN_IR_MASK        0x3fcfffff
 
 #define MCAN_ILE_EINT0      BIT(0)
@@ -292,6 +314,102 @@ static void bosch_m_can_record_rx(BoschMCanState *s,
         psr |= MCAN_PSR_RESI;
     }
     MCAN_REG(s, MCAN_PSR) = psr;
+}
+
+static void bosch_m_can_raise_ir(BoschMCanState *s, uint32_t bits);
+
+/*
+ * Derive the error-confinement state bits from the counters and report
+ * every change of EW, EP or BO through its interrupt flag, as the
+ * interface defines those flags.  Entering bus-off also sets CCCR.INIT,
+ * which stops the controller until software clears it.
+ */
+static void bosch_m_can_update_error_state(BoschMCanState *s)
+{
+    uint32_t psr = MCAN_REG(s, MCAN_PSR);
+    uint32_t old = psr & (MCAN_PSR_EW | MCAN_PSR_EP | MCAN_PSR_BO);
+    uint32_t next = 0;
+    uint32_t changed;
+
+    if (s->tec >= MCAN_ERROR_WARNING_LIMIT ||
+        s->rec >= MCAN_ERROR_WARNING_LIMIT) {
+        next |= MCAN_PSR_EW;
+    }
+    if (s->tec >= MCAN_ERROR_PASSIVE_LIMIT ||
+        s->rec >= MCAN_ERROR_PASSIVE_LIMIT) {
+        next |= MCAN_PSR_EP;
+    }
+    if (s->tec >= MCAN_BUS_OFF_LIMIT) {
+        next |= MCAN_PSR_BO;
+    }
+
+    changed = old ^ next;
+    MCAN_REG(s, MCAN_PSR) = (psr & ~old) | next;
+    if ((changed & MCAN_PSR_BO) && (next & MCAN_PSR_BO)) {
+        MCAN_REG(s, MCAN_CCCR) |= MCAN_CCCR_INIT;
+    }
+    if (changed) {
+        bosch_m_can_raise_ir(s,
+                             (changed & MCAN_PSR_EW ? MCAN_IR_EW : 0) |
+                             (changed & MCAN_PSR_EP ? MCAN_IR_EP : 0) |
+                             (changed & MCAN_PSR_BO ? MCAN_IR_BO : 0));
+    }
+}
+
+static void bosch_m_can_count_error(BoschMCanState *s)
+{
+    uint32_t cel = extract32(MCAN_REG(s, MCAN_ECR), MCAN_ECR_CEL_SHIFT,
+                             MCAN_ECR_CEL_LEN);
+
+    if (cel < 0xff) {
+        MCAN_REG(s, MCAN_ECR) = deposit32(MCAN_REG(s, MCAN_ECR),
+                                          MCAN_ECR_CEL_SHIFT,
+                                          MCAN_ECR_CEL_LEN, cel + 1);
+    }
+}
+
+/* A transmission that no other node acknowledged. */
+static void bosch_m_can_record_ack_error(BoschMCanState *s)
+{
+    MCAN_REG(s, MCAN_PSR) = deposit32(MCAN_REG(s, MCAN_PSR), 0, 3,
+                                      MCAN_PSR_LEC_ACK);
+    if (s->tec < MCAN_BUS_OFF_LIMIT) {
+        s->tec = MIN(s->tec + MCAN_TX_ERROR_STEP, MCAN_BUS_OFF_LIMIT);
+    }
+    bosch_m_can_count_error(s);
+    bosch_m_can_raise_ir(s, MCAN_IR_PEA);
+    bosch_m_can_update_error_state(s);
+}
+
+static void bosch_m_can_record_tx_success(BoschMCanState *s)
+{
+    if (s->tec) {
+        s->tec--;
+        bosch_m_can_update_error_state(s);
+    }
+}
+
+static void bosch_m_can_record_rx_success(BoschMCanState *s)
+{
+    if (s->rec >= MCAN_ERROR_PASSIVE_LIMIT) {
+        s->rec = MCAN_ERROR_PASSIVE_LIMIT - 1;
+        bosch_m_can_update_error_state(s);
+    } else if (s->rec) {
+        s->rec--;
+        bosch_m_can_update_error_state(s);
+    }
+}
+
+/*
+ * Software starts bus-off recovery by clearing CCCR.INIT.  Real hardware
+ * then waits for 129 occurrences of eleven consecutive recessive bits; the
+ * model has no bit timing and completes recovery immediately.
+ */
+static void bosch_m_can_recover_from_bus_off(BoschMCanState *s)
+{
+    s->tec = 0;
+    s->rec = 0;
+    bosch_m_can_update_error_state(s);
 }
 
 static void bosch_m_can_update_irq(BoschMCanState *s)
@@ -840,6 +958,7 @@ static bool bosch_m_can_receive_frame(BoschMCanState *s,
         return false;
     }
     bosch_m_can_record_rx(s, frame);
+    bosch_m_can_record_rx_success(s);
     if (frame->can_id & QEMU_CAN_RTR_FLAG) {
         bool reject = frame->can_id & QEMU_CAN_EFF_FLAG ?
                       gfc & BIT(0) : gfc & BIT(1);
@@ -1092,11 +1211,27 @@ static bool bosch_m_can_transmit_one(BoschMCanState *s, unsigned index)
         transmitted |= can_bus_client_send(&s->bus_client, &frame, 1) > 0;
     }
     if (!transmitted) {
-        /* CanBus has no arbitration/ACK/retry/error event API. */
+        /*
+         * No node acknowledged the frame.  The request stays pending for
+         * automatic retransmission unless CCCR.DAR disables it, in which
+         * case the request is cancelled like a software cancellation.
+         * CanBus has no bit-level arbitration or error-frame API, so the
+         * acknowledge error is the only transmit error the model sees.
+         */
+        bosch_m_can_record_ack_error(s);
+        if (MCAN_REG(s, MCAN_CCCR) & MCAN_CCCR_DAR) {
+            MCAN_REG(s, MCAN_TXBRP) &= ~BIT(index);
+            MCAN_REG(s, MCAN_TXBCF) |= BIT(index);
+            bosch_m_can_advance_tx_get(s, index);
+            if (BIT(index) & MCAN_REG(s, MCAN_TXBCIE)) {
+                bosch_m_can_raise_ir(s, MCAN_IR_TCF);
+            }
+        }
         return false;
     }
 
     bosch_m_can_record_success(s, &frame);
+    bosch_m_can_record_tx_success(s);
     MCAN_REG(s, MCAN_TXBRP) &= ~BIT(index);
     MCAN_REG(s, MCAN_TXBTO) |= BIT(index);
     bosch_m_can_advance_tx_get(s, index);
@@ -1135,6 +1270,10 @@ static void bosch_m_can_process_tx(BoschMCanState *s)
     for (index = 0; index < 32; index++) {
         if (pending & BIT(index)) {
             bosch_m_can_transmit_one(s, index);
+            if (!bosch_m_can_active(s)) {
+                /* Bus-off or a clock change stopped the controller. */
+                break;
+            }
         }
     }
 }
@@ -1242,6 +1381,10 @@ static void bosch_m_can_write_cccr(BoschMCanState *s, uint32_t value)
         MCAN_REG(s, MCAN_TOCV) = MCAN_REG(s, MCAN_TOCC) >> 16;
     }
     MCAN_REG(s, MCAN_CCCR) = next;
+    if ((old & MCAN_CCCR_INIT) && !(next & MCAN_CCCR_INIT) &&
+        (MCAN_REG(s, MCAN_PSR) & MCAN_PSR_BO)) {
+        bosch_m_can_recover_from_bus_off(s);
+    }
     bosch_m_can_process_tx(s);
 }
 
@@ -1259,8 +1402,19 @@ static uint64_t bosch_m_can_read(void *opaque, hwaddr offset,
     case MCAN_CUST:
         return 0;
     case MCAN_ECR: {
-        uint32_t value = MCAN_REG(s, offset);
+        uint32_t value = MCAN_REG(s, offset) & MCAN_ECR_CEL_MASK;
 
+        /*
+         * While bus-off, TEC would count recessive-bit sequences during
+         * recovery; the model reports it saturated instead.
+         */
+        value = deposit32(value, MCAN_ECR_TEC_SHIFT, MCAN_ECR_TEC_LEN,
+                          MIN(s->tec, 0xff));
+        value = deposit32(value, MCAN_ECR_REC_SHIFT, MCAN_ECR_REC_LEN,
+                          MIN(s->rec, 0x7f));
+        if (s->rec >= MCAN_ERROR_PASSIVE_LIMIT) {
+            value |= MCAN_ECR_RP;
+        }
         MCAN_REG(s, offset) &= ~MCAN_ECR_CEL_MASK;
         return value;
     }
@@ -1484,6 +1638,8 @@ static void bosch_m_can_reset(DeviceState *dev)
     s->tx_fifo_get = s->tx_fifo_put = 0;
     s->txe_get = s->txe_put = s->txe_fill = 0;
     s->timestamp_counter = 0;
+    s->tec = 0;
+    s->rec = 0;
     /* Shared system SRAM is deliberately not cleared by peripheral reset. */
     bosch_m_can_update_irq(s);
 }
@@ -1577,6 +1733,8 @@ static int bosch_m_can_post_load(void *opaque, int version_id)
     MCAN_REG(s, MCAN_RWD) &= MCAN_RWD_WDC_MASK;
     MCAN_REG(s, MCAN_TOCV) &= 0xffff;
     MCAN_REG(s, MCAN_TSU_TSCFG) &= MCAN_TSCFG_MASK;
+    s->tec = MIN(s->tec, MCAN_BUS_OFF_LIMIT);
+    s->rec = MIN(s->rec, 0x7f);
     if (MCAN_REG(s, MCAN_CCCR) & MCAN_CCCR_TEST) {
         MCAN_REG(s, MCAN_TEST) &= MCAN_TEST_WRITABLE_MASK;
     } else {
@@ -1626,7 +1784,7 @@ static int bosch_m_can_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_bosch_m_can = {
     .name = TYPE_BOSCH_M_CAN,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = bosch_m_can_post_load,
     .fields = (const VMStateField[]) {
@@ -1643,6 +1801,8 @@ static const VMStateDescription vmstate_bosch_m_can = {
         VMSTATE_UINT8(txe_put, BoschMCanState),
         VMSTATE_UINT8(txe_fill, BoschMCanState),
         VMSTATE_UINT16(timestamp_counter, BoschMCanState),
+        VMSTATE_UINT16_V(tec, BoschMCanState, 3),
+        VMSTATE_UINT8_V(rec, BoschMCanState, 3),
         VMSTATE_CLOCK(hclk, BoschMCanState),
         VMSTATE_CLOCK(cclk, BoschMCanState),
         VMSTATE_END_OF_LIST(),
