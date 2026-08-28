@@ -717,10 +717,17 @@ Support matrix
        with zero errors and drops.  This topology cannot inject ESI from
        userspace: Linux's real-controller API treats ESI as
        controller-generated and its M_CAN transmit path ignores that request.
-       ESI reception remains part of the virtual host ``vcan`` profile; the
-       current machine's isolated two-path host gate still requires privileged
-       interface setup.  One internal bus is not proof of two independent
-       external board paths.
+       ESI reception is therefore covered by the virtual host ``vcan`` profile,
+       which has since passed: an isolated two-path host gate gave each
+       controller its own QEMU CAN bus and ``can-host-socketcan`` endpoint,
+       and each guest controller received 90 boundary cases while sending 86,
+       the four extra cases being the supplemental CAN-FD ESI frames only a
+       virtual peer can inject.  Both paths also passed 10,000 semantic frames
+       per role and, separately, 10,000 classic and 10,000 CAN-FD/BRS
+       ``canfdtest`` messages driven by host can-utils generators.  One
+       internal bus is still not proof of two independent external board
+       paths, and a virtual peer's injected ESI is not the same evidence as
+       ESI observed from a real error-passive controller.
        Quiescent whole-machine migration is also covered with the exact
        Linux4Microchip image.  Both endpoints first complete the 86-case
        boundary matrix, then stop at an application barrier before stress
@@ -1465,9 +1472,12 @@ integrity all passed in one bounded run.  The standalone shared-bus CAN gate
 also passed 10,000 semantic frames per direction, and separate classic plus
 CAN-FD/BRS ``canfdtest`` profiles each passed 10,000 exchanges.  A separate
 UHPHS ext4 result disk was written, cleanly unmounted and passed host-side
-filesystem checking, with an empty QEMU diagnostic log.  Remaining integration
-gates include full guest ``mmc_spi`` operation through J24, independent
-external CAN paths, the remaining board jumper and mux behavior, genuine QSPI
+filesystem checking, with an empty QEMU diagnostic log.  Independent external CAN paths are also
+achieved: both controllers passed the semantic and ``canfdtest`` profiles
+through separate ``can-host-socketcan`` endpoints on isolated buses, including
+the CAN-FD ESI receive path.  Remaining integration
+gates include full guest ``mmc_spi`` operation through J24, the remaining
+board jumper and mux behavior, genuine QSPI
 and NAND RomBOOT, broader USB hotplug/error/migration behavior, expansion
 buses, multimedia/security and finally hardware differential validation.
 Normal supported boots must be clean with ``-d unimp,guest_errors``.
