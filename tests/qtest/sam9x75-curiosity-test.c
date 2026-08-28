@@ -1283,6 +1283,9 @@
 #define TCB_CMR_ENETRG          BIT(12)
 #define TCB_CMR_EEVT(v)         ((uint32_t)(v) << 10)
 #define TCB_CMR_EEVTEDG(v)      ((uint32_t)(v) << 8)
+#define TCB_CMR_BCPB(v)         ((uint32_t)(v) << 24)
+#define TCB_CMR_BCPC(v)         ((uint32_t)(v) << 26)
+#define TCB_CMR_BSWTRG(v)       ((uint32_t)(v) << 30)
 #define TCB_CMR_ACPA(v)         ((uint32_t)(v) << 16)
 #define TCB_CMR_ACPC(v)         ((uint32_t)(v) << 18)
 #define TCB_CMR_ASWTRG(v)       ((uint32_t)(v) << 22)
@@ -7644,6 +7647,65 @@ static void test_tcb_tioa_waveform_and_capture(void)
  * the counter as well when ENETRG is set.  Only TIOB is modeled as a
  * source; the counter effect is what ENETRG gates, not the TIOA effect.
  */
+/*
+ * TIOB is a waveform output driven by BCPB, BCPC and BSWTRG, unless EEVT
+ * selects it as the external event, in which case it is an input and the
+ * channel must not drive it.
+ */
+static void test_tcb_tiob_waveform_output(void)
+{
+    const uint64_t ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
+    const char *tcb = "/machine/soc/tcb";
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MCKR, 1);
+    pmc_write_pcr(qts, 17, PMC_PCR_EN);
+    qtest_irq_intercept_out_named(qts, tcb, "tiob");
+
+    /* EEVT selects XC0, so TIOB is an output here. */
+    qtest_writel(qts, ch0 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE | TCB_CMR_WAVESEL_UP_RC |
+                 TCB_CMR_EEVT(1) | TCB_CMR_BSWTRG(1) | TCB_CMR_BCPB(3) |
+                 TCB_CMR_BCPC(2));
+    qtest_writel(qts, ch0 + TCB_RB, 100);
+    qtest_writel(qts, ch0 + TCB_RC, 200);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    /* The software trigger sets it. */
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    /* RB toggles it low, RC clears it and it stays low. */
+    qtest_clock_step(qts, 80000);
+    g_assert_true(qtest_readl(qts, ch0 + TCB_SR) & TCB_INT_CPBS);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, 80000);
+    g_assert_true(qtest_readl(qts, ch0 + TCB_SR) & TCB_INT_CPCS);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    /*
+     * Selecting TIOB as the external event makes it an input, so the same
+     * compares must no longer drive it.
+     */
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKDIS);
+    qtest_writel(qts, ch0 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE | TCB_CMR_WAVESEL_UP_RC |
+                 TCB_CMR_EEVT(0) | TCB_CMR_BSWTRG(1) | TCB_CMR_BCPB(3) |
+                 TCB_CMR_BCPC(2));
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, 160000);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    /* A capture-mode channel drives neither output. */
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKDIS);
+    qtest_writel(qts, ch0 + TCB_CMR, TCB_CMR_CLOCK2 | TCB_CMR_BSWTRG(1));
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    g_assert_false(qtest_get_irq(qts, 0));
+
+    qtest_quit(qts);
+}
+
 static void test_tcb_external_event(void)
 {
     const uint64_t ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
@@ -27304,6 +27366,8 @@ int main(int argc, char **argv)
                    test_tcb_external_trigger);
     qtest_add_func("sam9x75/tcb/external-event",
                    test_tcb_external_event);
+    qtest_add_func("sam9x75/tcb/tiob-waveform-output",
+                   test_tcb_tiob_waveform_output);
     qtest_add_func("sam9x75/tcb1/reset-masks-and-independence",
                    test_tcb1_reset_masks_and_independence);
     qtest_add_func("sam9x75/tcb1/clock-gating-and-irq",

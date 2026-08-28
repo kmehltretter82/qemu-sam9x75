@@ -57,6 +57,11 @@
 #define TCB_CMR_ACPC_SHIFT      18
 #define TCB_CMR_ASWTRG_SHIFT    22
 #define TCB_CMR_AEEVT_SHIFT     20
+/* The same effects for TIOB, which is an output unless it is the event. */
+#define TCB_CMR_BCPB_SHIFT      24
+#define TCB_CMR_BCPC_SHIFT      26
+#define TCB_CMR_BEEVT_SHIFT     28
+#define TCB_CMR_BSWTRG_SHIFT    30
 /* Waveform mode external event: source, edge, and whether it triggers. */
 #define TCB_CMR_ENETRG          BIT(12)
 #define TCB_CMR_EEVT_SHIFT      10
@@ -118,15 +123,31 @@
  * A compare event is a pulse to the XDMAC: the request line follows the
  * latched status bit, so reading the status register releases it.
  */
-/* Apply a waveform-mode effect to this channel's TIOA output. */
-static void at91_tcb_apply_tioa_effect(AT91TCBChannel *ch, unsigned int shift)
+/*
+ * TIOB is an output in waveform mode unless EEVT selects it as the
+ * external event, in which case the channel must not drive it.
+ */
+static bool at91_tcb_tiob_is_output(const AT91TCBChannel *ch)
+{
+    return (ch->cmr & TCB_CMR_WAVE) &&
+           ((ch->cmr >> TCB_CMR_EEVT_SHIFT) & TCB_CMR_EEVT_MASK) !=
+           TCB_CMR_EEVT_TIOB;
+}
+
+/* Apply a waveform-mode effect to one of this channel's outputs. */
+static void at91_tcb_apply_pin_effect(AT91TCBChannel *ch, unsigned int shift,
+                                      bool is_tioa)
 {
     unsigned int effect = (ch->cmr >> shift) & 3;
     AT91TCBState *s = ch->owner;
     unsigned int index = ch - s->channel;
-    bool level = ch->tioa_out;
+    bool *out = is_tioa ? &ch->tioa_out : &ch->tiob_out;
+    bool level = *out;
 
     if (!(ch->cmr & TCB_CMR_WAVE)) {
+        return;
+    }
+    if (!is_tioa && !at91_tcb_tiob_is_output(ch)) {
         return;
     }
     switch (effect) {
@@ -142,10 +163,15 @@ static void at91_tcb_apply_tioa_effect(AT91TCBChannel *ch, unsigned int shift)
     default:
         return;
     }
-    if (level != ch->tioa_out) {
-        ch->tioa_out = level;
-        qemu_set_irq(s->tioa[index], level);
+    if (level != *out) {
+        *out = level;
+        qemu_set_irq(is_tioa ? s->tioa[index] : s->tiob[index], level);
     }
+}
+
+static void at91_tcb_apply_tioa_effect(AT91TCBChannel *ch, unsigned int shift)
+{
+    at91_tcb_apply_pin_effect(ch, shift, true);
 }
 
 static void at91_tcb_update_compare_requests(AT91TCBState *s)
@@ -436,6 +462,7 @@ static void at91_tcb_external_event(AT91TCBChannel *ch, bool from_tioa,
         return;
     }
     at91_tcb_apply_tioa_effect(ch, TCB_CMR_AEEVT_SHIFT);
+    at91_tcb_apply_pin_effect(ch, TCB_CMR_BEEVT_SHIFT, false);
     if (ch->cmr & TCB_CMR_ENETRG) {
         at91_tcb_configure_channel(ch, 0);
     }
@@ -628,6 +655,7 @@ static void at91_tcb_channel_write(AT91TCBState *s, unsigned int index,
         } else if (value & TCB_CCR_SWTRG) {
             at91_tcb_start_channel(ch, true);
             at91_tcb_apply_tioa_effect(ch, TCB_CMR_ASWTRG_SHIFT);
+            at91_tcb_apply_pin_effect(ch, TCB_CMR_BSWTRG_SHIFT, false);
         } else if (value & TCB_CCR_CLKEN) {
             at91_tcb_start_channel(ch, false);
         }
@@ -772,6 +800,7 @@ static void at91_tcb_tick(void *opaque)
         }
         if (ch->rb == boundary) {
             ch->status |= TCB_INT_CPBS;
+            at91_tcb_apply_pin_effect(ch, TCB_CMR_BCPB_SHIFT, false);
         }
     }
 
@@ -779,6 +808,7 @@ static void at91_tcb_tick(void *opaque)
         if (at91_tcb_auto_rc(ch)) {
             ch->status |= TCB_INT_CPCS;
             at91_tcb_apply_tioa_effect(ch, TCB_CMR_ACPC_SHIFT);
+            at91_tcb_apply_pin_effect(ch, TCB_CMR_BCPC_SHIFT, false);
         } else {
             ch->status |= TCB_INT_COVFS;
         }
@@ -861,6 +891,7 @@ static void at91_tcb_reset(DeviceState *dev)
         memset(ch->compare_request_level, 0,
                sizeof(ch->compare_request_level));
         ch->tioa_out = false;
+        ch->tiob_out = false;
         ch->tioa_in = false;
         ch->tiob_in = false;
         ch->capture_request_level = false;
@@ -887,6 +918,8 @@ static void at91_tcb_init(Object *obj)
                              ARRAY_SIZE(s->compare_request));
     qdev_init_gpio_out_named(DEVICE(s), s->tioa, "tioa",
                              ARRAY_SIZE(s->tioa));
+    qdev_init_gpio_out_named(DEVICE(s), s->tiob, "tiob",
+                             ARRAY_SIZE(s->tiob));
     qdev_init_gpio_out_named(DEVICE(s), s->capture_request,
                              "capture-request",
                              ARRAY_SIZE(s->capture_request));
@@ -970,6 +1003,7 @@ static const VMStateDescription at91_tcb_channel_vmstate = {
         VMSTATE_UINT64_V(segment_end, AT91TCBChannel, 2),
         VMSTATE_BOOL_ARRAY_V(compare_request_level, AT91TCBChannel, 3, 2),
         VMSTATE_BOOL_V(tioa_out, AT91TCBChannel, 3),
+        VMSTATE_BOOL_V(tiob_out, AT91TCBChannel, 3),
         VMSTATE_BOOL_V(tioa_in, AT91TCBChannel, 3),
         VMSTATE_BOOL_V(tiob_in, AT91TCBChannel, 3),
         VMSTATE_BOOL_V(capture_request_level, AT91TCBChannel, 3),
