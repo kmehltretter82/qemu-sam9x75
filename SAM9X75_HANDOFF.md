@@ -392,6 +392,15 @@ closed.  Do these steps next.
    - Optionally a read-only QSPI RDID (`9Fh`) through an XDMAC
      request-paced byte channel, to compare the narrow-access behaviour that
      QEMU now models.  RDID reads only; nothing else.
+   Everything workspace-local that this section needs was packaged on
+   2026-08-28 as `sam9x75-hardware-agent-20260828.tar.gz` (102 MB, SHA-256
+   `324a43b9f2b9fa21f622d57c2bbe4ae765aac068602242390db4da174658d059`) next to the workspace root on the Linux
+   workstation.  It holds the crypto-fix and EHCI-fix artifacts with their
+   fixed kernels, the r5 hardware package, the stress matrix, the data sheet,
+   and every authoritative QEMU evidence directory named in this file with
+   disposable disk images removed (each run keeps its `extracted/` tree and
+   hashes).  Its `hardware-agent-manifest/MANIFEST.md` lists exact contents
+   and exclusions.  Verify the archive hash before use.
    The datasheet behind every register claim in this checkpoint is the
    Microchip SAM9X7 Series Data Sheet, document **DS60001813E** (Table 16.1
    for XDMAC requests, the UDPHS `INTSTA` and TC `SR` bit layouts).  It is
