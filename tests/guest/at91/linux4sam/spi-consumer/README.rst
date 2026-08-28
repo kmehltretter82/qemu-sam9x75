@@ -222,10 +222,10 @@ accepted with no stale argument bytes, and a migration taken with four of
 six command bytes transferred, which the destination completes.
 
 Card initialization, single-block read and write, multiple-block read with
-a CMD12 stop, and migration at a command boundary and inside a read data
-phase are all covered, the last at `b61da6d205`.  What the release gate still
-needs is migration taken during a partial response, a data *write* and a
-CRC phase.
+a CMD12 stop, and migration at a command boundary and inside the read data,
+write data and CRC phases are all covered, the last at `cbc7592d80`.  The
+remaining reset and migration item is a migration taken during a partial
+command *response*; every other phase named above now has coverage.
 
 That question is answered.  Tracing the working gate with
 ``-trace enable=sdcard_normal_command -trace enable=sdcard_app_command``
