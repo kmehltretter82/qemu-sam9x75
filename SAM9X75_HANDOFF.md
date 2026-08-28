@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `c5ee939fd0`
+- Latest tested repository checkpoint: `28529c9b12`
+  (`hw/net/can/bosch_m_can: Model error counters and error confinement`)
+- Preceding board checkpoint: `c5ee939fd0`
   (`hw/arm/sam9x75-curiosity: Route the PA13 GPIO chip select to the M.2
   card`)
 - Preceding generic QEMU fix: `8fb8b5db49`
@@ -62,8 +64,9 @@ The QEMU implementation at `1851743e84` compiled cleanly in
 `build-verify-serial`; the host regressions below were repeated at repository
 checkpoint `fcfbe1ae0e` after relinking.
 
-- The complete SAM9X75 Curiosity qtest binary passed **240/240**, including
-  the two new SPI chip-select tests below.
+- The complete SAM9X75 Curiosity qtest binary passed **243/243**, including
+  the two SPI chip-select tests and the three M_CAN error-confinement tests
+  below.
 - The complete generic chardev unit binary passed **42/42**.  The new TCP and
   Unix reconnect cases prove that a failed reconnect after a previous client
   closes no longer tries to unregister an unregistered yank callback; the old
@@ -253,6 +256,31 @@ checkpoint `fcfbe1ae0e` after relinking.
   gate: the read-only FLEXCOM SPI `+0xfc` `SPI_VERSION` value must be
   measured on silicon.  Do not invent it, and do not add a fictional PDC or
   version register to satisfy the driver.
+- The M_CAN model now has ISO 11898-1 error confinement from the transmit
+  side, at `28529c9b12`.  Before this the model had no TEC/REC at all and an
+  unacknowledged frame stayed pending in `TXBRP` forever with nothing
+  recorded.  A frame no other node acknowledges now records `LEC=3`, adds 8
+  to TEC, logs the error in `ECR.CEL` and raises `IR.PEA`; it stays pending
+  for automatic retransmission unless `CCCR.DAR` cancels it through `TXBCF`
+  and `IR.TCF`.  `PSR.EW`/`EP`/`BO` derive from the counters at 96/128/256,
+  every change is reported through `IR.EW`/`EP`/`BO`, bus-off sets
+  `CCCR.INIT`, and clearing `INIT` recovers.  Successful transfers decrement
+  the counters, `ECR` exposes TEC/REC/RP, and the counters migrate in vmstate
+  version 3.
+- Three new qtests cover it: `sam9x75/mcan/error-confinement-and-bus-off`
+  drives a lone controller through warning, passive and bus-off, recovers,
+  retries and exercises DAR; `sam9x75/mcan/error-recovery-with-peer` holds
+  the peer in `INIT` so it acknowledges nothing, then releases it and checks
+  that the retried frame succeeds and decrements TEC; and
+  `sam9x75/mcan/error-state-migration` migrates in the error-passive state
+  and completes bus-off and recovery on the destination.
+- Deliberate limits of that slice, so they are not mistaken for bugs: the
+  CAN bus abstraction has no bit-level arbitration, error frames or
+  receive-error injection, so REC never increments; `PSR.ACT` is not driven;
+  and bus-off recovery is immediate rather than timed over 129 recessive-bit
+  sequences.  The last of these is also why a real error-passive controller
+  still cannot be produced for the open ESI sub-gate: it needs a receive-side
+  error source first.
 - The host `vcan` prerequisite is an environment setup step, not a code
   change.  On this workstation the README's private-namespace recipe cannot
   work because Ubuntu sets `kernel.apparmor_restrict_unprivileged_userns=1`,
@@ -276,14 +304,14 @@ closed.  Do these steps next.
    behavior.  The `mmc_spi` consumer gate itself is blocked only on a silicon
    measurement (see item 4) and must not be forced.
 2. Then the next bounded P1 implementation slice from the machine support
-   matrix.  The adjacent CAN candidate is roadmap phase 6: M_CAN bus-error
-   counters, error confinement, retry, timestamp synchronization and
-   debug-message behavior, with the usual reset, negative, interrupt and
-   migration coverage.  The M_CAN model currently has no TEC/REC at all, so
-   this is new work rather than a refinement.  Completing it is also what
-   would let a real controller reach error-passive and generate ESI natively.
-   Keep Linux4Microchip as the primary OS; NetBSD, FreeBSD, other guests and
-   the newer-mainline matrix remain deliberately deferred.
+   matrix.  The transmit-side M_CAN error confinement is done; what remains
+   of roadmap phase 6 is a receive-side error source (which the CAN bus
+   abstraction does not offer today), the `PSR.ACT` field, timed bus-off
+   recovery, timestamp synchronization and debug-message behavior.  Other
+   P1 candidates are the UDPHS `NB_TRANS`/isochronous/suspend-resume work
+   and the UHPHS fidelity items.  Keep Linux4Microchip as the primary OS;
+   NetBSD, FreeBSD, other guests and the newer-mainline matrix remain
+   deliberately deferred.
 3. In parallel, the physical-board agent can run the safe crypto validation in
    `artifacts/linux4microchip-crypto-fixes-20260827/REAL-HARDWARE-TESTS.md`.
 4. Also on the board, take the read-only FLEXCOM SPI `+0xfc` probe in
@@ -642,8 +670,12 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 240/240 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 243/243 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  The
+M_CAN model now has transmit-side ISO 11898-1 error confinement: TEC/REC,
+EW/EP/BO with their interrupts, DAR cancellation, bus-off setting INIT and
+recovery on clearing it, all migrated; REC never increments because the bus
+abstraction has no receive-error source.  The
 board now routes the upstream overlay's PA13 GPIO chip select to the M.2 card
 through an `at91-pad-mux`, closing the first `mmc_spi` blocker; the second
 still needs a silicon `SPI_VERSION` measurement and must not be invented.

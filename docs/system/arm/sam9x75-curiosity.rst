@@ -701,10 +701,23 @@ Support matrix
        and disabled, internal and reserved timestamp-source selection are
        also covered.  Successful-transfer LEC/DLEC updates, the last received
        CAN-FD format indicators, PSR read side effects and ECR.CEL
-       read-to-clear behavior follow the Bosch interface.  Bus-error counters,
-       confinement/retry, bit-level arbitration, debug-message handling,
-       timestamp synchronization pins, the external timestamp source and
-       precise timestamp-unit timing remain incomplete.
+       read-to-clear behavior follow the Bosch interface.  Error confinement
+       is modeled from the transmit side: a frame no other node acknowledges
+       records ``LEC=3``, adds 8 to TEC, logs the error in ``ECR.CEL`` and
+       raises ``IR.PEA``; the request stays pending for automatic
+       retransmission unless ``CCCR.DAR`` cancels it through ``TXBCF`` and
+       ``IR.TCF``.  ``PSR.EW``, ``EP`` and ``BO`` derive from the counters at
+       96, 128 and 256, every change is reported through ``IR.EW``, ``EP``
+       and ``BO``, and bus-off sets ``CCCR.INIT``.  Clearing ``INIT``
+       recovers immediately, since the CAN bus abstraction has no bit timing
+       in which to count the 129 recessive-bit sequences hardware waits for.
+       Successful transmission and reception decrement the counters, ``ECR``
+       exposes TEC, REC and RP, and the counters migrate.  The bus
+       abstraction offers no bit-level arbitration, error frames or
+       receive-error injection, so REC never increments and ``PSR.ACT`` is
+       not driven; those, debug-message handling, timestamp synchronization
+       pins, the external timestamp source and precise timestamp-unit timing
+       remain incomplete.
        A Linux
        7.2.0-rc7-next-20260814 guest with a DT overlay probes ``can0`` and
        ``can1`` and passes bidirectional
@@ -943,10 +956,11 @@ phase green merely by avoiding it in the device tree.
    with unmodified Linux host storage and input, then compare reset, port-power,
    hotplug, DMA-error and interrupt behavior with the board.  Complete UDPHS
    isochronous and suspend/resume timing, add a host-facing cable backend, and
-   prove gadget/SAM-BA operation.  Extend M_CAN with error confinement,
-   retry, timestamp synchronization and debug-message behavior; keep the Linux
-   CAN-FD/QEMU-backend regression passing and compare it against the physical
-   controllers.
+   prove gadget/SAM-BA operation.  Extend M_CAN beyond the modeled
+   acknowledge-error confinement and retry with receive-side error sources,
+   the ``PSR.ACT`` field, timed bus-off recovery, timestamp synchronization
+   and debug-message behavior; keep the Linux CAN-FD/QEMU-backend regression
+   passing and compare it against the physical controllers.
 #. **Complete high-bandwidth and security blocks.**  Add XLCDC, GFX2D, ISC,
    CSI2DC, MIPI CSI/DSI PHY and LVDS endpoints, complete the initial OTPC
    model, and add PUF.  Close documented crypto, TRNG, audio and GEM/PTP/TSN
