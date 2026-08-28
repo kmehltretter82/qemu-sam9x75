@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `b61da6d205`
+- Latest tested repository checkpoint: `d35568571c`
+  (`hw/misc: Add an AT91 SSC model and wire it on SAM9X7`)
+- Preceding test checkpoint: `b61da6d205`
   (`tests/qtest/sam9x75: Cover SPI-mode multiple-block read`)
 - Preceding implementation checkpoint: `a07f50cd94`
   (`hw/sd: Migrate the data-phase size`)
@@ -319,9 +321,11 @@ checkpoint `fcfbe1ae0e` after relinking.
   uses `dmaengine_prep_dma_memcpy` through the AHB window, not request-paced
   transfers, so requests 26/27 have no Linux consumer and the qtests are the
   gate.  Do not claim a Linux DMA gate for QSPI from this evidence.
-- The XDMAC request map is now complete except for lines that need models
-  first: SSC 38/39 (no SSC model) and TC 41--50 (TCB raises no capture or
-  compare events).  Those are prerequisites, not wiring gaps.
+- The XDMAC request map is complete except for the timer capture and
+  external-trigger lines 41--42 and 49--50, which need TIOA and TIOB input
+  pins the board does not route.  The TC compare events 43--48 were wired
+  with the TCB compare slice, and SSC 38/39 with the new SSC model at
+  `d35568571c`.
 - The SDMMC0 card-detect pin follows the medium at `73631d172f`.  The exact
   device tree detects the card through `cd-gpios` on PA23, but the board
   drove PA23 once at creation and only when a drive existed, so a guest could
@@ -968,7 +972,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 255/255 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 257/257 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two
 full Curiosity runs on 2026-08-28 aborted at QEMU startup; that was host
 memory pressure, not a model fault, and the rule it implies is below.

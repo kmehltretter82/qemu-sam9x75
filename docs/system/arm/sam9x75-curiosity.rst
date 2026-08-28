@@ -321,11 +321,11 @@ Support matrix
        overflow is reported only on a rising edge while a channel still has
        an accepted chunk outstanding; re-driving an already-asserted line is
        not a new request.  The TC compare events 43--48 are wired to
-       channel 1 of each timer block.  Of the 51 requests in DS60001813E
-       Table 16.1, the ones that remain are SSC transmit/receive (38, 39),
-       which need an SSC model, and the timer capture and external-trigger
-       lines (41--42, 49--50), which need TIOA and TIOB input pins the board
-       does not route.  GWAC pool weighting and
+       channel 1 of each timer block.  The SSC transmit and receive
+       requests 38 and 39 are wired to the SSC model.  Of the 51 requests in
+       DS60001813E Table 16.1, the only ones that remain are the timer
+       capture and external-trigger lines (41--42, 49--50), which need TIOA
+       and TIOB input pins the board does not route.  GWAC pool weighting and
        CNDC/descriptor QOS effects, security policy, bus/burst and
        arbitration timing, and coherency effects remain missing.  DMA memory
        accesses are synchronous in QEMU, so positive RDIP/WRIP intervals can
@@ -737,7 +737,16 @@ Support matrix
        periodic and continuous triggers, conversion timing, enhanced
        resolution, comparison, result/overrun status, interrupts, halfword
        DMA, write protection, VDDCORE reset and migration.  Input and reference
-       voltages are injectable in microvolts through QOM properties.  Register
+       voltages are injectable in microvolts through QOM properties.
+       The single SSC at ``0xf0010000`` on PID/AIC source 28 is modeled at
+       the register level: enable, disable and software reset, the mode and
+       format registers, the holding registers with ``TXRDY``, ``TXEMPTY``,
+       ``RXRDY`` and read-to-clear ``OVRUN``, interrupts, write protection
+       that records the refused offset, reset and migration.  Loop mode ties
+       TD back to RD and is the only path that carries data, and the
+       transmit and receive XDMAC requests 38 and 39 follow their status
+       bits.  Frame timing, the sync and compare units and the external
+       TK/TF/RK/RF pins are not modeled.  Register
        tests decode reserved locations, including the absent ``0xfc`` version
        register, without guest-error logging.  The revised data sheet gives
        ``ADC_ACR`` reset value ``0x1200`` while the 2026 device pack gives
