@@ -226,6 +226,48 @@ initialization and single/multiple-block reads and writes, then migrate
 during a partial response, data read, data write, CRC and stop-command
 phase.
 
+That question is answered.  Tracing the working gate with
+``-trace enable=sdcard_normal_command -trace enable=sdcard_app_command``
+showed the real sequence: ``ACMD41`` reaches ``sd_ready_state`` and
+**CMD10 (SEND_CID) is what advances to** ``sd_transfer_state``, because
+``spi_cmd_SEND_CxD()`` switches state on the grounds that SPI returns the
+CID and CSD on the data lines.  CMD1 is accepted but shares the ACMD41
+handler, so it leaves the card idle, and CMD16 is refused outside transfer
+state.  A direct qtest sequence that omits CMD9 or CMD10 therefore cannot
+reach block I/O, which is what made this look like a model gap.  Evidence:
+``t/linux4microchip-mmc-spi-20260828/trace-r1``.
+
+One further detail costs time if unknown: every command helper must clock
+one extra byte after the R1 answer, because the card returns to its command
+state on that byte and otherwise consumes the next command's opcode.
+
+``sam9x75/sdcard/spi-block-transfer-and-data-migration`` at `0469ae3b29` now covers
+single-block read and write and a migration at a command boundary.
+
+Candidate bug, not yet confirmed: migration taken *inside* a read data
+phase did not resume correctly.  With 100 bytes of a 512-byte block already
+clocked out on the source, the destination continued at byte 48 rather than
+byte 100.  ``SDState`` migrates ``data_start``, ``data_offset`` and the
+512-byte buffer, and ``ssi_sd_state`` migrates ``mode``, ``read_bytes`` and
+``response_pos``, so the two sides appear to disagree after load rather
+than either being absent.  Reproduce by asserting the continuation instead
+of migrating at a command boundary, and compare ``data_offset`` against
+``read_bytes`` on both ends before calling it a bug.
+
+Reset and migration follow-up
+-----------------------------
+
+Two of these are done at `5bcb06b161`:
+``sam9x75/sdcard/spi-reset-and-partial-command-migration`` covers a machine
+reset taken with a command half sent, after which a complete CMD0 is
+accepted with no stale argument bytes, and a migration taken with four of
+six command bytes transferred, which the destination completes.
+
+The release gate still needs qtests that complete SPI-mode card
+initialization and single/multiple-block reads and writes, then migrate
+during a partial response, data read, data write, CRC and stop-command
+phase.
+
 Before writing those, resolve this open question, because an attempt to
 write them ran straight into it.  Driving the generic SD model directly
 from a qtest, ``ACMD41`` (CMD55 then CMD41) leaves the card in
