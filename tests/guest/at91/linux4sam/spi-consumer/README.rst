@@ -224,7 +224,28 @@ six command bytes transferred, which the destination completes.
 The release gate still needs qtests that complete SPI-mode card
 initialization and single/multiple-block reads and writes, then migrate
 during a partial response, data read, data write, CRC and stop-command
-phase.  An
+phase.
+
+Before writing those, resolve this open question, because an attempt to
+write them ran straight into it.  Driving the generic SD model directly
+from a qtest, ``ACMD41`` (CMD55 then CMD41) leaves the card in
+``sd_ready_state``, and no command in the SPI protocol table moves it from
+there to ``sd_transfer_state``: CMD2, CMD3 and CMD7 are not in that table,
+and ``sd_cmd_READ_SINGLE_BLOCK`` and ``sd_cmd_SET_BLOCKLEN`` both reject
+any state but transfer, answering with the illegal-command bit.  CMD1 is
+accepted but leaves the card idle, because it shares the ACMD41 handler
+which requires the idle state and then sets ready.
+
+That contradicts the passing Linux gate above, which moved 8 MiB through
+CMD17 and CMD24, so one of two things is true and it is worth knowing
+which: either the driver reaches transfer by a path the direct sequence
+misses, or the block I/O succeeded for a reason unrelated to the modeled
+state machine.  The cheap way to settle it is to re-run the gate with
+``-trace 'sdcard_*'`` and read the actual command and state sequence rather
+than infer it.  Two useful details for whoever does: the card leaves idle
+only after a correctly framed ACMD41, and every command helper must clock
+one extra byte after the R1 answer, because the model returns to its
+command state on that byte and otherwise eats the next command's opcode.  An
 incomplete write must not reach the backing image; a completed write must do
 so exactly once.  A machine reset must return the card protocol to idle while
 preserving backing bytes.
