@@ -106,6 +106,21 @@
 #define TCB_SR_MIRROR_MASK      (7U << 16)
 
 #define TCB_QINT_MASK           0xf7
+#define TCB_QISR_IDX            BIT(0)
+#define TCB_QISR_DIRCHG         BIT(1)
+#define TCB_QISR_QERR           BIT(2)
+#define TCB_QISR_DIR            BIT(8)
+
+#define TCB_BMR_QDEN            BIT(8)
+#define TCB_BMR_POSEN           BIT(9)
+#define TCB_BMR_SPEEDEN         BIT(10)
+#define TCB_BMR_QDTRANS         BIT(11)
+#define TCB_BMR_EDGPHA          BIT(12)
+#define TCB_BMR_INVA            BIT(13)
+#define TCB_BMR_INVB            BIT(14)
+#define TCB_BMR_INVIDX          BIT(15)
+#define TCB_BMR_SWAP            BIT(16)
+#define TCB_BMR_IDXPHB          BIT(17)
 
 #define TCB_WPMR_WPEN           BIT(0)
 #define TCB_WPMR_WPITEN         BIT(1)
@@ -150,6 +165,7 @@ static bool at91_tcb_tiob_is_output(const AT91TCBChannel *ch)
 }
 
 static void at91_tcb_xc_refresh(AT91TCBState *s);
+static void at91_tcb_qdec_update(AT91TCBState *s);
 static void at91_tcb_external_event(AT91TCBChannel *ch, unsigned int source,
                                     bool rising);
 
@@ -581,6 +597,9 @@ static void at91_tcb_pin_input(AT91TCBState *s, unsigned int index,
     if (!ch->enabled || !ch->running) {
         return;
     }
+    if (index == 0) {
+        at91_tcb_qdec_update(s);
+    }
     if (from_tioa) {
         at91_tcb_capture_edge(ch, value);
     }
@@ -732,7 +751,9 @@ static uint64_t at91_tcb_read(void *opaque, hwaddr offset, unsigned int size)
     case TCB_QIMR:
         return s->qimr;
     case TCB_QISR: {
-        uint32_t value = s->qisr;
+        /* Bits 0-7 are events cleared by this read; DIR is live. */
+        uint32_t value = (s->qisr & 0xff) |
+                         (s->qdec_dir ? TCB_QISR_DIR : 0);
 
         s->qisr = 0;
         at91_tcb_update_irq(s);
@@ -987,6 +1008,79 @@ static void at91_tcb_edge_advance(AT91TCBChannel *ch)
 }
 
 /*
+ * Quadrature decoding.  PHA and PHB are channel 0's TIOA and TIOB, subject
+ * to the INVA, INVB and SWAP options.  A transition of one phase gives the
+ * direction from whether the two now agree.  With POSEN the decoded pulses
+ * drive channel 0's position counter, which the guest clocks from XC0 as
+ * the block wires the decoder output there.
+ *
+ * QERR is not reported.  It marks both phases moving within the filter
+ * window, and the phase inputs arrive here one GPIO event at a time, so a
+ * simultaneous transition cannot be observed.  Reporting it would take a
+ * batched pin update this model has no way to receive.
+ */
+static bool at91_tcb_qdec_phase(AT91TCBState *s, bool want_pha)
+{
+    bool pha = s->channel[0].tioa_in;
+    bool phb = s->channel[0].tiob_in;
+
+    if (s->bmr & TCB_BMR_SWAP) {
+        bool tmp = pha;
+
+        pha = phb;
+        phb = tmp;
+    }
+    if (s->bmr & TCB_BMR_INVA) {
+        pha = !pha;
+    }
+    if (s->bmr & TCB_BMR_INVB) {
+        phb = !phb;
+    }
+    return want_pha ? pha : phb;
+}
+
+static void at91_tcb_qdec_update(AT91TCBState *s)
+{
+    bool pha = at91_tcb_qdec_phase(s, true);
+    bool phb = at91_tcb_qdec_phase(s, false);
+    bool pha_changed = pha != s->qdec_pha;
+    bool dir;
+
+    if (!(s->bmr & TCB_BMR_QDEN)) {
+        s->qdec_pha = pha;
+        s->qdec_phb = phb;
+        return;
+    }
+    if (!pha_changed && phb == s->qdec_phb) {
+        return;
+    }
+    /*
+     * Direction: PHA leading PHB counts up.  On a PHA edge that means the
+     * phases now differ, and on a PHB edge that they now agree.
+     */
+    dir = pha_changed ? (pha != phb) : (pha == phb);
+    if (!(s->bmr & TCB_BMR_QDTRANS)) {
+        if (s->qdec_seen && dir != s->qdec_dir) {
+            s->qisr |= TCB_QISR_DIRCHG;
+        }
+        s->qdec_dir = dir;
+        s->qdec_seen = true;
+    }
+    s->qdec_pha = pha;
+    s->qdec_phb = phb;
+
+    /* EDGPHA clear counts PHA edges only. */
+    if ((s->bmr & TCB_BMR_POSEN) &&
+        ((s->bmr & TCB_BMR_EDGPHA) || pha_changed)) {
+        AT91TCBChannel *ch = &s->channel[0];
+
+        ch->counting_down = !s->qdec_dir;
+        at91_tcb_edge_advance(ch);
+    }
+    at91_tcb_update_irq(s);
+}
+
+/*
  * Recompute what each XC signal carries and advance every channel clocked
  * from one that just moved in its counting direction.  CLKI inverts which
  * edge counts.
@@ -1094,6 +1188,10 @@ static void at91_tcb_reset(DeviceState *dev)
         ch->capture_request_level = false;
         ch->etrg_request_level = false;
     }
+    s->qdec_pha = false;
+    s->qdec_phb = false;
+    s->qdec_dir = false;
+    s->qdec_seen = false;
     memset(s->tclk_in, 0, sizeof(s->tclk_in));
     memset(s->xc_level, 0, sizeof(s->xc_level));
     s->bmr = 0;
@@ -1240,7 +1338,7 @@ static int at91_tcb_post_load(void *opaque, int version_id)
 
 static const VMStateDescription at91_tcb_vmstate = {
     .name = TYPE_AT91_TCB,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = at91_tcb_post_load,
     .fields = (const VMStateField[]) {
@@ -1253,6 +1351,14 @@ static const VMStateDescription at91_tcb_vmstate = {
         VMSTATE_UINT32(qimr, AT91TCBState),
         VMSTATE_UINT32(qisr, AT91TCBState),
         VMSTATE_UINT32(wpmr, AT91TCBState),
+        VMSTATE_BOOL_ARRAY_V(tclk_in, AT91TCBState,
+                             AT91_TCB_NUM_CHANNELS, 2),
+        VMSTATE_BOOL_ARRAY_V(xc_level, AT91TCBState,
+                             AT91_TCB_NUM_CHANNELS, 2),
+        VMSTATE_BOOL_V(qdec_pha, AT91TCBState, 2),
+        VMSTATE_BOOL_V(qdec_phb, AT91TCBState, 2),
+        VMSTATE_BOOL_V(qdec_dir, AT91TCBState, 2),
+        VMSTATE_BOOL_V(qdec_seen, AT91TCBState, 2),
         VMSTATE_END_OF_LIST()
     },
 };

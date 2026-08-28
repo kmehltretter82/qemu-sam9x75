@@ -1275,6 +1275,15 @@
 #define TCB_CMR_CLKI            BIT(3)
 #define TCB_BMR_XC0S(v)         ((uint32_t)(v) << 0)
 #define TCB_BMR_XC1S(v)         ((uint32_t)(v) << 2)
+#define TCB_BMR_QDEN            BIT(8)
+#define TCB_BMR_POSEN           BIT(9)
+#define TCB_BMR_EDGPHA          BIT(12)
+#define TCB_BMR_SWAP            BIT(16)
+#define TCB_QISR                 0xd4
+#define TCB_QISR_IDX            BIT(0)
+#define TCB_QISR_DIRCHG         BIT(1)
+#define TCB_QISR_QERR           BIT(2)
+#define TCB_QISR_DIR            BIT(8)
 #define TCB_CMR_CPCSTOP         BIT(6)
 #define TCB_CMR_WAVESEL_UP_RC   (2U << 13)
 #define TCB_CMR_WAVESEL_UPDOWN_RC (3U << 13)
@@ -7669,6 +7678,88 @@ static void test_tcb_tioa_waveform_and_capture(void)
  * BMR routes each XC from a TCLK pin or from another channel's TIOA, which
  * is how the block chains channels internally.
  */
+/* Drive one quadrature step; phase order decides the direction. */
+static void qdec_step(QTestState *qts, const char *tcb, unsigned int step,
+                      bool forward)
+{
+    static const int seq[4][2] = { {0, 0}, {1, 0}, {1, 1}, {0, 1} };
+    unsigned int i = forward ? step % 4 : 3 - (step % 4);
+
+    qtest_set_irq_in(qts, tcb, "tioa-in", 0, seq[i][0]);
+    qtest_set_irq_in(qts, tcb, "tiob-in", 0, seq[i][1]);
+}
+
+/*
+ * The quadrature decoder takes PHA and PHB from channel 0's TIOA and TIOB
+ * and turns them into a direction and a stream of position counts, which
+ * channel 0 counts because the block wires the decoder to XC0.  Turning
+ * the encoder the other way makes the position fall and reports DIRCHG.
+ */
+static void test_tcb_quadrature_decoder(void)
+{
+    const uint64_t ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
+    const uint64_t bmr = SAM9X7_TCB_BASE + TCB_BMR;
+    const uint64_t qisr = SAM9X7_TCB_BASE + TCB_QISR;
+    const char *tcb = "/machine/soc/tcb";
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int i;
+    uint32_t position;
+    uint32_t status;
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MCKR, 1);
+    pmc_write_pcr(qts, 17, PMC_PCR_EN);
+
+    /* Without QDEN the phases are just pins. */
+    qtest_writel(qts, ch0 + TCB_CMR, TCB_CMR_CLOCK_XC0);
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    for (i = 0; i < 8; i++) {
+        qdec_step(qts, tcb, i, true);
+    }
+    g_assert_cmphex(qtest_readl(qts, ch0 + TCB_CV), ==, 0);
+
+    /* Enable the decoder and the position counter on PHA edges. */
+    qtest_writel(qts, bmr, TCB_BMR_QDEN | TCB_BMR_POSEN);
+    qtest_readl(qts, qisr);
+    for (i = 0; i < 8; i++) {
+        qdec_step(qts, tcb, i, true);
+    }
+    position = qtest_readl(qts, ch0 + TCB_CV);
+    g_assert_cmpuint(position, >, 0);
+    status = qtest_readl(qts, qisr);
+    g_assert_cmphex(status & TCB_QISR_DIR, ==, TCB_QISR_DIR);
+    g_assert_cmphex(status & TCB_QISR_QERR, ==, 0);
+
+    /* Turning back reports a direction change and the position falls. */
+    for (i = 8; i > 0; i--) {
+        qdec_step(qts, tcb, i - 1, true);
+    }
+    status = qtest_readl(qts, qisr);
+    g_assert_cmphex(status & TCB_QISR_DIRCHG, ==, TCB_QISR_DIRCHG);
+    g_assert_cmphex(status & TCB_QISR_DIR, ==, 0);
+    g_assert_cmpuint(qtest_readl(qts, ch0 + TCB_CV), <, position);
+
+    /*
+     * QERR stays clear: it marks both phases moving at once, which cannot
+     * be produced here because each phase arrives as its own GPIO event.
+     */
+    qtest_readl(qts, qisr);
+    qdec_step(qts, tcb, 0, true);
+    qtest_set_irq_in(qts, tcb, "tioa-in", 0, 1);
+    qtest_set_irq_in(qts, tcb, "tiob-in", 0, 1);
+    g_assert_cmphex(qtest_readl(qts, qisr) & TCB_QISR_QERR, ==, 0);
+
+    /* EDGPHA counts both phases, so a full turn advances further. */
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKDIS);
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_writel(qts, bmr, TCB_BMR_QDEN | TCB_BMR_POSEN | TCB_BMR_EDGPHA);
+    for (i = 0; i < 8; i++) {
+        qdec_step(qts, tcb, i, true);
+    }
+    g_assert_cmpuint(qtest_readl(qts, ch0 + TCB_CV), >, position);
+
+    qtest_quit(qts);
+}
+
 static void test_tcb_xc_edge_clocking(void)
 {
     const uint64_t ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
@@ -27553,6 +27644,8 @@ int main(int argc, char **argv)
                    test_tcb_updown_counting);
     qtest_add_func("sam9x75/tcb/xc-edge-clocking",
                    test_tcb_xc_edge_clocking);
+    qtest_add_func("sam9x75/tcb/quadrature-decoder",
+                   test_tcb_quadrature_decoder);
     qtest_add_func("sam9x75/tcb1/reset-masks-and-independence",
                    test_tcb1_reset_masks_and_independence);
     qtest_add_func("sam9x75/tcb1/clock-gating-and-irq",

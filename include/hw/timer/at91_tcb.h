@@ -78,6 +78,11 @@ struct AT91TCBState {
     /* External TCLK inputs, one per channel, and the last XC levels. */
     bool tclk_in[AT91_TCB_NUM_CHANNELS];
     bool xc_level[AT91_TCB_NUM_CHANNELS];
+    /* Quadrature decoder: last phase levels and the decoded direction. */
+    bool qdec_pha;
+    bool qdec_phb;
+    bool qdec_dir;
+    bool qdec_seen;
     qemu_irq capture_request[AT91_TCB_NUM_CHANNELS];
     qemu_irq etrg_request[AT91_TCB_NUM_CHANNELS];
     Clock *pclk;
