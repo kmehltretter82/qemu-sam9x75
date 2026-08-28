@@ -1274,6 +1274,13 @@
 #define TCB_CMR_WAVESEL_UP_RC   (2U << 13)
 #define TCB_CMR_WAVE            BIT(15)
 #define TCB_INT_CPAS            BIT(2)
+#define TCB_INT_LDRAS           BIT(5)
+#define TCB_INT_LDRBS           BIT(6)
+#define TCB_CMR_ACPA(v)         ((uint32_t)(v) << 16)
+#define TCB_CMR_ACPC(v)         ((uint32_t)(v) << 18)
+#define TCB_CMR_ASWTRG(v)       ((uint32_t)(v) << 22)
+#define TCB_CMR_LDRA(v)         ((uint32_t)(v) << 16)
+#define TCB_CMR_LDRB(v)         ((uint32_t)(v) << 18)
 #define TCB_INT_CPBS            BIT(3)
 #define TCB_INT_CPCS            BIT(4)
 #define TCB_INT_SECE            BIT(10)
@@ -7553,6 +7560,97 @@ static void test_pit64b_timing_gating_and_irq(void)
  * loaded from TIOA/TIOB edges instead, which this model does not have, so
  * no compare may fire there.
  */
+/*
+ * In waveform mode the RA and RC compares and a software trigger drive
+ * TIOA, per ACPA, ACPC and ASWTRG.  In capture mode a TIOA edge loads RA
+ * and then RB and raises the load status bits, which also drive the
+ * XDMAC capture request.  The Curiosity board routes no TIOA pin, so the
+ * input is exercised through the device's named GPIO.
+ */
+static void test_tcb_tioa_waveform_and_capture(void)
+{
+    const uint64_t ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
+    const uint64_t ch1 = SAM9X7_TCB_BASE + TCB_CHANNEL(1);
+    const char *tcb = "/machine/soc/tcb";
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t status;
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MCKR, 1);
+    pmc_write_pcr(qts, 17, PMC_PCR_EN);
+
+    /* Waveform mode: the software trigger sets TIOA, RC compare clears it. */
+    qtest_irq_intercept_out_named(qts, tcb, "tioa");
+    qtest_writel(qts, ch0 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE | TCB_CMR_WAVESEL_UP_RC |
+                 TCB_CMR_ASWTRG(1) | TCB_CMR_ACPA(3) | TCB_CMR_ACPC(2));
+    qtest_writel(qts, ch0 + TCB_RA, 100);
+    qtest_writel(qts, ch0 + TCB_RC, 200);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    g_assert_true(qtest_get_irq(qts, 0));
+
+    /* RA toggles it low, RC clears it and it stays low. */
+    qtest_clock_step(qts, 80000);
+    g_assert_true(qtest_readl(qts, ch0 + TCB_SR) & TCB_INT_CPAS);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, 80000);
+    g_assert_true(qtest_readl(qts, ch0 + TCB_SR) & TCB_INT_CPCS);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKDIS);
+
+    /* Capture mode on channel 1: RA on a rising edge, RB on the falling. */
+    qtest_writel(qts, ch1 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_LDRA(1) | TCB_CMR_LDRB(2));
+    qtest_writel(qts, ch1 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_clock_step(qts, 40000);
+    g_assert_cmphex(qtest_readl(qts, ch1 + TCB_SR) &
+                    (TCB_INT_LDRAS | TCB_INT_LDRBS), ==, 0);
+
+    qtest_set_irq_in(qts, tcb, "tioa-in", 1, 1);
+    status = qtest_readl(qts, ch1 + TCB_SR);
+    g_assert_cmphex(status & (TCB_INT_LDRAS | TCB_INT_LDRBS), ==,
+                    TCB_INT_LDRAS);
+    g_assert_cmpuint(qtest_readl(qts, ch1 + TCB_RA), >, 0);
+
+    qtest_clock_step(qts, 40000);
+    qtest_set_irq_in(qts, tcb, "tioa-in", 1, 0);
+    status = qtest_readl(qts, ch1 + TCB_SR);
+    g_assert_cmphex(status & TCB_INT_LDRBS, ==, TCB_INT_LDRBS);
+    g_assert_cmpuint(qtest_readl(qts, ch1 + TCB_RB), >,
+                     qtest_readl(qts, ch1 + TCB_RA));
+
+    /* A waveform-mode channel ignores TIOA edges. */
+    qtest_set_irq_in(qts, tcb, "tioa-in", 0, 1);
+    g_assert_cmphex(qtest_readl(qts, ch0 + TCB_SR) &
+                    (TCB_INT_LDRAS | TCB_INT_LDRBS), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_tcb_capture_xdmac_request(void)
+{
+    const uint64_t ch1 = SAM9X7_TCB_BASE + TCB_CHANNEL(1);
+    const char *tcb = "/machine/soc/tcb";
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MCKR, 1);
+    pmc_write_pcr(qts, 17, PMC_PCR_EN);
+    qtest_irq_intercept_out_named(qts, tcb, "capture-request");
+
+    qtest_writel(qts, ch1 + TCB_CMR, TCB_CMR_CLOCK2 | TCB_CMR_LDRA(1));
+    qtest_writel(qts, ch1 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_clock_step(qts, 40000);
+    g_assert_false(qtest_get_irq(qts, 1));
+
+    /* The request follows the load status and clears when it is read. */
+    qtest_set_irq_in(qts, tcb, "tioa-in", 1, 1);
+    g_assert_true(qtest_get_irq(qts, 1));
+    qtest_readl(qts, ch1 + TCB_SR);
+    g_assert_false(qtest_get_irq(qts, 1));
+
+    qtest_quit(qts);
+}
+
 static void test_tcb_ra_rb_compares(void)
 {
     const uint64_t ch = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
@@ -27055,6 +27153,10 @@ int main(int argc, char **argv)
                    test_tcb_ra_rb_compares);
     qtest_add_func("sam9x75/tcb/compare-xdmac-requests",
                    test_tcb_compare_xdmac_requests);
+    qtest_add_func("sam9x75/tcb/tioa-waveform-and-capture",
+                   test_tcb_tioa_waveform_and_capture);
+    qtest_add_func("sam9x75/tcb/capture-xdmac-request",
+                   test_tcb_capture_xdmac_request);
     qtest_add_func("sam9x75/tcb1/reset-masks-and-independence",
                    test_tcb1_reset_masks_and_independence);
     qtest_add_func("sam9x75/tcb1/clock-gating-and-irq",

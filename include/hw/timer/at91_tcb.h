@@ -41,6 +41,10 @@ typedef struct AT91TCBChannel {
     uint64_t segment_end;
     /* Levels driven on the per-channel compare request lines. */
     bool compare_request_level[3];
+    /* TIOA pin state: the level this channel drives, and what it sees. */
+    bool tioa_out;
+    bool tioa_in;
+    bool capture_request_level;
 } AT91TCBChannel;
 
 struct AT91TCBState {
@@ -54,6 +58,12 @@ struct AT91TCBState {
      * events of channel 1 of each timer block.
      */
     qemu_irq compare_request[AT91_TCB_NUM_CHANNELS * 3];
+    /*
+     * Per-channel TIOA output and the capture request it can drive.  The
+     * matching input is a named GPIO in; the Curiosity board routes neither.
+     */
+    qemu_irq tioa[AT91_TCB_NUM_CHANNELS];
+    qemu_irq capture_request[AT91_TCB_NUM_CHANNELS];
     Clock *pclk;
     Clock *gclk;
     Clock *slck;

@@ -465,6 +465,15 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
      * TC1.  The channel-1 lines are index 3, 4 and 5 of the block's
      * compare-request array.
      */
+    /*
+     * Requests 41 and 42 are the capture events of TC0 and TC1; the
+     * capture trigger is the TIOA pin, which this board does not route.
+     */
+    qdev_connect_gpio_out_named(DEVICE(&s->tcb), "capture-request", 1,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 41));
+    qdev_connect_gpio_out_named(DEVICE(&s->tcb1), "capture-request", 1,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 42));
+
     for (i = 0; i < 3; i++) {
         qdev_connect_gpio_out_named(DEVICE(&s->tcb), "compare-request",
             3 + i, qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request",

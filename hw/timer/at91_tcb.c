@@ -52,12 +52,30 @@
 #define TCB_CMR_WAVESEL_MASK    (3U << 13)
 #define TCB_CMR_WAVESEL_UP_RC   (2U << 13)
 #define TCB_CMR_WAVE            BIT(15)
+/* Waveform mode: what a compare or a software trigger does to TIOA. */
+#define TCB_CMR_ACPA_SHIFT      16
+#define TCB_CMR_ACPC_SHIFT      18
+#define TCB_CMR_ASWTRG_SHIFT    22
+#define TCB_TIOA_EFFECT_NONE    0
+#define TCB_TIOA_EFFECT_SET     1
+#define TCB_TIOA_EFFECT_CLEAR   2
+#define TCB_TIOA_EFFECT_TOGGLE  3
+/* Capture mode: which TIOA edge loads RA and RB. */
+#define TCB_CMR_LDRA_SHIFT      16
+#define TCB_CMR_LDRB_SHIFT      18
+#define TCB_CMR_LDR_MASK        3
+#define TCB_LDR_NONE            0
+#define TCB_LDR_RISING          1
+#define TCB_LDR_FALLING         2
+#define TCB_LDR_EDGE            3
 
 #define TCB_EMR_NODIVCLK        BIT(8)
 #define TCB_EMR_MASK            (TCB_EMR_NODIVCLK | (3U << 4) | 3U)
 #define TCB_SMMR_MASK           0x3
 
 #define TCB_INT_COVFS           BIT(0)
+#define TCB_INT_LDRAS           BIT(5)
+#define TCB_INT_LDRBS           BIT(6)
 #define TCB_INT_CPAS            BIT(2)
 #define TCB_INT_CPBS            BIT(3)
 #define TCB_INT_CPCS            BIT(4)
@@ -87,6 +105,36 @@
  * A compare event is a pulse to the XDMAC: the request line follows the
  * latched status bit, so reading the status register releases it.
  */
+/* Apply a waveform-mode effect to this channel's TIOA output. */
+static void at91_tcb_apply_tioa_effect(AT91TCBChannel *ch, unsigned int shift)
+{
+    unsigned int effect = (ch->cmr >> shift) & 3;
+    AT91TCBState *s = ch->owner;
+    unsigned int index = ch - s->channel;
+    bool level = ch->tioa_out;
+
+    if (!(ch->cmr & TCB_CMR_WAVE)) {
+        return;
+    }
+    switch (effect) {
+    case TCB_TIOA_EFFECT_SET:
+        level = true;
+        break;
+    case TCB_TIOA_EFFECT_CLEAR:
+        level = false;
+        break;
+    case TCB_TIOA_EFFECT_TOGGLE:
+        level = !level;
+        break;
+    default:
+        return;
+    }
+    if (level != ch->tioa_out) {
+        ch->tioa_out = level;
+        qemu_set_irq(s->tioa[index], level);
+    }
+}
+
 static void at91_tcb_update_compare_requests(AT91TCBState *s)
 {
     static const uint32_t bits[AT91_TCB_COMPARE_REQUESTS] = {
@@ -105,6 +153,13 @@ static void at91_tcb_update_compare_requests(AT91TCBState *s)
                 qemu_set_irq(s->compare_request[i * AT91_TCB_COMPARE_REQUESTS
                                                 + j], level);
             }
+        }
+        /* The capture request follows either load status bit. */
+        bool capture = !!(ch->status & (TCB_INT_LDRAS | TCB_INT_LDRBS));
+
+        if (capture != ch->capture_request_level) {
+            ch->capture_request_level = capture;
+            qemu_set_irq(s->capture_request[i], capture);
         }
     }
 }
@@ -284,6 +339,51 @@ static uint32_t at91_tcb_channel_status(const AT91TCBChannel *ch)
     return ch->status | (ch->enabled ? TCB_SR_CLKSTA : 0);
 }
 
+/*
+ * A TIOA edge in capture mode loads RA and RB from the counter, each on
+ * the edge its own selector names.  The two are independent: the usual
+ * pulse measurement selects a rising edge for RA and a falling edge for
+ * RB, but nothing makes RB wait for RA.
+ */
+static void at91_tcb_capture_edge(AT91TCBChannel *ch, bool rising)
+{
+    unsigned int ldra = (ch->cmr >> TCB_CMR_LDRA_SHIFT) & TCB_CMR_LDR_MASK;
+    unsigned int ldrb = (ch->cmr >> TCB_CMR_LDRB_SHIFT) & TCB_CMR_LDR_MASK;
+    uint32_t counter;
+
+    if (ch->cmr & TCB_CMR_WAVE) {
+        return;
+    }
+    counter = at91_tcb_counter(ch);
+
+    if (ldra != TCB_LDR_NONE &&
+        (ldra == TCB_LDR_EDGE || (ldra == TCB_LDR_RISING) == rising)) {
+        ch->ra = counter;
+        ch->status |= TCB_INT_LDRAS;
+    }
+    if (ldrb != TCB_LDR_NONE &&
+        (ldrb == TCB_LDR_EDGE || (ldrb == TCB_LDR_RISING) == rising)) {
+        ch->rb = counter;
+        ch->status |= TCB_INT_LDRBS;
+    }
+    at91_tcb_update_irq(ch->owner);
+}
+
+static void at91_tcb_tioa_input(void *opaque, int index, int level)
+{
+    AT91TCBState *s = opaque;
+    AT91TCBChannel *ch = &s->channel[index];
+    bool value = level > 0;
+
+    if (value == ch->tioa_in) {
+        return;
+    }
+    ch->tioa_in = value;
+    if (ch->enabled && ch->running) {
+        at91_tcb_capture_edge(ch, value);
+    }
+}
+
 static void at91_tcb_record_wp_violation(AT91TCBChannel *ch, hwaddr offset)
 {
     AT91TCBState *s = ch->owner;
@@ -438,6 +538,7 @@ static void at91_tcb_channel_write(AT91TCBState *s, unsigned int index,
             at91_tcb_stop_channel(ch);
         } else if (value & TCB_CCR_SWTRG) {
             at91_tcb_start_channel(ch, true);
+            at91_tcb_apply_tioa_effect(ch, TCB_CMR_ASWTRG_SHIFT);
         } else if (value & TCB_CCR_CLKEN) {
             at91_tcb_start_channel(ch, false);
         }
@@ -578,6 +679,7 @@ static void at91_tcb_tick(void *opaque)
     if (at91_tcb_compares_active(ch)) {
         if (ch->ra == boundary) {
             ch->status |= TCB_INT_CPAS;
+            at91_tcb_apply_tioa_effect(ch, TCB_CMR_ACPA_SHIFT);
         }
         if (ch->rb == boundary) {
             ch->status |= TCB_INT_CPBS;
@@ -587,6 +689,7 @@ static void at91_tcb_tick(void *opaque)
     if (period_end) {
         if (at91_tcb_auto_rc(ch)) {
             ch->status |= TCB_INT_CPCS;
+            at91_tcb_apply_tioa_effect(ch, TCB_CMR_ACPC_SHIFT);
         } else {
             ch->status |= TCB_INT_COVFS;
         }
@@ -668,6 +771,9 @@ static void at91_tcb_reset(DeviceState *dev)
         ch->segment_end = TCB_COUNTER_RANGE;
         memset(ch->compare_request_level, 0,
                sizeof(ch->compare_request_level));
+        ch->tioa_out = false;
+        ch->tioa_in = false;
+        ch->capture_request_level = false;
     }
     s->bmr = 0;
     s->qimr = 0;
@@ -688,6 +794,13 @@ static void at91_tcb_init(Object *obj)
     sysbus_init_irq(sbd, &s->irq);
     qdev_init_gpio_out_named(DEVICE(s), s->compare_request, "compare-request",
                              ARRAY_SIZE(s->compare_request));
+    qdev_init_gpio_out_named(DEVICE(s), s->tioa, "tioa",
+                             ARRAY_SIZE(s->tioa));
+    qdev_init_gpio_out_named(DEVICE(s), s->capture_request,
+                             "capture-request",
+                             ARRAY_SIZE(s->capture_request));
+    qdev_init_gpio_in_named(DEVICE(s), at91_tcb_tioa_input, "tioa-in",
+                            AT91_TCB_NUM_CHANNELS);
 
     s->pclk = qdev_init_clock_in(DEVICE(s), "pclk",
                                  at91_tcb_clock_changed, s, ClockUpdate);
@@ -742,7 +855,7 @@ static void at91_tcb_finalize(Object *obj)
 
 static const VMStateDescription at91_tcb_channel_vmstate = {
     .name = TYPE_AT91_TCB "/channel",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_PTIMER(timer, AT91TCBChannel),
@@ -761,6 +874,9 @@ static const VMStateDescription at91_tcb_channel_vmstate = {
         VMSTATE_UINT64_V(segment_start, AT91TCBChannel, 2),
         VMSTATE_UINT64_V(segment_end, AT91TCBChannel, 2),
         VMSTATE_BOOL_ARRAY_V(compare_request_level, AT91TCBChannel, 3, 2),
+        VMSTATE_BOOL_V(tioa_out, AT91TCBChannel, 3),
+        VMSTATE_BOOL_V(tioa_in, AT91TCBChannel, 3),
+        VMSTATE_BOOL_V(capture_request_level, AT91TCBChannel, 3),
         VMSTATE_END_OF_LIST()
     },
 };
