@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `73631d172f`
+- Latest tested repository checkpoint: `f8891de72a`
+  (`hw/arm/sam9x75: Apply two SAM9X75 silicon measurements`)
+- Preceding implementation checkpoint: `73631d172f`
   (`hw/arm/sam9x75-curiosity: Let the SDMMC0 card-detect pin follow the
   medium`)
 - Preceding implementation checkpoint: `ebe3340acc`
@@ -342,18 +344,66 @@ checkpoint `fcfbe1ae0e` after relinking.
   `sudo ip link add s9x75c0 type vcan && sudo ip link set s9x75c0 up`
   (likewise `s9x75c1`); remove them with `sudo ip link del`.
 
+## Physical-board results, 2026-08-28
+
+A macOS workstation with a SAM9X75 Curiosity LAN Kit ran the hardware section
+of this file.  Personal identifiers (addresses, host-key fingerprints, card
+identifiers, UUIDs) are deliberately omitted here; the raw evidence stays on
+that workstation.
+
+- **Both Linux crypto fixes are silicon-confirmed.**  The stock 2026.04 kernel
+  wedged the first TDES request on 2 of 2 cold boots: task in `D` state at
+  `skcipher_recvmsg`, unkillable, zero `atmel-tdes` completions, no XDMAC
+  advance, no kernel message, while AES and SHA on the same boot completed
+  normally.  The packaged fixed kernel completed that request in about 1 ms
+  with the reference ciphertext and then passed the full release profile
+  (3 workers, 4 iterations, through 65,536 bytes, TAP 6/6, `atmel-sha`
+  +6360/+2535, `at_xdmac` +128/+352).  Its concurrent HMAC path validates the
+  `atmel-sha` fix as well.  Both patches are ready for upstream submission.
+- **FLEXCOM4 `SPI_VERSION` = `0x410`**, read-only, byte lanes `0x0410`/`0x10`,
+  with the driver logging `version 0x410` and choosing FIFO plus XDMAC.
+  Modeled at `f8891de72a`.  This closes the last `mmc_spi` blocker.
+- **SDMMC0 card-detect matched every QEMU criterion** with root moved to
+  NFS so the card was idle: clean removal and re-insertion preserved the
+  boot partition byte-for-byte, an active raw read failed with `EIO` and
+  recovered, and the card re-enumerated identically each time.  One fidelity
+  divergence: contact bounce.  Removal gave 1 card-detect edge, insertion 3
+  or 4, nine interrupts for four changes against QEMU's four; Linux debounce
+  absorbed it into exactly one enumeration each.  The Linux gate validator
+  already requires `>= 4` edges, not an exact count; keep it that way.
+- **M_CAN**: core release 3.3 on both instances (confirming the `crel` top
+  byte), 40 MHz clock, and on `can0` the full ERROR-WARNING -> ERROR-PASSIVE
+  -> BUS-OFF progression from one unacknowledged frame, each reported once;
+  TEC read **248** through bus-off and STOPPED and zero after re-enable;
+  restart-ms recovery worked.  QEMU stored 256 and read 0xff; fixed at
+  `f8891de72a`.  `can1` stayed ERROR-ACTIVE with no interrupts and is inconclusive
+  without a pinmux -- do not quote it.
+- **QSPI and NAND on the tested unit**: JEDEC identity read all ones with no
+  MTD device, and no NAND device was found with the shipped device tree.
+  Check J10 and J9 (and NAND enablement in that DTB) before treating the
+  modeled SST26VF064BEUI and MX30LF4G28AD as divergences.
+- The board now boots the fixed kernel from a second FIT with FLEXCOM4 SPI
+  enabled; the original FIT and U-Boot environment are retained alongside
+  for revert, and a byte-exact boot-partition backup exists on the macOS
+  side.
+
 ## Immediate continuation order
 
 Do these steps before starting another device model or another operating
 system.
 
-Both isolated SocketCAN profiles passed, and the first `mmc_spi` blocker is
-closed.  Do these steps next.
+Both `mmc_spi` blockers are now closed and the crypto fixes are
+silicon-confirmed.  Do these steps next.
 
-1. Remaining P0 integration work, in order: the board jumper and mux behavior
-   that is still unmodeled, and broader USB hotplug, error and migration
-   behavior.  The `mmc_spi` consumer gate itself is blocked only on a silicon
-   measurement (see item 4) and must not be forced.
+1. Run the `mmc_spi` Linux4Microchip gate in QEMU exactly as
+   `tests/guest/at91/linux4sam/spi-consumer/README.rst` describes: merged
+   DTB from the shipped `wilc_spi` overlay, a fresh disposable card,
+   `mmc_spi.ko` from the exact rootfs.  Nothing blocks it any more.  Then the
+   remaining P0 items: board jumper and mux behavior still unmodeled, and
+   broader USB hotplug, error and migration behavior.
+1a. Prepare upstream submission of the two Linux patches in
+   `artifacts/linux4microchip-crypto-fixes-20260827/`; both are now
+   hardware-confirmed (see the results section above).
 2. Then the next bounded P1 implementation slice from the machine support
    matrix.  Done this checkpoint: transmit-side M_CAN error confinement and
    the QSPI XDMAC request lines.  Next candidates, in rough order of
@@ -370,28 +420,17 @@ closed.  Do these steps next.
    the ordered, safe measurements that this checkpoint needs, all read-only
    or on disposable media.  Use the r5 safety rules; never program OTPC,
    QSPI or NAND.
-   - The read-only FLEXCOM4 SPI `+0xfc` (`SPI_VERSION`) probe in
-     `tests/guest/at91/linux4sam/spi-consumer/README.rst`.  It is the only
-     thing blocking the `mmc_spi` gate now that the PA13 chip-select routing
-     exists.  Record an abort as a result; do not write.
-   - The safe crypto validation in
-     `artifacts/linux4microchip-crypto-fixes-20260827/REAL-HARDWARE-TESTS.md`.
-   - SDMMC0 card-detect comparison with a disposable card: with the exact
-     image booted, remove and re-insert the card and capture `dmesg`,
-     `/proc/interrupts` (`mmc0` and `80000000.mmc cd` lines) and the PA23
-     level.  QEMU's expected sequence is in the SD media-change gate
-     evidence below.  Compare debounce and edge counts.
-   - M_CAN error confinement with **no transceiver bus connected** (the
-     controller alone, which is safe): bring `can0` up, send one frame, and
-     capture `ip -details -statistics link show can0` plus `berr-counter`
-     over time.  QEMU raises TEC by 8 per attempt and reaches bus-off after
-     32 unacknowledged attempts; silicon retransmits autonomously, so
-     compare the *sequence* (ERROR-WARNING at 96, ERROR-PASSIVE at 128,
-     BUS-OFF past 255) and the recovery after `ip link set can0 down/up`,
-     not the wall-clock timing.
-   - Optionally a read-only QSPI RDID (`9Fh`) through an XDMAC
-     request-paced byte channel, to compare the narrow-access behaviour that
-     QEMU now models.  RDID reads only; nothing else.
+   Done on 2026-08-28 (see the results section): the `SPI_VERSION` probe,
+   the crypto validation, the SDMMC0 card-detect comparison, M_CAN error
+   confinement on `can0`, and the QSPI identity read.  Still open:
+   - Confirm the CAN header pinmux against the schematic (tentative reading:
+     CANRX0/PA27, CANTX0/PA28, CANTX1/PA29, CANRX1/PA30 on peripheral B --
+     **not verified, not to be acted on until confirmed**).  Only then
+     repeat the `can1` probe and, with transceivers, can0/can1 traffic.
+   - Check J10 (QSPI chip select) and J9 (NAND) on the tested unit and
+     re-read the QSPI identity; program or erase nothing.
+   - Run the packaged 20-cold-boot TDES repeatability profile if upstream
+     reviewers ask for it; the 2-of-2 reproduction already stands.
    Everything workspace-local that this section needs was packaged on
    2026-08-28 as `sam9x75-hardware-agent-20260828.tar.gz` (102 MB, SHA-256
    `324a43b9f2b9fa21f622d57c2bbe4ae765aac068602242390db4da174658d059`) next to the workspace root on the Linux
@@ -777,7 +816,16 @@ peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
 The post-gate regressions pass 247/247 for Curiosity, 42/42 for chardev, 7/7
-for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  The
+for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two of
+five unfiltered full Curiosity runs on 2026-08-28 aborted while starting the
+eighth test (`rom/cpu-reset-entry`) with no message; the same sequence passes
+in isolation, under gdb and in later plain runs, so treat it as an
+unexplained intermittent harness flake to investigate, not a model failure.
+Physical-board results from the same day are recorded in the handoff: both
+Linux crypto fixes silicon-confirmed, `SPI_VERSION` measured as 0x410 and
+modeled, M_CAN TEC retained at 248 through bus-off and modeled, card-detect
+matched with a contact-bounce fidelity note, and QSPI/NAND absent on the
+tested unit pending a jumper check.  The
 SDMMC0 card-detect pin now follows the medium and a Linux media-change gate
 covers clean removal, re-insertion and an active-read yank; see the handoff
 for its evidence directory.  The next physical-board work is listed as an

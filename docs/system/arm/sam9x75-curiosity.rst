@@ -260,7 +260,11 @@ Support matrix
        chip select reach the same card.  FLEXCOM0--3 have two physical NPCS signals and
        FLEXCOM4--5 have four.  The behavior of CSR and PCS encodings that do
        not have a corresponding package signal is not inferred from the pin
-       count and still requires hardware readback.
+       count and still requires hardware readback.  The ``+0xfc`` word the
+       data sheet marks reserved was measured on a Curiosity board as the
+       read-only ``SPI_VERSION`` value ``0x410`` with byte lanes, and the
+       Linux driver selects its FIFO/XDMAC path from it; the model returns
+       that value and ignores writes.
        The TWI host path covers PCLK/GCLK-paced byte transfers, internal
        addresses, repeated starts, NACK and AIC signaling,
        alternative-command mode, 16-byte transmit/receive FIFOs, byte,
@@ -343,7 +347,14 @@ Support matrix
        through QMP: a 16 MiB payload survived a clean removal, a raw read
        yanked mid-transfer failed with ``EIO`` and the card recovered, with
        the card-detect interrupt advancing exactly once per edge and an
-       empty diagnostic log.
+       empty diagnostic log.  The same sequence on a Curiosity board matched
+       every criterion, with one fidelity difference the model does not
+       reproduce: mechanical contact bounce.  Silicon produced one edge per
+       removal but three to four per insertion (nine card-detect interrupts
+       for four media changes, against the model's four), which Linux's
+       debounce absorbed into exactly one enumeration each; removal reached
+       the kernel in roughly 40--70 ms and re-enumeration to partition scan
+       took about 30 ms.
        Host preset registers, the SAM9X7 Host Control 2 writable mask, combined
        command/data/all software reset, the vendor registers covered by
        ``SWRSTALL``, and the Linux ADMA descriptor form are covered.  Writable
@@ -393,6 +404,10 @@ Support matrix
        consumer.  Persistence with a drive, all protocol
        widths, timeout generation, the enable-time ``RFRSHD`` policy with
        ``DQSDLYEN`` clear, and the ROM quad-mode erratum need further coverage.
+       On the Curiosity board tested, Linux read the JEDEC identity as all
+       ones and exposed no MTD device; whether that unit's J10 chip-select
+       jumper was open or the flash is unpopulated must be checked before
+       the model's SST26VF064BEUI is treated as a divergence.
    * - EBI/SMC and raw NAND
      - Initial
      - The Curiosity U5 interface occupies the complete 256 MiB CS2 window and
@@ -404,7 +419,10 @@ Support matrix
        clears the assignment while retaining external NAND protocol state; a
        whole-system reset also resets that protocol state but preserves flash
        contents.  The MX30LF4G28AD identity and its first eight known
-       ONFI parameter-page copies match the device data sheet.  After the
+       ONFI parameter-page copies match the device data sheet.  The Curiosity
+       board tested reported no NAND device with its shipped device tree;
+       check J9 and the NAND enablement in that DTB before treating the
+       modeled U5 as a divergence.  After the
        documented pre-data
        ``70h`` completion poll, ``00h`` enables parameter, page and Get Features
        transfer; that poll-to-transfer state also survives migration.  Set
@@ -748,11 +766,17 @@ Support matrix
        CAN FD/BRS traffic (including a 64-byte frame) plus classic CAN traffic
        at 500 kbit/s nominal and 2 Mbit/s data rates.  The upstream Curiosity
        board DTS leaves both CAN nodes disabled, so normal use still needs an
-       overlay or alternate DT.  Reset constants, the CCE reset/loss-status
-       interaction, physical interrupt behavior and external-bus operation
-       remain for board validation; that work needs the appropriate header
-       pinmux and a CAN transceiver rather than a direct connection to the SoC
-       pins.
+       overlay or alternate DT.  A Curiosity board with both controllers enabled by overlay and no
+       transceiver or pinmux reported M_CAN core release 3.3 on both
+       instances, a 40 MHz controller clock, and on ``can0`` the full
+       ERROR-WARNING, ERROR-PASSIVE and BUS-OFF progression from a single
+       unacknowledged frame with each state reported once, TEC reading 248
+       through bus-off and STOPPED, zero after re-enable, and restart-ms
+       recovery; the model now matches that counter behavior.  ``can1`` was
+       inconclusive without a pinmux.  Arbitration, acknowledgement, bus
+       traffic and can0/can1 interoperation still need the schematic-confirmed
+       header pinmux and CAN transceivers.  Reset constants and the CCE
+       reset/loss-status interaction remain for board validation.
        The exact Linux4Microchip 2026.04 combined gate passed 1,000
        bidirectional protocol stress frames between ``can0`` and ``can1`` on
        one internal QEMU CAN bus.  A standalone current-head gate extended

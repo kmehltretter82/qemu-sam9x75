@@ -34,7 +34,7 @@ The exact kernel has ``CONFIG_SPI_ATMEL=y``, ``CONFIG_AT_XDMAC=y``,
 ``CONFIG_MMC_SPI=m`` and ``CONFIG_CRC7=m``.  Its root filesystem contains
 ``mmc_spi.ko`` and its dependencies.
 
-One blocker remains before running the unchanged-overlay gate.
+Both blockers are closed; the unchanged-overlay gate below can be run.
 
 The first blocker is closed.  IO4/NPCS1 and PA13 are the same pad, so the
 board now models that pad with ``at91-pad-mux``: the PIO output wins whenever
@@ -48,7 +48,14 @@ exposed a generic QEMU bug: ``sd_vmstate_pre_load()`` unconditionally called
 the assert-guarded ``sd_ocr_powerup()``, so any machine holding an SPI-mode
 SD card aborted on incoming migration.
 
-The remaining blocker still needs silicon:
+The second blocker was closed by a silicon measurement on 2026-08-28.  With
+the shipped ``wilc_spi`` FIT configuration selected, FLEXCOM4 SPI bound and
+``runtime_status`` reporting ``active``, ``devmem 0xf00004fc 32`` returned
+``0x00000410`` on three reads with no abort, a 16-bit read ``0x0410`` and an
+8-bit read ``0x10``; the driver logged ``Atmel SPI Controller version 0x410``
+and selected FIFO plus XDMAC.  QEMU now models that read-only value with
+byte lanes, so the driver takes the modern path instead of the unmodelled
+PDC window.  The original blocker text is kept for the record:
 
 #. The SAM9X7 data sheet marks the FLEXCOM SPI ``+0xfc`` location reserved,
    so QEMU currently returns zero.  The exact ``spi-atmel`` driver reads this

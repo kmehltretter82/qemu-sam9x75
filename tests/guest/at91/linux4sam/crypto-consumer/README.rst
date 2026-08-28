@@ -103,9 +103,17 @@ ordinary SHA request may follow HMAC state, but must be guarded by
 Do not reduce ``--workers`` in a release result.  ``--workers 1`` is useful
 only to isolate the QEMU data path while the kernel fix is being reviewed.
 The full concurrent gate remains intentionally capable of detecting the
-driver bug.  The proposed fix passed the complete release profile in QEMU but
-still needs the same stress run on physical SAM9X75 silicon before upstream
-submission.
+driver bug.  The proposed fix passed the complete release profile in QEMU and, on
+2026-08-28, on a physical SAM9X75 Curiosity: the packaged fixed kernel ran the
+release profile with three workers, four iterations and requests through
+65,536 bytes, TAP 6/6, with the concurrent HMAC path (``ok 3``) exercising
+exactly the state-restoration case.  The stock kernel on the same board wedged
+the first TDES request on two of two cold boots (task in ``D`` state at
+``skcipher_recvmsg``, unkillable, zero TDES completions, no XDMAC advance, no
+kernel message) while AES and SHA completed normally, and the fixed kernel
+completed the same request in about a millisecond with the reference
+ciphertext.  Both fixes are therefore silicon-confirmed and ready for
+upstream submission.
 
 Linux atmel-tdes uninitialized device state
 --------------------------------------------
