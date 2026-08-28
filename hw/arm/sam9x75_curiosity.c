@@ -20,6 +20,7 @@
 #include "hw/nvram/eeprom_at24c.h"
 #include "hw/sd/sd.h"
 #include "hw/sensor/pac1934.h"
+#include "hw/gpio/at91_pad_mux.h"
 #include "hw/ssi/ssi.h"
 #include "qapi/error.h"
 #include "qemu/datadir.h"
@@ -131,6 +132,7 @@ static bool sam9x75_curiosity_attach_spi_sd(SAM9X7State *soc,
 {
     DriveInfo *dinfo = drive_get(IF_SD, 0, unit);
     DeviceState *adapter;
+    DeviceState *cs_mux;
     DeviceState *card;
 
     if (!dinfo) {
@@ -141,7 +143,23 @@ static bool sam9x75_curiosity_attach_spi_sd(SAM9X7State *soc,
     adapter = qdev_new("ssi-sd");
     qdev_prop_set_uint8(adapter, "cs", 1);
     qdev_realize_and_unref(adapter, BUS(soc->spi[4].bus), &error_fatal);
+
+    /*
+     * IO4/NPCS1 and PA13 are the same pad, so the card select follows
+     * whichever function the PIO currently assigns to it.  The native NPCS1
+     * route works with a peripheral-controlled pad; the upstream wilc_spi
+     * overlay instead drives PA13 as an active-low GPIO and uses logical
+     * chip select zero.  Both must reach the same adapter.
+     */
+    cs_mux = qdev_new(TYPE_AT91_PAD_MUX);
+    object_property_add_child(OBJECT(soc), "flexcom4-npcs1-pad",
+                              OBJECT(cs_mux));
+    qdev_realize_and_unref(cs_mux, NULL, &error_fatal);
     qdev_connect_gpio_out_named(DEVICE(&soc->spi[4]), "cs", 1,
+        qdev_get_gpio_in_named(cs_mux, AT91_PAD_MUX_PERIPHERAL, 0));
+    qdev_connect_gpio_out(DEVICE(&soc->pio[0]), 13,
+        qdev_get_gpio_in_named(cs_mux, AT91_PAD_MUX_PIO, 0));
+    qdev_connect_gpio_out(cs_mux, 0,
         qdev_get_gpio_in_named(adapter, SSI_GPIO_CS, 0));
 
     card = qdev_new(TYPE_SD_CARD_SPI);

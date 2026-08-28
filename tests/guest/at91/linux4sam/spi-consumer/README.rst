@@ -34,15 +34,22 @@ The exact kernel has ``CONFIG_SPI_ATMEL=y``, ``CONFIG_AT_XDMAC=y``,
 ``CONFIG_MMC_SPI=m`` and ``CONFIG_CRC7=m``.  Its root filesystem contains
 ``mmc_spi.ko`` and its dependencies.
 
-Two blockers must be closed before running the unchanged-overlay gate:
+One blocker remains before running the unchanged-overlay gate.
 
-#. QEMU currently connects the card-select input only to native FLEXCOM4
-   NPCS1.  The overlay instead drives PA13 as an active-low GPIO chip select
-   and uses logical SPI chip select zero.  The card therefore cannot be
-   selected.  The board model must route the PA13 GPIO output to the same
-   adapter while retaining the native-NPCS1 route used by the current board
-   qtest.  The result needs selection, deselection, reset and migration
-   coverage for both routes.
+The first blocker is closed.  IO4/NPCS1 and PA13 are the same pad, so the
+board now models that pad with ``at91-pad-mux``: the PIO output wins whenever
+the PIO drives the pad, and the pad otherwise follows the FLEXCOM NPCS1
+function.  Both routes reach the same ``ssi-sd`` adapter.  The
+``sam9x75/sdcard/spi-gpio-chip-select`` qtest covers selection, deselection,
+reselection and the handover back to the peripheral function, and
+``sam9x75/sdcard/spi-gpio-chip-select-migration`` covers migrating a machine
+whose card is selected through the GPIO route.  That migration test also
+exposed a generic QEMU bug: ``sd_vmstate_pre_load()`` unconditionally called
+the assert-guarded ``sd_ocr_powerup()``, so any machine holding an SPI-mode
+SD card aborted on incoming migration.
+
+The remaining blocker still needs silicon:
+
 #. The SAM9X7 data sheet marks the FLEXCOM SPI ``+0xfc`` location reserved,
    so QEMU currently returns zero.  The exact ``spi-atmel`` driver reads this
    location as ``SPI_VERSION`` to choose SPI2/WDRBT, XDMAC or legacy PDC

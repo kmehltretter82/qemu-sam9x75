@@ -34,5 +34,8 @@ config ZAURUS_SCOOP
 config CADENCE_GPIO
     bool
 
+config AT91_PAD_MUX
+    bool
+
 config AT91_PIO
     bool

@@ -15666,6 +15666,183 @@ static void test_sdcard_spi_protocol_probes(void)
     g_assert_cmpint(g_unlink(sd_path), ==, 0);
 }
 
+/*
+ * PA13 and FLEXCOM4 IO4/NPCS1 are the same pad.  The board qtest above uses
+ * the native NPCS1 function; the upstream wilc_spi overlay instead drives
+ * PA13 as an active-low GPIO and selects logical chip select zero, whose
+ * NPCS0 signal never reaches the M.2 socket.  Both routes must select the
+ * same card, and the pad must follow whichever function owns it.
+ */
+static void test_sdcard_spi_gpio_chip_select(void)
+{
+    g_autofree char *sd_path = NULL;
+    g_autofree char *log_path = NULL;
+    g_autofree char *log = NULL;
+    QTestState *qts;
+    GError *error = NULL;
+    unsigned int i;
+    int fd;
+    int ret;
+
+    fd = g_file_open_tmp("sam9x75-spi-sd-gpio-XXXXXX", &sd_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = ftruncate(fd, 1 << 20);
+    g_assert_cmpint(ret, ==, 0);
+    close(fd);
+
+    fd = g_file_open_tmp("sam9x75-spi-sd-gpio-log-XXXXXX", &log_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+
+    qts = qtest_initf(SAM9X75_MACHINE ",m2-interface=spi"
+                      " -drive file=%s,if=sd,index=1,format=raw,"
+                      "auto-read-only=off"
+                      " -d unimp,guest_errors -D %s",
+                      sd_path, log_path);
+    pmc_write_pcr(qts, 13, PMC_PCR_EN);
+    qtest_writeb(qts, SAM9X7_FLEXCOM4_BASE + FLEX_MR, FLEX_MODE_SPI);
+    /* Logical chip select zero, exactly as the unchanged overlay selects. */
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_MR,
+                 SPI_MR_MSTR | SPI_MR_PCS(0xe));
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_CSR(0),
+                 SPI_CSR_CSAAT | SPI_CSR_BITS(8) |
+                 SPI_CSR_SCBR(217) | SPI_CSR_DLYBS(1));
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_CR, SPI_CR_SPIEN);
+
+    /*
+     * While the peripheral owns the pad it follows NPCS1, which this transfer
+     * leaves inactive, so the deselected card returns no data at all.
+     */
+    for (i = 0; i < 8; i++) {
+        g_assert_cmphex(flexcom_spi_transfer_byte(qts, SAM9X7_SPI4_BASE,
+                                                 13, 0xff, 217), ==, 0x00);
+    }
+
+    /* Drive PA13 low as a GPIO before enabling the output, avoiding a glitch. */
+    qtest_writel(qts, SAM9X7_PIOA_BASE + PIO_PER, BIT(13));
+    qtest_writel(qts, SAM9X7_PIOA_BASE + PIO_CODR, BIT(13));
+    qtest_writel(qts, SAM9X7_PIOA_BASE + PIO_OER, BIT(13));
+
+    for (i = 0; i < 10; i++) {
+        g_assert_cmphex(flexcom_spi_transfer_byte(qts, SAM9X7_SPI4_BASE,
+                                                 13, 0xff, 217), ==, 0xff);
+    }
+    g_assert_cmphex(flexcom_spi_sd_command(qts, 0), ==, 0x01);
+
+    /* Releasing the GPIO high deselects the card even though NPCS0 is used. */
+    qtest_writel(qts, SAM9X7_PIOA_BASE + PIO_SODR, BIT(13));
+    g_assert_cmphex(flexcom_spi_transfer_byte(qts, SAM9X7_SPI4_BASE,
+                                             13, 0xff, 217), ==, 0x00);
+
+    /* Selecting again resumes the same card and its idle state. */
+    qtest_writel(qts, SAM9X7_PIOA_BASE + PIO_CODR, BIT(13));
+    g_assert_cmphex(flexcom_spi_sd_command(qts, 59), ==, 0x01);
+
+    /*
+     * Returning the pad to its peripheral function restores the native NPCS1
+     * route, which this transfer still leaves inactive.
+     */
+    qtest_writel(qts, SAM9X7_PIOA_BASE + PIO_PDR, BIT(13));
+    g_assert_cmphex(flexcom_spi_transfer_byte(qts, SAM9X7_SPI4_BASE,
+                                             13, 0xff, 217), ==, 0x00);
+
+    /* The native route still selects the card through NPCS1. */
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_CR, SPI_CR_SPIDIS);
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_MR,
+                 SPI_MR_MSTR | SPI_MR_PCS(0xd));
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_CSR(1),
+                 SPI_CSR_CSAAT | SPI_CSR_BITS(8) |
+                 SPI_CSR_SCBR(217) | SPI_CSR_DLYBS(1));
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_CR, SPI_CR_SPIEN);
+    g_assert_cmphex(flexcom_spi_sd_command(qts, 59), ==, 0x01);
+
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_CR, SPI_CR_LASTXFER);
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(log_path, &log, NULL, &error));
+    g_assert_no_error(error);
+    g_assert_cmpstr(log, ==, "");
+    g_assert_cmpint(g_unlink(log_path), ==, 0);
+    g_assert_cmpint(g_unlink(sd_path), ==, 0);
+}
+
+/*
+ * The pad multiplexer carries the live chip-select route, so a machine
+ * migrated while the GPIO route holds the card selected must resume with the
+ * same card still selected and both routes still working.
+ */
+static void test_sdcard_spi_gpio_chip_select_migration(void)
+{
+    g_autofree char *sd_path = NULL;
+    QTestState *from;
+    QTestState *to;
+    GError *error = NULL;
+    unsigned int i;
+    int fd;
+    int ret;
+
+    fd = g_file_open_tmp("sam9x75-spi-sd-mig-XXXXXX", &sd_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = ftruncate(fd, 1 << 20);
+    g_assert_cmpint(ret, ==, 0);
+    close(fd);
+
+    from = qtest_initf(SAM9X75_MACHINE ",m2-interface=spi"
+                       " -drive file=%s,if=sd,index=1,format=raw,"
+                       "auto-read-only=off,file.locking=off", sd_path);
+    to = qtest_initf(SAM9X75_MACHINE ",m2-interface=spi"
+                     " -drive file=%s,if=sd,index=1,format=raw,"
+                     "auto-read-only=off,file.locking=off"
+                     " -incoming defer", sd_path);
+
+    pmc_write_pcr(from, 13, PMC_PCR_EN);
+    qtest_writeb(from, SAM9X7_FLEXCOM4_BASE + FLEX_MR, FLEX_MODE_SPI);
+    qtest_writel(from, SAM9X7_SPI4_BASE + SPI_MR,
+                 SPI_MR_MSTR | SPI_MR_PCS(0xe));
+    qtest_writel(from, SAM9X7_SPI4_BASE + SPI_CSR(0),
+                 SPI_CSR_CSAAT | SPI_CSR_BITS(8) |
+                 SPI_CSR_SCBR(217) | SPI_CSR_DLYBS(1));
+    qtest_writel(from, SAM9X7_SPI4_BASE + SPI_CR, SPI_CR_SPIEN);
+
+    /* Select the card through the PA13 GPIO route and idle it. */
+    qtest_writel(from, SAM9X7_PIOA_BASE + PIO_PER, BIT(13));
+    qtest_writel(from, SAM9X7_PIOA_BASE + PIO_CODR, BIT(13));
+    qtest_writel(from, SAM9X7_PIOA_BASE + PIO_OER, BIT(13));
+    for (i = 0; i < 10; i++) {
+        g_assert_cmphex(flexcom_spi_transfer_byte(from, SAM9X7_SPI4_BASE,
+                                                 13, 0xff, 217), ==, 0xff);
+    }
+    g_assert_cmphex(flexcom_spi_sd_command(from, 0), ==, 0x01);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    /* The pad is still GPIO-owned and still driven low on the destination. */
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PIOA_BASE + PIO_OSR) & BIT(13),
+                    ==, BIT(13));
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PIOA_BASE + PIO_ODSR) & BIT(13),
+                    ==, 0);
+
+    /* The same card answers on the destination without reselecting it. */
+    g_assert_cmphex(flexcom_spi_sd_command(to, 59), ==, 0x01);
+
+    /* Both mux routes still work after migration. */
+    qtest_writel(to, SAM9X7_PIOA_BASE + PIO_SODR, BIT(13));
+    g_assert_cmphex(flexcom_spi_transfer_byte(to, SAM9X7_SPI4_BASE,
+                                             13, 0xff, 217), ==, 0x00);
+    qtest_writel(to, SAM9X7_PIOA_BASE + PIO_CODR, BIT(13));
+    g_assert_cmphex(flexcom_spi_sd_command(to, 59), ==, 0x01);
+
+    qtest_quit(to);
+    qtest_quit(from);
+    g_assert_cmpint(g_unlink(sd_path), ==, 0);
+}
+
 static void test_board_m2_interface_jumper(void)
 {
     static const uint8_t cmd0[] = { 0x40, 0, 0, 0, 0, 0x95 };
@@ -25341,6 +25518,10 @@ int main(int argc, char **argv)
                    test_sdcard_native_protocol_probes);
     qtest_add_func("sam9x75/sdcard/spi-protocol-probes",
                    test_sdcard_spi_protocol_probes);
+    qtest_add_func("sam9x75/sdcard/spi-gpio-chip-select",
+                   test_sdcard_spi_gpio_chip_select);
+    qtest_add_func("sam9x75/sdcard/spi-gpio-chip-select-migration",
+                   test_sdcard_spi_gpio_chip_select_migration);
     qtest_add_func("sam9x75/board/m2-interface-jumper",
                    test_board_m2_interface_jumper);
     qtest_add_func("sam9x75/ebi/chip-select-assignments",
