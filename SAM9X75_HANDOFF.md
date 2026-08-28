@@ -19,11 +19,16 @@ this file current whenever a new checkpoint is committed.
   (`chardev: Avoid unregistering yank after failed reconnect`)
 - Latest tested repository checkpoint: `fcfbe1ae0e`
   (`tests/guest: Add active CAN migration trigger`)
+- Latest documentation checkpoint: the commit that added this paragraph,
+  `docs: record SAM9X75 isolated external SocketCAN CAN gates`, which is the
+  tip of `main`.  It changes no source or test code.
 - The frozen binary used by the Linux4Microchip integration and migration
   evidence reports `v11.1.0-417-g1851743e84`.  Commits through the latest
   tested repository checkpoint after that implementation source change only
   documentation and test profiles; the full qtest was repeated after relinking
-  at `fcfbe1ae0e`.
+  at `fcfbe1ae0e`, and every regression below was repeated once more at the
+  documentation tip.  The isolated external SocketCAN gates used that same
+  `build-verify-serial` binary.
 
 Do not reset to an older UDPHS or crypto checkpoint; continue from the tip of
 `main` after fetching.  Verify that the named implementation fixes and latest
@@ -201,26 +206,62 @@ checkpoint `fcfbe1ae0e` after relinking.
   Runs r1--r3 remain diagnostics for, respectively, overlong USB serial
   strings, an overlong destination QMP socket path after an otherwise valid
   source migration, and an external interruption before the trigger.
+- The isolated external SocketCAN gates passed on two independent host `vcan`
+  paths.  Each guest controller had its own QEMU `can-bus` with one
+  `can-host-socketcan` endpoint (`can0`/`canbus0`/`s9x75c0` and
+  `can1`/`canbus1`/`s9x75c1`), so neither guest controller could answer for
+  the other and every frame crossed a real host backend.
+- The semantic profile ran both peers as host processes with `--include-esi`.
+  Each path passed TAP 5/5 on both roles with exactly 10,000 sent, received
+  and acknowledged stress frames and zero gap, duplicate, corruption,
+  stale-session, foreign frame, CAN error/drop or receive-queue overflow.
+  Because a virtual `vcan` peer can set the flag, each guest controller
+  **received 90 boundary cases while sending 86**; those four supplemental
+  CAN-FD ESI cases are the ESI receive-path coverage the shared internal bus
+  cannot produce.  Guest interrupts reached 32,245 and 32,244, both
+  controllers stayed `ERROR-ACTIVE` with `berr-counter tx 0 rx 0`, and the two
+  paths used distinct sessions `0x0000202608280010` and `0x0000202608280011`.
+  Each host `vcan` moved 40,362 packets with zero error, drop or missed frame.
+  Preserve `t/linux4microchip-can-socketcan-20260828/release-r1`.
+- The interoperability profile ran host can-utils 2023.03-1build1 `canfdtest`
+  generators against guest responders on both paths.  All four runs --
+  classic `-s 8` and CAN-FD/BRS `-d -b -s 64`, each against `s9x75c0` and
+  `s9x75c1` -- reported exactly 10,000 messages sent and received and exited
+  zero.  Preserve `t/linux4microchip-can-socketcan-20260828/canfdtest-r1`.
+- In both gates QEMU's `unimp,guest_errors` log was exactly empty, host
+  `e2fsck -fn` passed and the snapshot-backed root overlay hash was unchanged.
+  `smoke-r1` is a retained 200-frame bring-up run of the same topology.
+- The host `vcan` prerequisite is an environment setup step, not a code
+  change.  On this workstation the README's private-namespace recipe cannot
+  work because Ubuntu sets `kernel.apparmor_restrict_unprivileged_userns=1`,
+  so `unshare --user --map-root-user` fails before creating any interface.
+  Two global `vcan` interfaces were created instead with one privileged
+  setup; QEMU, both host peers and the validators then ran unprivileged.
+  Recreate them with `sudo modprobe vcan` and
+  `sudo ip link add s9x75c0 type vcan && sudo ip link set s9x75c0 up`
+  (likewise `s9x75c1`); remove them with `sudo ip link del`.
 
 ## Immediate continuation order
 
 Do these steps before starting another device model or another operating
 system.
 
-1. When privileged host network setup is available, extend the remaining P0
-   external-path coverage with independent host connections for both CAN
-   controllers.  Repeat the semantic and separate `canfdtest` profiles over
-   isolated SocketCAN paths, retaining ESI injection on virtual host peers.
-   The current workstation cannot create the required `vcan` interfaces as an
-   unprivileged user; this is an environment prerequisite, not evidence that
-   either backend passes or fails.
+The previously blocking external-path item is now closed; both isolated
+SocketCAN profiles passed.  Do these steps next.
+
+1. Take the next bounded implementation slice from the machine support matrix.
+   The adjacent CAN candidate is roadmap phase 6: M_CAN error confinement,
+   retry, timestamp synchronization and debug-message behavior, with the usual
+   reset, negative, interrupt and migration coverage.  Keep Linux4Microchip as
+   the primary OS; NetBSD, FreeBSD, other guests and the newer-mainline matrix
+   remain deliberately deferred.
 2. In parallel, the physical-board agent can run the safe crypto validation in
    `artifacts/linux4microchip-crypto-fixes-20260827/REAL-HARDWARE-TESTS.md`.
-3. If the host `vcan` prerequisite remains unavailable, do not stall: take the
-   next bounded implementation slice from the machine support matrix and keep
-   the external-path gate explicitly open.  Keep Linux4Microchip as the primary
-   OS; NetBSD, FreeBSD, other guests and the newer-mainline matrix remain
-   deliberately deferred.
+3. Two CAN sub-gates remain deliberately open and must not be claimed from the
+   evidence above.  ESI is injected by a virtual `vcan` peer rather than
+   observed from a real error-passive controller, and host SocketCAN state
+   lives outside the VM, so it is not itself migrated; the migrated-CAN
+   evidence remains the internal-QEMU-bus result.
 
 ### Focused build and host tests
 
@@ -412,11 +453,13 @@ ADMA NOP issue.
   standalone four-iteration/three-worker/65,536-byte crypto release gate.
 - The standalone Linux4Microchip CAN fixture passed 10,000 frames per role on
   one shared internal bus, and a separate `canfdtest` boot passed 10,000
-  classic plus 10,000 64-byte CAN-FD/BRS exchanges.  Next add independent host
-  connections for both controllers and repeat both profiles through
-  `can-host-socketcan`.  Do not use the shared bus as proof of two independent
-  external paths, and do not request ESI injection from the Linux M_CAN used
-  as its peer; retain ESI for virtual host peers.
+  classic plus 10,000 64-byte CAN-FD/BRS exchanges.  Both profiles have since
+  been repeated through `can-host-socketcan` on two independent host `vcan`
+  paths, closing this item; see the isolated-gate entries above and preserve
+  `t/linux4microchip-can-socketcan-20260828/release-r1` and `canfdtest-r1`.
+  Do not use the shared-bus runs as proof of two independent external paths.
+  ESI injection is available from virtual host peers only, and the isolated
+  semantic gate uses it; never request it from the Linux M_CAN used as a peer.
 - Quiescent and controlled active-stress whole-machine CAN migration are both
   achieved.  Preserve their separate authoritative `release-r4` evidence.
   The active run migrated with 16 peer sequences outstanding and then passed
@@ -555,16 +598,23 @@ write/hash, clean hotplug and proven-active raw-read removal gate is also
 green; preserve its release-r4 evidence and the dated EHCI-fix artifact.  The
 standalone shared-bus 10,000-frame CAN semantic gate and separate classic plus
 CAN-FD/BRS `canfdtest` gate are green at `4ab0af5c6a`; preserve their dated
-release evidence.  Quiescent whole-machine migration plus 10,000 post-resume
+release evidence.  The isolated external SocketCAN gates are also green on two
+independent host `vcan` paths: the semantic profile passed 10,000 frames per
+role per path with each guest controller receiving 90 boundary cases while
+sending 86 (the four supplemental CAN-FD ESI cases a virtual peer can inject),
+and host can-utils `canfdtest` generators passed 10,000 messages for both the
+classic and CAN-FD/BRS profiles on each path.  Preserve
+`t/linux4microchip-can-socketcan-20260828/release-r1` and `canfdtest-r1`.  Quiescent whole-machine migration plus 10,000 post-resume
 frames is green at `95ba1ee289`; preserve migration release-r4.  Controlled
 active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
 The post-gate regressions pass 238/238 for Curiosity, 42/42 for chardev, 7/7
-for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Isolated
-external SocketCAN paths remain pending privileged host `vcan` setup.  Keep
-other operating systems deferred.
+for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  The two
+CAN sub-gates still deliberately open are ESI observed from a real
+error-passive controller and migration of host SocketCAN state, which lives
+outside the VM.  Keep other operating systems deferred.
 
 Use the r5 hardware handoff only for sanitized evidence, safety rules and
 physical-test design because its software head is older than current main.

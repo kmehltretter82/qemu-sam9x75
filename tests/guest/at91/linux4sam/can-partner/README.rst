@@ -94,6 +94,27 @@ SocketCAN open/bind does not normally require root.  ``modprobe`` requires
 host privilege and creating a global vcan requires ``CAP_NET_ADMIN``; the
 private namespace avoids granting that capability in the initial namespace.
 
+The namespace recipe fails on distributions that restrict unprivileged user
+namespaces.  Ubuntu enables ``kernel.apparmor_restrict_unprivileged_userns``
+by default, and ``unshare --user --map-root-user`` then aborts with
+``write failed /proc/self/uid_map: Operation not permitted`` before any
+interface is created.  Check it first::
+
+  cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+
+When that file reads ``1``, either relax it deliberately, or create the two
+interfaces globally in the initial namespace::
+
+  sudo modprobe vcan
+  sudo ip link add s9x75c0 type vcan && sudo ip link set s9x75c0 up
+  sudo ip link add s9x75c1 type vcan && sudo ip link set s9x75c1 up
+
+Global interfaces are what the recorded gate used.  They are named for this
+test, carry no traffic other than it, and are removed with
+``sudo ip link del s9x75c0`` and ``sudo ip link del s9x75c1``.  Privilege is
+needed only for that setup; QEMU, both host peers and the validator all run
+as the ordinary user afterwards.
+
 macOS has no native SocketCAN backend.  Run the host peer and QEMU in a Linux
 VM, or use a Linux workstation for this gate.
 
@@ -225,9 +246,46 @@ topology.  The authoritative evidence is
 ``t/linux4microchip-canfdtest-20260827/release-r1``.
 
 These are internal controller/driver/protocol and userspace-interoperability
-gates.  They do not replace the isolated ``can-host-socketcan`` profile above,
-which is still required to prove both host backends independently and to
-inject ESI through virtual ``vcan`` peers.
+gates.  They do not by themselves prove the host backends, because a shared
+internal bus lets one guest controller answer for the other.  The isolated
+``can-host-socketcan`` profile below supplies that proof.
+
+Achieved isolated external SocketCAN gates
+------------------------------------------
+
+Both isolated profiles passed on two independent host ``vcan`` paths, using
+one ``can-bus`` and one ``can-host-socketcan`` per controller as shown under
+`Isolated QEMU topology`_.  Neither guest controller can answer for the other
+in this topology, so every frame crossed a real host backend.
+
+The semantic profile ran both peers as host processes with ``--include-esi``.
+Each path completed all 86 boundary cases in each direction plus exactly
+10,000 simultaneous 64-byte CAN-FD/BRS stress frames per direction, and each
+role reported 10,000 sent, received and acknowledged with zero gap,
+duplicate, corruption, stale-session, foreign frame, CAN error/drop or
+receive-queue overflow.  Because a virtual ``vcan`` peer can set the flag,
+each guest controller **received 90 boundary cases while sending 86**: the
+four supplemental CAN-FD ESI cases are the ESI receive-path coverage that the
+shared-bus topology cannot produce.  Both controllers ended ``ERROR-ACTIVE``
+with ``berr-counter tx 0 rx 0`` and advancing interrupts, and the two paths
+used distinct session identifiers.  Evidence:
+``t/linux4microchip-can-socketcan-20260828/release-r1``.
+
+The interoperability profile ran host can-utils 2023.03 generators against
+guest ``canfdtest`` responders on both paths.  All four runs — classic
+``-s 8`` and CAN-FD/BRS ``-d -b -s 64``, each on ``s9x75c0`` and ``s9x75c1``
+— reported exactly 10,000 messages sent and received and exited zero.
+Evidence: ``t/linux4microchip-can-socketcan-20260828/canfdtest-r1``.
+
+In both gates QEMU's ``-d unimp,guest_errors`` log was exactly empty, the
+result ext4 filesystem passed host ``e2fsck -fn``, and the snapshot-backed
+root overlay hash was unchanged.  The host ``vcan`` interfaces recorded zero
+errors, drops and missed frames, and their packet totals accounted for the
+run exactly, confirming no foreign traffic.
+
+What these gates still do not cover: ESI is injected by a virtual peer rather
+than observed from a real error-passive controller, and host SocketCAN state
+lives outside the VM, so it is not itself migrated.
 
 Reset and migration hooks
 -------------------------
