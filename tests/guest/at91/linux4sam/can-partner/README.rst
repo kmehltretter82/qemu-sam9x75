@@ -274,6 +274,23 @@ must identify an observed sequence window before migration, prove that the
 source stopped, and use the existing gap/duplicate/corruption oracle after the
 destination resumes.
 
+The peer can emit that non-pausing active-stress trigger explicitly::
+
+  python3 sam9x75_can_partner.py peer --interface s9x75c0 \
+      --frames 10000 --window 16 --timeout 1800 \
+      --inflight-ready-file "$WORK/inflight-ready.json" \
+      --inflight-at 3000
+
+The peer atomically writes the marker after receiving at least the requested
+stress count while it still has locally transmitted sequences awaiting
+acknowledgement and more traffic remains to send.  The JSON records the exact
+sent, received and acknowledged counts, next sequence, outstanding sequence
+set, session and timestamp.  It does not pause either endpoint.  Start QMP
+migration only after observing a fresh marker, require both endpoint rc files
+to remain absent at that point, and retain QMP's completed migration report.
+The in-flight marker and quiescent barrier options are intentionally mutually
+exclusive, and each currently requires a single peer session.
+
 For link recovery, operate on the host vcan only between completed sessions::
 
   ip link set s9x75c0 down

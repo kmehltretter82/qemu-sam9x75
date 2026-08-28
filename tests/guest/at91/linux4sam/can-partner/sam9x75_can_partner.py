@@ -910,9 +910,11 @@ class StressReceiver:
         return sequence
 
 
-def run_stress(endpoint, count, window, deadline):
+def run_stress(endpoint, count, window, deadline,
+               inflight_ready_file=None, inflight_at=None):
     next_send = 0
     outstanding = set()
+    inflight_marker = None
     receiver = StressReceiver(
         endpoint.session, endpoint.receive_direction, endpoint.counters,
     )
@@ -964,12 +966,32 @@ def run_stress(endpoint, count, window, deadline):
         endpoint.send_control(
             Kind.STRESS_ACK, endpoint.send_direction, sequence, deadline,
         )
+        if (inflight_marker is None and inflight_ready_file and
+                receiver.expected >= inflight_at and outstanding and
+                next_send < count):
+            inflight_marker = {
+                "schema": "sam9x75-can-inflight-marker-v1",
+                "phase": "stress-active-no-pause",
+                "session": "0x%016x" % endpoint.session,
+                "target_received": inflight_at,
+                "stress_total": count,
+                "stress_sent": endpoint.counters.stress_sent,
+                "stress_received": endpoint.counters.stress_received,
+                "stress_acked": endpoint.counters.stress_acked,
+                "receiver_expected": receiver.expected,
+                "next_send": next_send,
+                "outstanding_count": len(outstanding),
+                "outstanding_sequences": sorted(outstanding),
+                "created_unix_ns": time.time_ns(),
+                "pid": os.getpid(),
+            }
+            atomic_json(inflight_ready_file, inflight_marker)
         if endpoint.progress and sequence % 1000 == 0:
             print("# stress received through %d" % sequence, flush=True)
 
     if endpoint.counters.stress_acked != count:
         raise ProtocolError("not every transmitted stress frame was ACKed")
-    return count
+    return inflight_marker
 
 
 def _session_report(endpoint, started):
@@ -1060,7 +1082,8 @@ def run_guest_protocol(transport, session, stress_frames, window, deadline,
 def run_peer_protocol(transport, hello, window, deadline,
                       ignore_foreign=False, progress=False,
                       barrier_ready_file=None, resume_file=None,
-                      validation=None):
+                      validation=None, inflight_ready_file=None,
+                      inflight_at=None):
     endpoint = Endpoint(
         transport, "peer", hello.session, hello.stress_frames,
         ignore_foreign, progress, hello.include_esi,
@@ -1078,7 +1101,10 @@ def run_peer_protocol(transport, hello, window, deadline,
         barrier_ready_file, resume_file, endpoint, deadline,
     )
     endpoint.send_control(Kind.READY, Direction.PEER_TO_GUEST, 0, deadline)
-    run_stress(endpoint, hello.stress_frames, window, deadline)
+    inflight_marker = run_stress(
+        endpoint, hello.stress_frames, window, deadline,
+        inflight_ready_file, inflight_at,
+    )
     endpoint.receive_control(
         Kind.DONE, Direction.GUEST_TO_PEER, hello.stress_frames, deadline,
     )
@@ -1104,6 +1130,8 @@ def run_peer_protocol(transport, hello, window, deadline,
     )
     result = _session_report(endpoint, started)
     result["migration_barrier_used"] = barrier_used
+    if inflight_marker is not None:
+        result["inflight_marker"] = inflight_marker
     return result
 
 
@@ -1350,6 +1378,9 @@ def peer_main(args):
                 raise RuntimeError("barrier ready file already exists")
             if os.path.lexists(args.resume_file):
                 raise RuntimeError("resume file already exists")
+        if (args.inflight_ready_file and
+                os.path.lexists(args.inflight_ready_file)):
+            raise RuntimeError("in-flight ready file already exists")
         before = interface_snapshot(args.interface)
         transport = SocketCanTransport(args.interface, args.receive_buffer)
         deadline = time.monotonic() + args.timeout
@@ -1384,6 +1415,8 @@ def peer_main(args):
                     args.ignore_foreign, args.progress,
                     args.barrier_ready_file, args.resume_file,
                     validation=validate_local,
+                    inflight_ready_file=args.inflight_ready_file,
+                    inflight_at=args.inflight_at,
                 )
             except SessionRestart as restart:
                 report["aborted_sessions"].append({
@@ -1455,6 +1488,12 @@ def build_parser():
     )
     peer.add_argument("--barrier-ready-file", metavar="FILE")
     peer.add_argument("--resume-file", metavar="FILE")
+    peer.add_argument("--inflight-ready-file", metavar="FILE")
+    peer.add_argument(
+        "--inflight-at", type=positive_int, metavar="FRAMES",
+        help=("write active-stress state after receiving at least this "
+              "many frames"),
+    )
     peer.set_defaults(function=peer_main)
 
     guest = subparsers.add_parser("guest", help="Linux4Microchip M_CAN side")
@@ -1468,7 +1507,8 @@ def build_parser():
     guest.add_argument("--data-bitrate", type=positive_int, default=2000000)
     guest.add_argument("--txqueuelen", type=positive_int, default=4096)
     guest.set_defaults(function=guest_main, sessions=1,
-                       barrier_ready_file=None, resume_file=None)
+                       barrier_ready_file=None, resume_file=None,
+                       inflight_ready_file=None, inflight_at=None)
     return parser
 
 
@@ -1491,6 +1531,19 @@ def validate_args(parser, args):
                 os.path.abspath(args.barrier_ready_file) ==
                 os.path.abspath(args.resume_file)):
             parser.error("barrier ready and resume paths must be different")
+        inflight_values = (
+            bool(args.inflight_ready_file), bool(args.inflight_at),
+        )
+        if inflight_values[0] != inflight_values[1]:
+            parser.error(
+                "--inflight-ready-file and --inflight-at require each other"
+            )
+        if args.inflight_ready_file and args.sessions != 1:
+            parser.error("in-flight marker currently requires --sessions 1")
+        if args.inflight_ready_file and args.barrier_ready_file:
+            parser.error("quiescent barrier and in-flight marker are exclusive")
+        if args.inflight_at and args.inflight_at >= args.frames:
+            parser.error("--inflight-at must be less than --frames")
 
 
 def main(argv=None):

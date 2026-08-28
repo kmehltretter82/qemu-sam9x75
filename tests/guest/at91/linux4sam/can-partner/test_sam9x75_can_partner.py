@@ -284,7 +284,7 @@ class IntegrityOracleTests(unittest.TestCase):
 
 class EndToEndTests(unittest.TestCase):
     def run_pair(self, frames=64, barrier=None, include_esi=True,
-                 validation_order=None):
+                 validation_order=None, inflight=None):
         guest_transport, peer_transport = partner.MemoryTransport.pair()
         deadline = time.monotonic() + 15
         session = 0x123456789abcdef0
@@ -305,6 +305,10 @@ class EndToEndTests(unittest.TestCase):
                         (lambda: validation_order.append("peer"))
                         if validation_order is not None else None
                     ),
+                    inflight_ready_file=(
+                        inflight[0] if inflight else None
+                    ),
+                    inflight_at=(inflight[1] if inflight else None),
                 )
                 results.put(("peer", value, None))
             except BaseException as exc:
@@ -398,6 +402,37 @@ class EndToEndTests(unittest.TestCase):
             if not errors.empty():
                 raise errors.get_nowait()
             self.assertTrue(values["peer"]["migration_barrier_used"])
+
+    def test_inflight_migration_marker_does_not_pause_stress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ready = pathlib.Path(directory) / "inflight.json"
+            values, _guest, _peer = self.run_pair(
+                64, include_esi=False, inflight=(str(ready), 16),
+            )
+            marker = json.loads(ready.read_text(encoding="utf-8"))
+            self.assertEqual(
+                marker["schema"], "sam9x75-can-inflight-marker-v1",
+            )
+            self.assertEqual(marker["phase"], "stress-active-no-pause")
+            self.assertGreaterEqual(marker["stress_received"], 16)
+            self.assertLess(marker["stress_received"], 64)
+            self.assertGreater(marker["outstanding_count"], 0)
+            self.assertEqual(
+                marker["outstanding_count"],
+                len(marker["outstanding_sequences"]),
+            )
+            self.assertEqual(marker["stress_sent"], marker["next_send"])
+            self.assertEqual(
+                marker["stress_sent"] - marker["stress_acked"],
+                marker["outstanding_count"],
+            )
+            self.assertEqual(
+                marker["stress_received"], marker["receiver_expected"],
+            )
+            self.assertEqual(
+                values["peer"]["inflight_marker"], marker,
+            )
+            self.assertEqual(values["peer"]["stress_frames_received"], 64)
 
     def test_two_quiescent_reset_sessions(self):
         guest_transport, peer_transport = partner.MemoryTransport.pair()
@@ -519,6 +554,13 @@ class UtilityTests(unittest.TestCase):
         ])
         partner.validate_args(parser, args)
         self.assertEqual(args.frames, 65535)
+
+        args = parser.parse_args([
+            "peer", "--interface", "can0", "--frames", "100",
+            "--inflight-ready-file", "ready.json", "--inflight-at", "99",
+        ])
+        partner.validate_args(parser, args)
+        self.assertEqual(args.inflight_at, 99)
 
     def test_counter_gate_rejects_drops_and_socket_overflow(self):
         class Transport:
