@@ -393,10 +393,14 @@ static void sam9x75_curiosity_init(MachineState *machine)
 
     sam9x75_curiosity_create_controls(machine, soc, pmic);
 
-    if (sam9x75_curiosity_attach_sd(soc, 0)) {
-        /* The Curiosity card-detect switch drives PA23 low when inserted. */
-        qemu_set_irq(qdev_get_gpio_in(DEVICE(&soc->pio[0]), 23), 0);
-    }
+    sam9x75_curiosity_attach_sd(soc, 0);
+    /*
+     * The Curiosity card-detect switch drives PA23 low while a card is in
+     * the SDMMC0 socket, so the pin follows the host's card presence and
+     * reports removal and insertion of the medium at run time.
+     */
+    qdev_connect_gpio_out_named(DEVICE(&soc->sdmmc[0]), "card-inserted", 0,
+        qemu_irq_invert(qdev_get_gpio_in(DEVICE(&soc->pio[0]), 23)));
     if (board->m2_interface == SAM9X75_M2_INTERFACE_SDIO) {
         sam9x75_curiosity_attach_sd(soc, 1);
     } else {

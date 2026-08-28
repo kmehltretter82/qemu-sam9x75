@@ -465,6 +465,8 @@ static void at91_sdhci_init(Object *obj)
     DeviceState *dev = DEVICE(obj);
 
     object_initialize_child(obj, "sdhci", &s->sdhci, TYPE_SYSBUS_SDHCI);
+    /* The board card-detect switch follows the embedded host's card. */
+    qdev_pass_gpios(DEVICE(&s->sdhci), dev, "card-inserted");
     s->sdhci.software_reset_all = at91_sdhci_software_reset_all;
     s->sdhci.hostctl2_write_mask = SDMMC_HC2R_WRITE_MASK;
     s->hclock = qdev_init_clock_in(dev, "hclock", NULL, s, ClockUpdate);

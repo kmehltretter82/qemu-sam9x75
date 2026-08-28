@@ -50,6 +50,8 @@ struct SDHCIState {
     QEMUTimer *insert_timer;       /* timer for 'changing' sd card. */
     QEMUTimer *transfer_timer;
     qemu_irq irq;
+    /* Level output following physical card presence, for board card-detect. */
+    qemu_irq card_inserted;
 
     /* Registers cleared on reset */
     uint32_t sdmasysad;    /* SDMA System Address register */

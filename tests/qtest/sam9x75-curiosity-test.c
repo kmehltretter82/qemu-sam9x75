@@ -15622,6 +15622,135 @@ static uint8_t flexcom_spi_sd_command(QTestState *qts, uint8_t command)
     return response;
 }
 
+/*
+ * The Curiosity card-detect switch on PA23 follows the SDMMC0 card, so a
+ * medium change through QMP must be visible to a guest that uses the GPIO
+ * for detection, as the exact Linux device tree does with cd-gpios.
+ */
+static bool sdcard_pa23_inserted(QTestState *qts)
+{
+    return !(qtest_readl(qts, SAM9X7_PIOA_BASE + PIO_PDSR) & BIT(23));
+}
+
+static void sdcard_qmp_eject(QTestState *qts)
+{
+    QDict *response = qtest_qmp(qts,
+        "{'execute':'eject','arguments':{'device':'sd0','force':true}}");
+
+    g_assert_false(qdict_haskey(response, "error"));
+    qobject_unref(response);
+}
+
+static void sdcard_qmp_insert(QTestState *qts, const char *path)
+{
+    QDict *response = qtest_qmp(qts,
+        "{'execute':'blockdev-change-medium','arguments':"
+        "{'device':'sd0','filename':%s,'format':'raw'}}", path);
+
+    g_assert_false(qdict_haskey(response, "error"));
+    qobject_unref(response);
+}
+
+static void test_sdcard_card_detect_follows_medium(void)
+{
+    g_autofree char *sd_path = NULL;
+    QTestState *qts;
+    GError *error = NULL;
+    int fd;
+    int ret;
+
+    /* Without a card the switch is open and PA23 rests high. */
+    qts = qtest_init(SAM9X75_MACHINE);
+    pmc_write_pcr(qts, 2, PMC_PCR_EN);
+    g_assert_false(sdcard_pa23_inserted(qts));
+    g_assert_false(qtest_readl(qts, SAM9X7_SDMMC0_BASE + SDHCI_PRNSTS) &
+                   SDHCI_CARD_PRESENT);
+    qtest_quit(qts);
+
+    fd = g_file_open_tmp("sam9x75-sd-cd-XXXXXX", &sd_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = ftruncate(fd, 1 << 20);
+    g_assert_cmpint(ret, ==, 0);
+    close(fd);
+
+    qts = qtest_initf(SAM9X75_MACHINE
+                      " -drive file=%s,if=sd,index=0,id=sd0,format=raw,"
+                      "auto-read-only=off", sd_path);
+    pmc_write_pcr(qts, 2, PMC_PCR_EN);
+    g_assert_true(sdcard_pa23_inserted(qts));
+    g_assert_true(qtest_readl(qts, SAM9X7_SDMMC0_BASE + SDHCI_PRNSTS) &
+                  SDHCI_CARD_PRESENT);
+
+    sdcard_qmp_eject(qts);
+    g_assert_false(sdcard_pa23_inserted(qts));
+    g_assert_false(qtest_readl(qts, SAM9X7_SDMMC0_BASE + SDHCI_PRNSTS) &
+                   SDHCI_CARD_PRESENT);
+
+    sdcard_qmp_insert(qts, sd_path);
+    g_assert_true(sdcard_pa23_inserted(qts));
+    g_assert_true(qtest_readl(qts, SAM9X7_SDMMC0_BASE + SDHCI_PRNSTS) &
+                  SDHCI_CARD_PRESENT);
+
+    /* A system reset re-derives the level from the card that is present. */
+    qtest_system_reset(qts);
+    pmc_write_pcr(qts, 2, PMC_PCR_EN);
+    g_assert_true(sdcard_pa23_inserted(qts));
+    sdcard_qmp_eject(qts);
+    qtest_system_reset(qts);
+    pmc_write_pcr(qts, 2, PMC_PCR_EN);
+    g_assert_false(sdcard_pa23_inserted(qts));
+
+    qtest_quit(qts);
+    g_assert_cmpint(g_unlink(sd_path), ==, 0);
+}
+
+static void test_sdcard_card_detect_migration(void)
+{
+    g_autofree char *sd_path = NULL;
+    QTestState *from;
+    QTestState *to;
+    GError *error = NULL;
+    int fd;
+    int ret;
+
+    fd = g_file_open_tmp("sam9x75-sd-cd-mig-XXXXXX", &sd_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = ftruncate(fd, 1 << 20);
+    g_assert_cmpint(ret, ==, 0);
+    close(fd);
+
+    from = qtest_initf(SAM9X75_MACHINE
+                       " -drive file=%s,if=sd,index=0,id=sd0,format=raw,"
+                       "auto-read-only=off,file.locking=off", sd_path);
+    to = qtest_initf(SAM9X75_MACHINE
+                     " -drive file=%s,if=sd,index=0,id=sd0,format=raw,"
+                     "auto-read-only=off,file.locking=off"
+                     " -incoming defer", sd_path);
+
+    pmc_write_pcr(from, 2, PMC_PCR_EN);
+    g_assert_true(sdcard_pa23_inserted(from));
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    /* Presence and the PA23 level both survive; removal still works after. */
+    g_assert_true(sdcard_pa23_inserted(to));
+    g_assert_true(qtest_readl(to, SAM9X7_SDMMC0_BASE + SDHCI_PRNSTS) &
+                  SDHCI_CARD_PRESENT);
+    sdcard_qmp_eject(to);
+    g_assert_false(sdcard_pa23_inserted(to));
+    g_assert_false(qtest_readl(to, SAM9X7_SDMMC0_BASE + SDHCI_PRNSTS) &
+                   SDHCI_CARD_PRESENT);
+
+    qtest_quit(to);
+    qtest_quit(from);
+    g_assert_cmpint(g_unlink(sd_path), ==, 0);
+}
+
 static void test_sdcard_spi_protocol_probes(void)
 {
     static const uint8_t commands[] = { 5, 52, 53 };
@@ -25945,6 +26074,10 @@ int main(int argc, char **argv)
                    test_sdcard_native_protocol_probes);
     qtest_add_func("sam9x75/sdcard/spi-protocol-probes",
                    test_sdcard_spi_protocol_probes);
+    qtest_add_func("sam9x75/sdcard/card-detect-follows-medium",
+                   test_sdcard_card_detect_follows_medium);
+    qtest_add_func("sam9x75/sdcard/card-detect-migration",
+                   test_sdcard_card_detect_migration);
     qtest_add_func("sam9x75/sdcard/spi-gpio-chip-select",
                    test_sdcard_spi_gpio_chip_select);
     qtest_add_func("sam9x75/sdcard/spi-gpio-chip-select-migration",

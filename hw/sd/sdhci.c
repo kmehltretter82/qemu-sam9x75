@@ -248,6 +248,11 @@ static void sdhci_set_inserted(DeviceState *dev, bool level)
     SDHCIState *s = (SDHCIState *)dev;
 
     trace_sdhci_set_inserted(level ? "insert" : "eject");
+    /*
+     * A board card-detect switch sees the card itself, so report presence
+     * immediately even when the host-side insertion interrupt is delayed.
+     */
+    qemu_set_irq(s->card_inserted, level);
     if ((s->norintsts & SDHC_NIS_REMOVE) && level) {
         /* Give target some time to notice card ejection */
         timer_mod(s->insert_timer,
@@ -1460,6 +1465,7 @@ void sdhci_initfn(SDHCIState *s)
 {
     s->hostctl2_write_mask = UINT16_MAX;
     qbus_init(&s->sdbus, sizeof(s->sdbus), TYPE_SDHCI_BUS, DEVICE(s), "sd-bus");
+    qdev_init_gpio_out_named(DEVICE(s), &s->card_inserted, "card-inserted", 1);
 
     s->insert_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                    sdhci_raise_insertion_irq, s);
