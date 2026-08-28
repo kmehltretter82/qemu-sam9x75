@@ -195,7 +195,7 @@ struct SDState {
 
     uint64_t data_start;
     uint32_t data_offset;
-    size_t data_size;
+    uint32_t data_size;
     uint8_t data[512];
     struct {
         uint32_t write_counter;
@@ -1089,6 +1089,31 @@ static int sd_vmstate_pre_load(void *opaque)
     return 0;
 }
 
+/*
+ * data_size bounds every data phase: sd_generic_read_data() and
+ * sd_generic_write_data() stop and return to transfer state once
+ * data_offset reaches it.  Without it a destination loads zero, ends the
+ * phase after a single byte and leaves the transfer truncated, so it is
+ * only sent when a data phase is actually in progress.
+ */
+static bool sd_data_size_needed(void *opaque)
+{
+    SDState *sd = opaque;
+
+    return sd->data_size != 0;
+}
+
+static const VMStateDescription sd_data_size_vmstate = {
+    .name = "sd-card/data-size",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = sd_data_size_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(data_size, SDState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static const VMStateDescription sd_vmstate = {
     .name = "sd-card",
     .version_id = 2,
@@ -1123,6 +1148,7 @@ static const VMStateDescription sd_vmstate = {
     },
     .subsections = (const VMStateDescription * const []) {
         &sd_ocr_vmstate,
+        &sd_data_size_vmstate,
         &emmc_extcsd_vmstate,
         &emmc_rpmb_vmstate,
         NULL
@@ -2645,7 +2671,7 @@ send_response:
 /* Return true if buffer is consumed. Configured by sd_cmd_to_receivingdata() */
 static bool sd_generic_write_data(SDState *sd, const void *buf, size_t *len)
 {
-    size_t to_write = MIN(sd->data_size - sd->data_offset, *len);
+    size_t to_write = MIN((size_t)sd->data_size - sd->data_offset, *len);
 
     memcpy(&sd->data[sd->data_offset], buf, to_write);
     sd->data_offset += to_write;
@@ -2661,7 +2687,7 @@ static bool sd_generic_write_data(SDState *sd, const void *buf, size_t *len)
 /* Return true when buffer is consumed. Configured by sd_cmd_to_sendingdata() */
 static bool sd_generic_read_data(SDState *sd, void *buf, size_t *len)
 {
-    size_t to_read = MIN(sd->data_size - sd->data_offset, *len);
+    size_t to_read = MIN((size_t)sd->data_size - sd->data_offset, *len);
 
     memcpy(buf, &sd->data[sd->data_offset], to_read);
     sd->data_offset += to_read;

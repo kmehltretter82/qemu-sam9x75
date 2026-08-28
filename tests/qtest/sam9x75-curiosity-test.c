@@ -16305,23 +16305,39 @@ static void test_sdcard_spi_block_transfer_and_data_migration(void)
     g_assert_cmpmem(readback, block, payload, block);
 
     /*
-     * Migrate at a command boundary: the initialized card, its transfer
-     * state and the written block must all survive, and the destination
-     * must serve a fresh single-block read without repeating the
-     * initialization sequence.
-     *
-     * Migration taken *inside* a read data phase is deliberately not
-     * asserted here; see the note in the spi-consumer README.
+     * Migrate inside a read data phase: the card, its position in the
+     * block and the bounds of the phase must all survive, and the
+     * destination must then still serve fresh commands.
      */
     to = qtest_initf(SAM9X75_MACHINE ",m2-interface=spi"
                      " -drive file=%s,if=sd,index=1,format=raw,"
                      "auto-read-only=off,file.locking=off"
                      " -incoming defer", sd_path);
 
+    /*
+     * Stop 100 bytes into a 512-byte read, so the migration is taken with
+     * a data phase in progress.  data_size bounds that phase and is only
+     * carried by its own vmstate subsection; without it the destination
+     * ends the block after a single byte.
+     */
+    g_assert_cmphex(spi_sd_command_r1(from, 17, 0), ==, 0x00);
+    spi_sd_await_token(from);
+    for (i = 0; i < 100; i++) {
+        g_assert_cmphex(spi_sd_idle_byte(from), ==, payload[i]);
+    }
+
     migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
     migrate_qmp(from, to, NULL, NULL, "{}");
     wait_for_migration_complete(from);
     wait_for_migration_complete(to);
+
+    /* The destination continues the same block from byte 100. */
+    for (i = 100; i < block; i++) {
+        g_assert_cmphex(spi_sd_idle_byte(to), ==, payload[i]);
+    }
+    spi_sd_idle_byte(to);
+    spi_sd_idle_byte(to);
+    spi_sd_idle_byte(to);
 
     spi_sd_read_block(to, 0, readback, block);
     g_assert_cmpmem(readback, block, payload, block);
