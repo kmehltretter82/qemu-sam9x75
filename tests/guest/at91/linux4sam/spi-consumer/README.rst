@@ -221,10 +221,11 @@ reset taken with a command half sent, after which a complete CMD0 is
 accepted with no stale argument bytes, and a migration taken with four of
 six command bytes transferred, which the destination completes.
 
-The release gate still needs qtests that complete SPI-mode card
-initialization and single/multiple-block reads and writes, then migrate
-during a partial response, data read, data write, CRC and stop-command
-phase.
+Card initialization, single-block read and write, multiple-block read with
+a CMD12 stop, and migration at a command boundary and inside a read data
+phase are all covered, the last at `b61da6d205`.  What the release gate still
+needs is migration taken during a partial response, a data *write* and a
+CRC phase.
 
 That question is answered.  Tracing the working gate with
 ``-trace enable=sdcard_normal_command -trace enable=sdcard_app_command``
