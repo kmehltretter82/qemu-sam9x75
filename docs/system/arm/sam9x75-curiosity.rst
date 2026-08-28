@@ -322,10 +322,11 @@ Support matrix
        an accepted chunk outstanding; re-driving an already-asserted line is
        not a new request.  The TC compare events 43--48 are wired to
        channel 1 of each timer block.  The SSC transmit and receive
-       requests 38 and 39 are wired to the SSC model.  Of the 51 requests in
-       DS60001813E Table 16.1, the only ones that remain are the timer
-       capture and external-trigger lines (41--42, 49--50), which need TIOA
-       and TIOB input pins the board does not route.  GWAC pool weighting and
+       requests 38 and 39 are wired to the SSC model.  The TC capture events 41--42 are
+       wired too, though they stay idle on this board because nothing drives
+       TIOA.  Of the 51 requests in DS60001813E Table 16.1, the only ones
+       that remain are the TC external-trigger lines 49--50, which need the
+       external trigger the TCB model does not implement.  GWAC pool weighting and
        CNDC/descriptor QOS effects, security policy, bus/burst and
        arbitration timing, and coherency effects remain missing.  DMA memory
        accesses are synchronous in QEMU, so positive RDIP/WRIP intervals can
