@@ -257,6 +257,23 @@ create the resume file.  The complete full-duplex stress phase must then
 pass.  Both paths must be absent before peer startup to prevent a stale file
 from silently bypassing the barrier.
 
+This quiescent whole-machine profile passed at repository checkpoint
+``95ba1ee289``.  QMP completed a file migration after all 86 boundary cases
+and before stress, the source exited, and an identical destination restored
+the serial shell, Linux processes, both M_CAN controllers, shared Message RAM,
+interrupt state and the mounted USB evidence disk.  After the destination
+created the resume file, both roles passed TAP 5/5 and exactly 10,000 stress
+frames in each direction.  The authoritative workspace-local evidence is
+``t/linux4microchip-migration-20260828/release-r4``; its peer report attests
+``migration_barrier_used: true`` and its QMP report records completed status.
+The source and destination diagnostic logs are both empty.
+
+Do not generalize this result to in-flight CAN migration.  At this barrier no
+application CAN frame is outstanding.  A controlled active-traffic profile
+must identify an observed sequence window before migration, prove that the
+source stopped, and use the existing gap/duplicate/corruption oracle after the
+destination resumes.
+
 For link recovery, operate on the host vcan only between completed sessions::
 
   ip link set s9x75c0 down

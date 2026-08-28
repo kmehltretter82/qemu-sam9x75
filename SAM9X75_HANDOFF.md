@@ -17,8 +17,8 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `4ab0af5c6a`
-  (`docs: record SAM9X75 UHPHS hotplug gate`)
+- Latest tested repository checkpoint: `95ba1ee289`
+  (`docs: record SAM9X75 long CAN gates`)
 - `build-verify-serial/qemu-system-arm --version` reports exact source
   `v11.1.0-417-g1851743e84`; commits through the repository checkpoint after
   that implementation source change only documentation and test profiles.
@@ -152,6 +152,22 @@ The QEMU implementation at `1851743e84` compiled cleanly in
   injection or two isolated external paths.  Those remain a separate host
   `vcan` gate requiring the host `vcan` module and permission to create two
   network interfaces.
+- Quiescent whole-machine migration passed at repository checkpoint
+  `95ba1ee289`.  Both Linux M_CAN endpoints completed all 86 boundary cases,
+  then stopped at the fixture's application barrier with no semantic frame in
+  flight.  QMP migrated the running 256 MiB machine to a 56,056,437-byte file
+  in 425 ms with 22 ms reported downtime.  The source exited, an identical
+  destination restored the state and accepted serial-console input, and only
+  then was the stress phase released.  Both restored endpoints passed TAP 5/5
+  and exactly 10,000 sent, received and acknowledged frames, with zero
+  integrity error, CAN error/drop or receive-queue overflow.  Interrupts
+  reached 40,353/40,354.  Both QEMU diagnostic logs were empty, the evidence
+  ext4 disk passed `e2fsck -fn`, the disposable root qcow2 passed
+  `qemu-img check`, and the original root-overlay hash was unchanged.  Preserve
+  `/home/karl/linux-work/qemu-SAM9X75/t/linux4microchip-migration-20260828/release-r4/`.
+  Runs r1--r3 are diagnostics for, respectively, managed-sandbox QMP socket
+  denial, QEMU's read-only SD-card rejection and missing mount directories on
+  the deliberately read-only guest root.
 
 ## Immediate continuation order
 
@@ -162,9 +178,9 @@ system.
    connections for both CAN controllers.  Repeat the now-green 10,000-frame
    semantic and separate `canfdtest` profiles over those isolated SocketCAN
    paths, retaining ESI injection on the virtual host peers.
-2. Add quiescent whole-machine migration at the documented partner barriers,
-   then carefully controlled in-flight migration.  The USART receive timer
-   itself already has qtest migration coverage.
+2. Extend the now-green quiescent whole-machine migration gate to carefully
+   controlled in-flight migration.  The USART receive timer itself already
+   has qtest migration coverage; preserve the quiescent release-r4 baseline.
 3. In parallel, the physical-board agent can run the safe crypto validation in
    `artifacts/linux4microchip-crypto-fixes-20260827/REAL-HARDWARE-TESTS.md`.
 4. Only after the remaining integration gates are green, take the next bounded
@@ -370,9 +386,10 @@ ADMA NOP issue.
 ### P1: bounded QEMU improvements
 
 - Complete UDPHS `NB_TRANS`, isochronous DATAX/MDATA termination,
-  SOF/suspend/resume timing and SAM-BA, then add Linux4Microchip end-to-end
-  quiescent and in-flight migration gates while retaining and extending the
-  existing low-level migration qtests.  The current raw-token bridge is a
+  SOF/suspend/resume timing and SAM-BA, then extend the achieved
+  Linux4Microchip quiescent whole-machine migration gate to controlled
+  in-flight traffic while retaining and extending the existing low-level
+  migration qtests.  The current raw-token bridge is a
   development topology; a general host-facing cable backend remains missing.
 - Close UHPHS reset, port-power, hotplug, DMA-error and interrupt fidelity with
   Linux storage and input devices.
@@ -491,9 +508,10 @@ write/hash, clean hotplug and proven-active raw-read removal gate is also
 green; preserve its release-r4 evidence and the dated EHCI-fix artifact.  The
 standalone shared-bus 10,000-frame CAN semantic gate and separate classic plus
 CAN-FD/BRS `canfdtest` gate are green at `4ab0af5c6a`; preserve their dated
-release evidence.  The immediate tasks are isolated external SocketCAN paths,
-followed by quiescent and controlled in-flight migration.  Keep other
-operating systems deferred.
+release evidence.  Quiescent whole-machine migration plus 10,000 post-resume
+frames is green at `95ba1ee289`; preserve migration release-r4.  The immediate
+tasks are isolated external SocketCAN paths and controlled in-flight
+migration.  Keep other operating systems deferred.
 
 Use the r5 hardware handoff only for sanitized evidence, safety rules and
 physical-test design because its software head is older than current main.

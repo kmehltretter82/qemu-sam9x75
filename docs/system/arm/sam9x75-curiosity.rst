@@ -721,6 +721,17 @@ Support matrix
        current machine's isolated two-path host gate still requires privileged
        interface setup.  One internal bus is not proof of two independent
        external board paths.
+       Quiescent whole-machine migration is also covered with the exact
+       Linux4Microchip image.  Both endpoints first complete the 86-case
+       boundary matrix, then stop at an application barrier before stress
+       traffic.  A file migration terminates the source and restores an
+       identical destination, where 10,000 simultaneous frames in each
+       direction pass with exact acknowledgements and no protocol, controller,
+       queue or interrupt error.  This proves configured M_CAN, shared Message
+       RAM, interrupt, Linux process and USB evidence-disk continuity at a
+       quiescent CAN boundary.  Controlled migration with CAN frames in flight
+       remains exploratory because the untimed QEMU CAN bus has no physical
+       arbitration or external-backend state to migrate.
    * - Crypto, TRNG, OTP and PUF
      - Initial
      - AES has 128/192/256-bit keys; ECB, CBC, OFB, CFB8/16/32/64/128, CTR,
@@ -1451,6 +1462,6 @@ integration gates include full guest
 ``mmc_spi`` operation through J24, independent external CAN paths, the
 remaining board jumper and mux behavior, genuine
 QSPI and NAND RomBOOT, broader USB hotplug/error/migration behavior, expansion
-buses, multimedia/security, whole-machine migration and finally hardware
-differential validation.  Normal supported boots must be clean with
-``-d unimp,guest_errors``.
+buses, multimedia/security, controlled in-flight whole-machine migration and
+finally hardware differential validation.  Normal supported boots must be
+clean with ``-d unimp,guest_errors``.
