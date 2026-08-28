@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `cbc7592d80`
+- Latest tested repository checkpoint: `87451ea2a6`
+  (`tests/qtest/sam9x75: Cover SPI response-phase migration`)
+- Preceding test checkpoint: `cbc7592d80`
   (`tests/qtest/sam9x75: Cover SPI write and CRC phase migration`)
 - Preceding implementation checkpoint: `d35568571c`
   (`hw/misc: Add an AT91 SSC model and wire it on SAM9X7`)
@@ -553,10 +555,12 @@ silicon-confirmed.  Do these steps next.
    gate itself is achieved (above).  Its reset and partial-command migration
    follow-ups are done at `5bcb06b161`, and card initialization, single-block
    read and write and command-boundary migration at `0469ae3b29`.  What remains is
-   migration during a partial command response; the read data, write data
-   and CRC phases are all covered at `cbc7592d80`, multiple-block read with a
-   CMD12 stop at `b61da6d205`, and chasing the mid-data case found a generic
-   `hw/sd` migration fault, fixed at `a07f50cd94`.
+   nothing: the reset and migration follow-up is complete at `87451ea2a6`, with
+   the partial command, response, read data, write data and CRC phases all
+   covered.  Chasing the read-data case found a generic `hw/sd` migration
+   fault, fixed at `a07f50cd94`.  What is left for this consumer is the
+   exact Linux gate work -- dynamic card removal during I/O and the WILCS02
+   interrupt GPIO -- not qtests.
 1a. Prepare upstream submission of the two Linux patches in
    `artifacts/linux4microchip-crypto-fixes-20260827/`; both are now
    hardware-confirmed (see the results section above).
@@ -974,7 +978,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 258/258 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 259/259 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two
 full Curiosity runs on 2026-08-28 aborted at QEMU startup; that was host
 memory pressure, not a model fault, and the rule it implies is below.

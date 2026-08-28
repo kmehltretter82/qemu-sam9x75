@@ -221,11 +221,16 @@ reset taken with a command half sent, after which a complete CMD0 is
 accepted with no stale argument bytes, and a migration taken with four of
 six command bytes transferred, which the destination completes.
 
-Card initialization, single-block read and write, multiple-block read with
-a CMD12 stop, and migration at a command boundary and inside the read data,
-write data and CRC phases are all covered, the last at `cbc7592d80`.  The
-remaining reset and migration item is a migration taken during a partial
-command *response*; every other phase named above now has coverage.
+This follow-up is complete as of `87451ea2a6`.  Covered: card initialization,
+single-block read and write, multiple-block read with a CMD12 stop, a
+machine reset taken with a command half sent, and migration at a command
+boundary and inside every phase named above -- partial command, response,
+read data, write data and CRC.
+
+Chasing the read-data case found a generic ``hw/sd`` migration fault, since
+fixed; see the note above.  What remains for this consumer is the exact
+Linux gate rather than qtests: dynamic card removal during I/O and the
+WILCS02 interrupt GPIO are still separate future gates.
 
 That question is answered.  Tracing the working gate with
 ``-trace enable=sdcard_normal_command -trace enable=sdcard_app_command``
