@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `46d4328430`
+- Latest tested repository checkpoint: `76011576d9`
+  (`hw/timer/at91_tcb: Accept XC0-XC2 as external event sources`)
+- Preceding implementation checkpoint: `46d4328430`
   (`hw/timer/at91_tcb: Clock channels from XC0-XC2`)
 - Preceding implementation checkpoint: `66740ef43a`
   (`hw/timer/at91_tcb: Add UPDOWN counting`)
@@ -602,8 +604,8 @@ silicon-confirmed.  Do these steps next.
    trigger, the waveform-mode external event, all four `WAVSEL` behaviours
    including UPDOWN, and XC edge clocking with the `BMR` cross-connect, and
    every XDMAC request has a source.
-   What remains there is QDEC, and the XC external-event sources, which the
-   waveform-mode event path still refuses.  The edge-counting rework that
+   What remains there is QDEC.  The XC external-event sources are accepted
+   at `76011576d9`.  The edge-counting rework that
    TCLK and the `BMR` cross-connect needed is done at `46d4328430`: an XC-clocked
    channel advances per edge and keeps its own counter, reusing the same
    boundary handling as the ptimer path, so QDEC now has the counting
