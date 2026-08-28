@@ -1270,6 +1270,11 @@
 #define TCB_CCR_CLKDIS          BIT(1)
 #define TCB_CCR_SWTRG           BIT(2)
 #define TCB_CMR_CLOCK2          1
+#define TCB_CMR_CLOCK_XC0       5
+#define TCB_CMR_CLOCK_XC1       6
+#define TCB_CMR_CLKI            BIT(3)
+#define TCB_BMR_XC0S(v)         ((uint32_t)(v) << 0)
+#define TCB_BMR_XC1S(v)         ((uint32_t)(v) << 2)
 #define TCB_CMR_CPCSTOP         BIT(6)
 #define TCB_CMR_WAVESEL_UP_RC   (2U << 13)
 #define TCB_CMR_WAVESEL_UPDOWN_RC (3U << 13)
@@ -7658,6 +7663,79 @@ static void test_tcb_tioa_waveform_and_capture(void)
  * restarting, so RA and RB compare twice per period, once on each leg, and
  * the counter is seen to fall.
  */
+/*
+ * A channel whose TCCLKS names XC0 to XC2 is clocked by that signal rather
+ * than by a peripheral clock: it advances one count per selected edge.
+ * BMR routes each XC from a TCLK pin or from another channel's TIOA, which
+ * is how the block chains channels internally.
+ */
+static void test_tcb_xc_edge_clocking(void)
+{
+    const uint64_t ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
+    const uint64_t ch1 = SAM9X7_TCB_BASE + TCB_CHANNEL(1);
+    const char *tcb = "/machine/soc/tcb";
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int i;
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MCKR, 1);
+    pmc_write_pcr(qts, 17, PMC_PCR_EN);
+
+    /* XC0 from TCLK0: the counter follows the pin, not the clock. */
+    qtest_writel(qts, SAM9X7_TCB_BASE + TCB_BMR, TCB_BMR_XC0S(0));
+    qtest_writel(qts, ch0 + TCB_CMR, TCB_CMR_CLOCK_XC0);
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_clock_step(qts, 200000);
+    g_assert_cmphex(qtest_readl(qts, ch0 + TCB_CV), ==, 0);
+
+    for (i = 0; i < 5; i++) {
+        qtest_set_irq_in(qts, tcb, "tclk-in", 0, 1);
+        qtest_set_irq_in(qts, tcb, "tclk-in", 0, 0);
+    }
+    g_assert_cmphex(qtest_readl(qts, ch0 + TCB_CV), ==, 5);
+
+    /* CLKI counts the other edge, so a half period adds one more. */
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKDIS);
+    qtest_writel(qts, ch0 + TCB_CMR, TCB_CMR_CLOCK_XC0 | TCB_CMR_CLKI);
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_set_irq_in(qts, tcb, "tclk-in", 0, 1);
+    g_assert_cmphex(qtest_readl(qts, ch0 + TCB_CV), ==, 0);
+    qtest_set_irq_in(qts, tcb, "tclk-in", 0, 0);
+    g_assert_cmphex(qtest_readl(qts, ch0 + TCB_CV), ==, 1);
+
+    /*
+     * Chain internally: channel 0 toggles TIOA0 on its RC compare while
+     * channel 1 is clocked from XC1, which BMR points at TIOA0.
+     */
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKDIS);
+    qtest_writel(qts, ch1 + TCB_CCR, TCB_CCR_CLKDIS);
+    qtest_writel(qts, SAM9X7_TCB_BASE + TCB_BMR, TCB_BMR_XC1S(2));
+    qtest_writel(qts, ch1 + TCB_CMR, TCB_CMR_CLOCK_XC1);
+    qtest_writel(qts, ch1 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_writel(qts, ch0 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE | TCB_CMR_WAVESEL_UP_RC |
+                 TCB_CMR_ACPC(3));
+    qtest_writel(qts, ch0 + TCB_RC, 100);
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+
+    /* Each TIOA0 rising edge is one count on channel 1. */
+    for (i = 0; i < 400; i++) {
+        qtest_clock_step(qts, 4000);
+        if (qtest_readl(qts, ch1 + TCB_CV) >= 3) {
+            break;
+        }
+    }
+    g_assert_cmpuint(qtest_readl(qts, ch1 + TCB_CV), >=, 3);
+
+    /* A reserved BMR selection connects nothing. */
+    qtest_writel(qts, ch1 + TCB_CCR, TCB_CCR_CLKDIS);
+    qtest_writel(qts, SAM9X7_TCB_BASE + TCB_BMR, TCB_BMR_XC1S(1));
+    qtest_writel(qts, ch1 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_clock_step(qts, 400000);
+    g_assert_cmphex(qtest_readl(qts, ch1 + TCB_CV), ==, 0);
+
+    qtest_quit(qts);
+}
+
 static void test_tcb_updown_counting(void)
 {
     const uint64_t ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
@@ -27452,6 +27530,8 @@ int main(int argc, char **argv)
                    test_tcb_tiob_waveform_output);
     qtest_add_func("sam9x75/tcb/updown-counting",
                    test_tcb_updown_counting);
+    qtest_add_func("sam9x75/tcb/xc-edge-clocking",
+                   test_tcb_xc_edge_clocking);
     qtest_add_func("sam9x75/tcb1/reset-masks-and-independence",
                    test_tcb1_reset_masks_and_independence);
     qtest_add_func("sam9x75/tcb1/clock-gating-and-irq",

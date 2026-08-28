@@ -47,6 +47,7 @@
 #define TCB_CCR_SWTRG           BIT(2)
 
 #define TCB_CMR_TCCLKS_MASK     0x7
+#define TCB_CMR_CLKI            BIT(3)
 #define TCB_CMR_CPCSTOP         BIT(6)
 #define TCB_CMR_CPCDIS          BIT(7)
 #define TCB_CMR_WAVESEL_MASK    (3U << 13)
@@ -119,6 +120,18 @@
 
 #define TCB_COUNTER_RANGE       (UINT64_C(1) << 32)
 
+#define TCB_CMR_TCCLKS_XC0      5
+#define TCB_BMR_XCS_MASK        3
+#define TCB_BMR_XCS_TCLK        0
+/*
+ * BMR selects each XC source: TCLKn, or the TIOA of one of the two other
+ * channels.  Value 1 is reserved.  For XCn the two chaining values name
+ * the channels in ascending order, skipping n itself.
+ */
+static const unsigned int at91_tcb_xc_chain[AT91_TCB_NUM_CHANNELS][2] = {
+    { 1, 2 }, { 0, 2 }, { 0, 1 },
+};
+
 #define AT91_TCB_COMPARE_REQUESTS 3
 
 /*
@@ -135,6 +148,8 @@ static bool at91_tcb_tiob_is_output(const AT91TCBChannel *ch)
            ((ch->cmr >> TCB_CMR_EEVT_SHIFT) & TCB_CMR_EEVT_MASK) !=
            TCB_CMR_EEVT_TIOB;
 }
+
+static void at91_tcb_xc_refresh(AT91TCBState *s);
 
 /* Apply a waveform-mode effect to one of this channel's outputs. */
 static void at91_tcb_apply_pin_effect(AT91TCBChannel *ch, unsigned int shift,
@@ -168,6 +183,10 @@ static void at91_tcb_apply_pin_effect(AT91TCBChannel *ch, unsigned int shift,
     if (level != *out) {
         *out = level;
         qemu_set_irq(is_tioa ? s->tioa[index] : s->tiob[index], level);
+        if (is_tioa) {
+            /* TIOA can be another channel's XC source. */
+            at91_tcb_xc_refresh(s);
+        }
     }
 }
 
@@ -315,17 +334,43 @@ static Clock *at91_tcb_selected_clock(AT91TCBChannel *ch,
         *divider = 1;
         return s->slck;
     default:
-        /* XC0--XC2 require an externally routed clock. */
+        /* XC0--XC2 advance the counter per edge instead of per tick. */
         *divider = 1;
         return NULL;
     }
 }
 
+/* True when TCCLKS selects one of the three external clock signals. */
+static bool at91_tcb_uses_xc(const AT91TCBChannel *ch)
+{
+    return (ch->cmr & TCB_CMR_TCCLKS_MASK) >= TCB_CMR_TCCLKS_XC0;
+}
+
+/* The level a given XC signal currently carries, per BMR. */
+static bool at91_tcb_xc_source_level(AT91TCBState *s, unsigned int xc)
+{
+    unsigned int sel = (s->bmr >> (xc * 2)) & TCB_BMR_XCS_MASK;
+
+    if (sel == TCB_BMR_XCS_TCLK) {
+        return s->tclk_in[xc];
+    }
+    if (sel == 1) {
+        /* Reserved: nothing is connected. */
+        return false;
+    }
+    return s->channel[at91_tcb_xc_chain[xc][sel - 2]].tioa_out;
+}
+
 static bool at91_tcb_clock_active(AT91TCBChannel *ch)
 {
     unsigned int divider;
-    Clock *clk = at91_tcb_selected_clock(ch, &divider);
+    Clock *clk;
 
+    if (at91_tcb_uses_xc(ch)) {
+        /* An edge-clocked channel needs no running ptimer. */
+        return false;
+    }
+    clk = at91_tcb_selected_clock(ch, &divider);
     return clk && clock_get_hz(clk);
 }
 
@@ -344,8 +389,13 @@ static void at91_tcb_set_period(AT91TCBChannel *ch)
 
 static uint32_t at91_tcb_counter(AT91TCBChannel *ch)
 {
-    uint64_t remaining = ptimer_get_count(ch->timer);
+    uint64_t remaining;
     bool down = ch->segment_end < ch->segment_start;
+
+    if (ch->edge_clocked) {
+        return ch->edge_counter;
+    }
+    remaining = ptimer_get_count(ch->timer);
     uint64_t span = down ? ch->segment_start - ch->segment_end
                          : ch->segment_end - ch->segment_start;
 
@@ -380,6 +430,10 @@ static void at91_tcb_arm_segment(AT91TCBChannel *ch, uint32_t counter)
     }
 
     ptimer_stop(ch->timer);
+    ch->edge_clocked = at91_tcb_uses_xc(ch);
+    if (ch->edge_clocked) {
+        ch->edge_counter = counter;
+    }
     at91_tcb_set_period(ch);
     /*
      * One-shot per segment: the tick handler arms the next one, so the
@@ -542,6 +596,18 @@ static void at91_tcb_tioa_input(void *opaque, int index, int level)
 static void at91_tcb_tiob_input(void *opaque, int index, int level)
 {
     at91_tcb_pin_input(opaque, index, false, level);
+}
+
+static void at91_tcb_tclk_input(void *opaque, int index, int level)
+{
+    AT91TCBState *s = opaque;
+    bool value = level > 0;
+
+    if (value == s->tclk_in[index]) {
+        return;
+    }
+    s->tclk_in[index] = value;
+    at91_tcb_xc_refresh(s);
 }
 
 static void at91_tcb_record_wp_violation(AT91TCBChannel *ch, hwaddr offset)
@@ -792,6 +858,8 @@ static void at91_tcb_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case TCB_BMR:
         s->bmr = value & 0x03f3ff3f;
+        /* The XC sources may now carry different signals. */
+        at91_tcb_xc_refresh(s);
         break;
     case TCB_QIER:
         s->qimr |= value & TCB_QINT_MASK;
@@ -831,9 +899,13 @@ static const MemoryRegionOps at91_tcb_ops = {
     },
 };
 
-static void at91_tcb_tick(void *opaque)
+/*
+ * A boundary was reached.  The ptimer transaction must already be held,
+ * which it is inside the ptimer callback and which the edge-clocked path
+ * takes for itself.
+ */
+static void at91_tcb_handle_boundary(AT91TCBChannel *ch)
 {
-    AT91TCBChannel *ch = opaque;
     uint64_t boundary = ch->segment_end;
     bool down = ch->counting_down;
     bool period_end = !down && boundary >= at91_tcb_period_end(ch);
@@ -880,6 +952,68 @@ static void at91_tcb_tick(void *opaque)
     at91_tcb_arm_segment(ch, (period_end && !at91_tcb_updown(ch)) ?
                          0 : boundary);
     at91_tcb_update_irq(ch->owner);
+}
+
+static void at91_tcb_tick(void *opaque)
+{
+    at91_tcb_handle_boundary(opaque);
+}
+
+/*
+ * One selected edge of the channel's XC source advances the counter by
+ * one, which is what "clocked from XC" means: the signal is a clock, not
+ * a trigger.
+ */
+static void at91_tcb_edge_advance(AT91TCBChannel *ch)
+{
+    if (!ch->enabled || !ch->running || !ch->edge_clocked) {
+        return;
+    }
+    if (ch->counting_down) {
+        if (ch->edge_counter) {
+            ch->edge_counter--;
+        }
+    } else {
+        ch->edge_counter++;
+    }
+    if (ch->edge_counter == ch->segment_end) {
+        ptimer_transaction_begin(ch->timer);
+        at91_tcb_handle_boundary(ch);
+        ptimer_transaction_commit(ch->timer);
+    }
+}
+
+/*
+ * Recompute what each XC signal carries and advance every channel clocked
+ * from one that just moved in its counting direction.  CLKI inverts which
+ * edge counts.
+ */
+static void at91_tcb_xc_refresh(AT91TCBState *s)
+{
+    unsigned int xc;
+    unsigned int i;
+
+    for (xc = 0; xc < AT91_TCB_NUM_CHANNELS; xc++) {
+        bool level = at91_tcb_xc_source_level(s, xc);
+
+        if (level == s->xc_level[xc]) {
+            continue;
+        }
+        s->xc_level[xc] = level;
+        for (i = 0; i < AT91_TCB_NUM_CHANNELS; i++) {
+            AT91TCBChannel *ch = &s->channel[i];
+            bool wanted = !(ch->cmr & TCB_CMR_CLKI);
+
+            if (!at91_tcb_uses_xc(ch) ||
+                (ch->cmr & TCB_CMR_TCCLKS_MASK) - TCB_CMR_TCCLKS_XC0 != xc) {
+                continue;
+            }
+            if (level == wanted) {
+                at91_tcb_edge_advance(ch);
+            }
+        }
+    }
+    at91_tcb_update_irq(s);
 }
 
 static void at91_tcb_clock_changed(void *opaque, ClockEvent event)
@@ -944,6 +1078,8 @@ static void at91_tcb_reset(DeviceState *dev)
         memset(ch->compare_request_level, 0,
                sizeof(ch->compare_request_level));
         ch->counting_down = false;
+        ch->edge_clocked = false;
+        ch->edge_counter = 0;
         ch->tioa_out = false;
         ch->tiob_out = false;
         ch->tioa_in = false;
@@ -951,6 +1087,8 @@ static void at91_tcb_reset(DeviceState *dev)
         ch->capture_request_level = false;
         ch->etrg_request_level = false;
     }
+    memset(s->tclk_in, 0, sizeof(s->tclk_in));
+    memset(s->xc_level, 0, sizeof(s->xc_level));
     s->bmr = 0;
     s->qimr = 0;
     s->qisr = 0;
@@ -982,6 +1120,8 @@ static void at91_tcb_init(Object *obj)
     qdev_init_gpio_in_named(DEVICE(s), at91_tcb_tioa_input, "tioa-in",
                             AT91_TCB_NUM_CHANNELS);
     qdev_init_gpio_in_named(DEVICE(s), at91_tcb_tiob_input, "tiob-in",
+                            AT91_TCB_NUM_CHANNELS);
+    qdev_init_gpio_in_named(DEVICE(s), at91_tcb_tclk_input, "tclk-in",
                             AT91_TCB_NUM_CHANNELS);
 
     s->pclk = qdev_init_clock_in(DEVICE(s), "pclk",
@@ -1057,6 +1197,8 @@ static const VMStateDescription at91_tcb_channel_vmstate = {
         VMSTATE_UINT64_V(segment_end, AT91TCBChannel, 2),
         VMSTATE_BOOL_ARRAY_V(compare_request_level, AT91TCBChannel, 3, 2),
         VMSTATE_BOOL_V(counting_down, AT91TCBChannel, 3),
+        VMSTATE_BOOL_V(edge_clocked, AT91TCBChannel, 3),
+        VMSTATE_UINT32_V(edge_counter, AT91TCBChannel, 3),
         VMSTATE_BOOL_V(tioa_out, AT91TCBChannel, 3),
         VMSTATE_BOOL_V(tiob_out, AT91TCBChannel, 3),
         VMSTATE_BOOL_V(tioa_in, AT91TCBChannel, 3),

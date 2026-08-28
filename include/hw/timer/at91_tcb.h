@@ -41,6 +41,12 @@ typedef struct AT91TCBChannel {
     uint64_t segment_end;
     /* UPDOWN modes reverse at the period end and again at zero. */
     bool counting_down;
+    /*
+     * A channel clocked from XC0-XC2 is not driven by the ptimer: it
+     * advances one count per selected edge, so it keeps its own counter.
+     */
+    bool edge_clocked;
+    uint32_t edge_counter;
     /* Levels driven on the per-channel compare request lines. */
     bool compare_request_level[3];
     /* TIOA pin state: the level this channel drives, and what it sees. */
@@ -69,6 +75,9 @@ struct AT91TCBState {
      */
     qemu_irq tioa[AT91_TCB_NUM_CHANNELS];
     qemu_irq tiob[AT91_TCB_NUM_CHANNELS];
+    /* External TCLK inputs, one per channel, and the last XC levels. */
+    bool tclk_in[AT91_TCB_NUM_CHANNELS];
+    bool xc_level[AT91_TCB_NUM_CHANNELS];
     qemu_irq capture_request[AT91_TCB_NUM_CHANNELS];
     qemu_irq etrg_request[AT91_TCB_NUM_CHANNELS];
     Clock *pclk;
