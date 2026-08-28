@@ -428,6 +428,66 @@ Running it exposed two real model faults, now fixed and qtested:
 Both were reachable only through the real driver sequence, which is the
 argument for keeping exact-guest gates alongside qtests.
 
+## Two designed-but-unimplemented slices
+
+Both were scoped against the model and the data sheet in this session but
+deliberately not started, because each is a multi-hour change with real
+regression risk and neither should be half-landed.  The analysis is here so
+the next agent does not have to redo it.
+
+### TCB RA/RB compare events, and the last XDMAC request lines
+
+`hw/timer/at91_tcb.c` models only `COVFS`, `CPCS` and `SECE`.  Each channel
+runs one ptimer that counts down to the RC limit, so intermediate compares
+do not exist.  Adding them is what unblocks XDMAC requests 43--48, which
+DS60001813E Table 16.1 assigns to `TC1_CPA/CPB/CPC` and `TC4_CPA/CPB/CPC`
+(channel 1 of TC0 and channel 1 of TC1 respectively).
+
+The change is to schedule the ptimer to the nearest upcoming compare among
+RA, RB and RC rather than to RC alone, set the matching `CPAS`/`CPBS`/`CPCS`
+bit on expiry, and re-arm to the next boundary.  Touch points that must be
+handled together, not piecemeal:
+
+- `at91_tcb_counter()` derives the counter from the ptimer's remaining
+  count against the RC limit; with intermediate boundaries it must account
+  for which segment is running.
+- `at91_tcb_periodic()`, `CPCSTOP` and `CPCDIS` decide one-shot versus
+  periodic; only the RC boundary may stop or disable the clock.
+- Migration carries the ptimer, so the segment state must migrate too or be
+  recomputed in post-load.
+- Writes to RA/RB/RC while running must re-arm.
+
+Only waveform mode is in scope.  Capture mode (`LDRAS`/`LDRBS`) and
+`ETRGS`, which cover requests 41--42 and 49--50, additionally need TIOA and
+TIOB input pins that the board does not currently wire, so they are a
+separate and larger slice.  Requests 38--39 need an SSC model, which does
+not exist at all.
+
+### UDPHS suspend, resume and SOF
+
+Linux `atmel_usba_udc` consumes `DET_SUSPD`, `WAKE_UP` and `ENDOFRSM`; the
+model defines none of them.  The blocker is not the peripheral, it is that
+QEMU's USB core gives a device no callback for host port suspend or resume:
+`USBPortOps` has attach, detach, child_detach, wakeup and complete, and
+`USBDeviceClass` has handle_attach, handle_reset, handle_control,
+handle_data and ep_stopped.  Port suspend lives only in the EHCI `PORTSC`
+and OHCI `HcControl` registers and never reaches the device.  The UDPHS
+gadget bridge is a plain `USBDevice`, so it cannot observe it either.
+
+Two honest options, and the choice should be deliberate:
+
+1. Add a generic device-visible suspend/resume hook that EHCI and OHCI call
+   when a port enters or leaves suspend, and have the bridge forward it.
+   This is the faithful route and is upstream-shaped, but it changes shared
+   USB core API and needs sign-off beyond this board.
+2. Add a bridge-only back-channel between the modeled UHPHS and UDPHS,
+   which keeps the change local but only works for the internal
+   gadget-to-host topology, not a general host-facing cable backend.
+
+Do not infer suspend from packet inactivity: QEMU never delivers SOFs to
+devices, so a polled interrupt endpoint would false-trigger, and the
+resulting `DET_SUSPD` storm would be worse than the missing feature.
+
 ## Immediate continuation order
 
 Do these steps before starting another device model or another operating
@@ -444,9 +504,13 @@ silicon-confirmed.  Do these steps next.
 1a. Prepare upstream submission of the two Linux patches in
    `artifacts/linux4microchip-crypto-fixes-20260827/`; both are now
    hardware-confirmed (see the results section above).
-2. Then the next bounded P1 implementation slice from the machine support
-   matrix.  Done this checkpoint: transmit-side M_CAN error confinement and
-   the QSPI XDMAC request lines.  Next candidates, in rough order of
+2. Then the next bounded P1 implementation slice.  The two best-understood
+   candidates are written up above with their touch points: TCB RA/RB
+   compare events (which unblock XDMAC requests 43--48) and the UDPHS
+   suspend/resume design decision.  Done this checkpoint: transmit-side
+   M_CAN error confinement, the QSPI XDMAC request lines, the SDMMC0
+   card-detect path, the two mmc_spi faults and the GEM wire-length
+   statistics.  Next candidates, in rough order of
    boundedness: UDPHS suspend/resume/SOF signalling (`atmel_usba_udc`
    consumes it, but it needs the gadget-bridge protocol to carry host
    suspend/resume); TCB capture/compare events, which would then let XDMAC
