@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `936d31a9e3`
+- Latest tested repository checkpoint: `62872c90d2`
+  (`hw/timer/at91_tcb: Add RA/RB compare events and their XDMAC requests`)
+- Preceding implementation checkpoint: `936d31a9e3`
   (`hw/net/cadence_gem: Count statistics by wire length`)
 - Preceding implementation checkpoint: `fcf594706b`
   (`hw/arm/sam9x75: Fix two faults the mmc_spi Linux gate exposed`)
@@ -435,9 +437,16 @@ deliberately not started, because each is a multi-hour change with real
 regression risk and neither should be half-landed.  The analysis is here so
 the next agent does not have to redo it.
 
-### TCB RA/RB compare events, and the last XDMAC request lines
+### TCB RA/RB compare events -- DONE at `62872c90d2`
 
-`hw/timer/at91_tcb.c` models only `COVFS`, `CPCS` and `SECE`.  Each channel
+Implemented: the channel now runs one ptimer segment at a time to the
+nearest of RA, RB and the period end, `CPAS`/`CPBS` fire in counter order,
+the segment base migrates in channel vmstate version 2, and each compare
+drives an XDMAC request line with channel 1 of each block wired to requests
+43--48.  The original analysis follows, because the remaining capture work
+starts from the same place.
+
+`hw/timer/at91_tcb.c` modeled only `COVFS`, `CPCS` and `SECE`.  Each channel
 runs one ptimer that counts down to the RC limit, so intermediate compares
 do not exist.  Adding them is what unblocks XDMAC requests 43--48, which
 DS60001813E Table 16.1 assigns to `TC1_CPA/CPB/CPC` and `TC4_CPA/CPB/CPC`
@@ -457,11 +466,12 @@ handled together, not piecemeal:
   recomputed in post-load.
 - Writes to RA/RB/RC while running must re-arm.
 
-Only waveform mode is in scope.  Capture mode (`LDRAS`/`LDRBS`) and
+Only waveform mode was in scope.  Capture mode (`LDRAS`/`LDRBS`) and
 `ETRGS`, which cover requests 41--42 and 49--50, additionally need TIOA and
-TIOB input pins that the board does not currently wire, so they are a
+TIOB input pins that the board does not currently wire, so they remain a
 separate and larger slice.  Requests 38--39 need an SSC model, which does
-not exist at all.
+not exist at all.  Those four lines and the SSC pair are now the only
+entries of Table 16.1 still unwired.
 
 ### UDPHS suspend, resume and SOF
 
@@ -504,10 +514,9 @@ silicon-confirmed.  Do these steps next.
 1a. Prepare upstream submission of the two Linux patches in
    `artifacts/linux4microchip-crypto-fixes-20260827/`; both are now
    hardware-confirmed (see the results section above).
-2. Then the next bounded P1 implementation slice.  The two best-understood
-   candidates are written up above with their touch points: TCB RA/RB
-   compare events (which unblock XDMAC requests 43--48) and the UDPHS
-   suspend/resume design decision.  Done this checkpoint: transmit-side
+2. Then the next bounded P1 implementation slice.  The best-understood
+   remaining candidate is the UDPHS suspend/resume design decision, written
+   up above; the TCB compare slice beside it is now done.  Done this checkpoint: transmit-side
    M_CAN error confinement, the QSPI XDMAC request lines, the SDMMC0
    card-detect path, the two mmc_spi faults and the GEM wire-length
    statistics.  Next candidates, in rough order of
@@ -919,7 +928,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 250/250 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 252/252 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two of
 five unfiltered full Curiosity runs on 2026-08-28 aborted while starting the
 eighth test (`rom/cpu-reset-entry`) with no message; the same sequence passes

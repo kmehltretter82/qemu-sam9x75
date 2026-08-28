@@ -320,11 +320,12 @@ Support matrix
        lines are wired.  A hardware request is a level, so a request
        overflow is reported only on a rising edge while a channel still has
        an accepted chunk outstanding; re-driving an already-asserted line is
-       not a new request.  Of the 51 requests in DS60001813E Table 16.1, only
-       SSC transmit/receive (38, 39) and the timer lines (TC0/TC1 receive
-       41--42 and the TC1/TC4 compare and external-trigger events 43--50)
-       remain, because there is no SSC model yet and the TCB model does not
-       raise capture or compare events.  GWAC pool weighting and
+       not a new request.  The TC compare events 43--48 are wired to
+       channel 1 of each timer block.  Of the 51 requests in DS60001813E
+       Table 16.1, the ones that remain are SSC transmit/receive (38, 39),
+       which need an SSC model, and the timer capture and external-trigger
+       lines (41--42, 49--50), which need TIOA and TIOB input pins the board
+       does not route.  GWAC pool weighting and
        CNDC/descriptor QOS effects, security policy, bus/burst and
        arbitration timing, and coherency effects remain missing.  DMA memory
        accesses are synchronous in QEMU, so positive RDIP/WRIP intervals can
@@ -720,7 +721,15 @@ Support matrix
        periodic and one-shot interrupts, write protection and active-timer
        migration.  TC0 uses PID/AIC source 17 and TC1 uses PID/AIC source 45.
        The TC0 instance covers the unmodified Linux clocksource and clockevent
-       paths.  The common TCB model does not yet cover external TCLK/TIO
+       paths.  RA and RB are modeled as waveform-mode compares: the counter
+       runs one segment at a time to the nearest of RA, RB and the period
+       end, so ``CPAS`` and ``CPBS`` fire in counter order within a period,
+       a compare equal to RC reports both on one tick, and the segment base
+       migrates.  Each compare drives an XDMAC request line that follows its
+       latched status bit, and channel 1 of each block is wired to requests
+       43--48.  In capture mode RA and RB are loaded from TIOA/TIOB instead,
+       which this model does not have, so no compare fires there.  The
+       common TCB model does not yet cover external TCLK/TIO
        capture and waveform routing, up/down modes or QDEC.  The SAM9X7 ADC is
        mapped at ``0xf804c000`` with its eight physical inputs, PID/AIC source
        19, peripheral and generic clocks, and XDMAC receive request 40.  It
