@@ -16351,6 +16351,96 @@ static void test_sdcard_spi_block_transfer_and_data_migration(void)
     g_assert_cmpint(g_unlink(sd_path), ==, 0);
 }
 
+/*
+ * Multiple-block read: CMD18 streams block after block, each with its own
+ * start token and CRC, until CMD12 stops it.  The stop command is accepted
+ * while a data phase is in progress, which is the case the ssi-sd model
+ * calls out specially, and the card must take an ordinary command again
+ * afterwards.
+ */
+static void test_sdcard_spi_multiple_block_read(void)
+{
+    const unsigned int block = 512;
+    g_autofree char *sd_path = NULL;
+    g_autofree uint8_t *payload = g_malloc(block);
+    g_autofree uint8_t *readback = g_malloc(block);
+    QTestState *qts;
+    GError *error = NULL;
+    unsigned int i;
+    unsigned int b;
+    uint8_t value;
+    int fd;
+    int ret;
+
+    fd = g_file_open_tmp("sam9x75-spi-sd-multi-XXXXXX", &sd_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = ftruncate(fd, 1 << 20);
+    g_assert_cmpint(ret, ==, 0);
+    close(fd);
+
+    qts = qtest_initf(SAM9X75_MACHINE ",m2-interface=spi"
+                      " -drive file=%s,if=sd,index=1,format=raw,"
+                      "auto-read-only=off", sd_path);
+    spi_sd_initialize(qts);
+
+    /* Give the first two blocks distinct deterministic contents. */
+    for (b = 0; b < 2; b++) {
+        for (i = 0; i < block; i++) {
+            payload[i] = (uint8_t)(0x11 * (b + 1) ^ (i * 5));
+        }
+        g_assert_cmphex(spi_sd_command_r1(qts, 24, b * block), ==, 0x00);
+        spi_sd_idle_byte(qts);
+        flexcom_spi_transfer_byte(qts, SAM9X7_SPI4_BASE, 13, 0xfe, 217);
+        for (i = 0; i < block; i++) {
+            flexcom_spi_transfer_byte(qts, SAM9X7_SPI4_BASE, 13, payload[i],
+                                      217);
+        }
+        spi_sd_idle_byte(qts);
+        spi_sd_idle_byte(qts);
+        for (i = 0; i < 16; i++) {
+            value = spi_sd_idle_byte(qts);
+            if (value != 0xff) {
+                break;
+            }
+        }
+        g_assert_cmphex(value & 0x1f, ==, 0x05);
+        for (i = 0; i < 64 && spi_sd_idle_byte(qts) == 0x00; i++) {
+            continue;
+        }
+    }
+
+    /* One CMD18 streams both blocks, each with its own token and CRC. */
+    g_assert_cmphex(spi_sd_command_r1(qts, 18, 0), ==, 0x00);
+    for (b = 0; b < 2; b++) {
+        spi_sd_await_token(qts);
+        for (i = 0; i < block; i++) {
+            readback[i] = spi_sd_idle_byte(qts);
+        }
+        spi_sd_idle_byte(qts);
+        spi_sd_idle_byte(qts);
+        for (i = 0; i < block; i++) {
+            g_assert_cmphex(readback[i], ==,
+                            (uint8_t)(0x11 * (b + 1) ^ (i * 5)));
+        }
+    }
+
+    /* CMD12 stops the stream while the next block is still pending. */
+    g_assert_cmphex(spi_sd_command_r1(qts, 12, 0) & 0x7c, ==, 0x00);
+    for (i = 0; i < 64 && spi_sd_idle_byte(qts) == 0x00; i++) {
+        continue;
+    }
+
+    /* An ordinary single-block read works again afterwards. */
+    spi_sd_read_block(qts, 0, readback, block);
+    for (i = 0; i < block; i++) {
+        g_assert_cmphex(readback[i], ==, (uint8_t)(0x11 ^ (i * 5)));
+    }
+
+    qtest_quit(qts);
+    g_assert_cmpint(g_unlink(sd_path), ==, 0);
+}
+
 static void test_sdcard_spi_reset_and_partial_command_migration(void)
 {
     g_autofree char *sd_path = NULL;
@@ -26868,6 +26958,8 @@ int main(int argc, char **argv)
                    test_sdcard_spi_reset_and_partial_command_migration);
     qtest_add_func("sam9x75/sdcard/spi-block-transfer-and-data-migration",
                    test_sdcard_spi_block_transfer_and_data_migration);
+    qtest_add_func("sam9x75/sdcard/spi-multiple-block-read",
+                   test_sdcard_spi_multiple_block_read);
     qtest_add_func("sam9x75/sdcard/spi-gpio-chip-select",
                    test_sdcard_spi_gpio_chip_select);
     qtest_add_func("sam9x75/sdcard/spi-gpio-chip-select-migration",
