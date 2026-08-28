@@ -1077,8 +1077,14 @@ static int sd_vmstate_pre_load(void *opaque)
     /* If the OCR state is not included (prior versions, or not
      * needed), then the OCR must be set as powered up. If the OCR state
      * is included, this will be replaced by the state restore.
+     *
+     * A card in SPI mode does not emulate the power-up sequence and is
+     * already powered up by its own reset, so only power up a card that
+     * is not powered up yet.
      */
-    sd_ocr_powerup(sd);
+    if (!FIELD_EX32(sd->ocr, OCR, CARD_POWER_UP)) {
+        sd_ocr_powerup(sd);
+    }
 
     return 0;
 }
