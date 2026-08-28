@@ -16394,6 +16394,80 @@ static void test_sdcard_spi_block_transfer_and_data_migration(void)
  * (DATA_WRITE and SKIP_CRC16) and a different sd.c path, so the block must
  * still land intact when the transfer is finished on the destination.
  */
+/*
+ * Migration taken inside a multi-byte command response.  CMD58 answers R1
+ * followed by four OCR bytes, so stopping between them leaves ssi-sd in
+ * its RESPONSE state with response_pos part way through; the destination
+ * must deliver the rest of the same answer.
+ */
+static void test_sdcard_spi_response_phase_migration(void)
+{
+    const unsigned int block = 512;
+    g_autofree char *sd_path = NULL;
+    g_autofree uint8_t *readback = g_malloc(block);
+    QTestState *from;
+    QTestState *to;
+    GError *error = NULL;
+    uint8_t ocr_from[2];
+    uint8_t ocr_to[2];
+    unsigned int i;
+    int fd;
+    int ret;
+
+    fd = g_file_open_tmp("sam9x75-spi-sd-resp-XXXXXX", &sd_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = ftruncate(fd, 1 << 20);
+    g_assert_cmpint(ret, ==, 0);
+    close(fd);
+
+    from = qtest_initf(SAM9X75_MACHINE ",m2-interface=spi"
+                       " -drive file=%s,if=sd,index=1,format=raw,"
+                       "auto-read-only=off,file.locking=off", sd_path);
+    to = qtest_initf(SAM9X75_MACHINE ",m2-interface=spi"
+                     " -drive file=%s,if=sd,index=1,format=raw,"
+                     "auto-read-only=off,file.locking=off"
+                     " -incoming defer", sd_path);
+    spi_sd_initialize(from);
+
+    /* R1 arrives first, then the four OCR bytes; take two of them. */
+    g_assert_cmphex(spi_sd_command_r1(from, 58, 0), ==, 0x00);
+    ocr_from[0] = spi_sd_idle_byte(from);
+    ocr_from[1] = spi_sd_idle_byte(from);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    /* The destination continues the same response. */
+    ocr_to[0] = spi_sd_idle_byte(to);
+    ocr_to[1] = spi_sd_idle_byte(to);
+    spi_sd_idle_byte(to);
+
+    /*
+     * The OCR is a fixed capability word, so the halves taken on the two
+     * machines must join up: re-reading it on the destination gives the
+     * same four bytes.
+     */
+    g_assert_cmphex(spi_sd_command_r1(to, 58, 0), ==, 0x00);
+    g_assert_cmphex(spi_sd_idle_byte(to), ==, ocr_from[0]);
+    g_assert_cmphex(spi_sd_idle_byte(to), ==, ocr_from[1]);
+    g_assert_cmphex(spi_sd_idle_byte(to), ==, ocr_to[0]);
+    g_assert_cmphex(spi_sd_idle_byte(to), ==, ocr_to[1]);
+    spi_sd_idle_byte(to);
+
+    /* The card still serves an ordinary data command afterwards. */
+    spi_sd_read_block(to, 0, readback, block);
+    for (i = 0; i < block; i++) {
+        g_assert_cmphex(readback[i], ==, 0x00);
+    }
+
+    qtest_quit(to);
+    qtest_quit(from);
+    g_assert_cmpint(g_unlink(sd_path), ==, 0);
+}
+
 static void test_sdcard_spi_write_phase_migration(void)
 {
     const unsigned int block = 512;
@@ -27235,6 +27309,8 @@ int main(int argc, char **argv)
                    test_sdcard_spi_multiple_block_read);
     qtest_add_func("sam9x75/sdcard/spi-write-phase-migration",
                    test_sdcard_spi_write_phase_migration);
+    qtest_add_func("sam9x75/sdcard/spi-response-phase-migration",
+                   test_sdcard_spi_response_phase_migration);
     qtest_add_func("sam9x75/sdcard/spi-gpio-chip-select",
                    test_sdcard_spi_gpio_chip_select);
     qtest_add_func("sam9x75/sdcard/spi-gpio-chip-select-migration",
