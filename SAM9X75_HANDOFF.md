@@ -498,6 +498,28 @@ Do not infer suspend from packet inactivity: QEMU never delivers SOFs to
 devices, so a polled interrupt endpoint would false-trigger, and the
 resulting `DET_SUSPD` storm would be worse than the missing feature.
 
+## Do not run a whole-machine gate and the qtest suite at once
+
+Two full Curiosity qtest runs on 2026-08-28 died with `SIGABRT` while
+starting a test's QEMU, reported by the harness as
+`kill_qemu() detected QEMU death from signal 6`.  It looked like a flake,
+but the cause is almost certainly host memory pressure:
+
+- Every qtest spawns a fresh machine, and `default_ram_size` is 256 MiB.
+- Both failures happened while an `mmc_spi` gate VM, another 256 MiB
+  machine plus its page cache, was running in the background.
+- The abort is at QEMU startup, not inside a test, which is what an
+  allocation failure looks like.
+- This workstation has 23 GiB of RAM and a 4 GiB swapfile that was fully
+  consumed at the time, exactly the condition the operator's notes warn
+  about.
+
+Eighteen consecutive runs with no whole-machine gate in the background --
+twelve of the `rom` group and six unfiltered full suites -- did not
+reproduce it.  So: run the qtest suite or a whole-machine gate, not both.
+If it ever reproduces on an otherwise idle machine, that would falsify this
+and make it a real bug worth chasing.
+
 ## Immediate continuation order
 
 Do these steps before starting another device model or another operating
@@ -929,11 +951,9 @@ peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
 The post-gate regressions pass 252/252 for Curiosity, 42/42 for chardev, 7/7
-for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two of
-five unfiltered full Curiosity runs on 2026-08-28 aborted while starting the
-eighth test (`rom/cpu-reset-entry`) with no message; the same sequence passes
-in isolation, under gdb and in later plain runs, so treat it as an
-unexplained intermittent harness flake to investigate, not a model failure.
+for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two
+full Curiosity runs on 2026-08-28 aborted at QEMU startup; that was host
+memory pressure, not a model fault, and the rule it implies is below.
 The `mmc_spi` consumer gate is achieved, and running it exposed and fixed a
 spurious XDMAC request overflow and a `WDRBT` FIFO stall.
 Physical-board results from the same day are recorded in the handoff: both
