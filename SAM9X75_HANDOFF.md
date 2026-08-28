@@ -1,6 +1,6 @@
 # SAM9X75 Curiosity QEMU continuation handoff
 
-Last updated: 2026-08-27 UTC
+Last updated: 2026-08-28 UTC
 
 This is the entry point for another development agent.  It records the exact
 checkpoint, what was actually validated, what must be repeated next, where the
@@ -17,8 +17,8 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `9665c77235`
-  (`tests/guest: Record SAM9X75 combined release gate`)
+- Latest tested repository checkpoint: `4ab0af5c6a`
+  (`docs: record SAM9X75 UHPHS hotplug gate`)
 - `build-verify-serial/qemu-system-arm --version` reports exact source
   `v11.1.0-417-g1851743e84`; commits through the repository checkpoint after
   that implementation source change only documentation and test profiles.
@@ -125,6 +125,33 @@ The QEMU implementation at `1851743e84` compiled cleanly in
   passed `e2fsck -fn`, and the snapshot-backed SD hash remained unchanged.
 - The authoritative firmware-chain evidence is workspace-local at
   `/home/karl/linux-work/qemu-SAM9X75/t/linux4microchip-firmware-gem-20260827/release-r4/`.
+- At repository checkpoint `4ab0af5c6a`, the standalone Linux4Microchip CAN
+  semantic gate passed **10,000** simultaneous 64-byte CAN-FD/BRS stress
+  frames in each direction between `can0` and `can1`, in addition to all 86
+  classic, RTR and CAN-FD boundary cases in each direction.  Both endpoints
+  passed TAP 5/5 and attested their final counters.  Each sent, received and
+  acknowledged exactly 10,000 stress frames with zero gap, duplicate,
+  corruption, stale-session, foreign-frame, CAN error/drop or SocketCAN queue
+  overflow.  Interrupt counts reached 40,353/40,354, QEMU's diagnostic log
+  was empty, the result ext4 filesystem passed host `e2fsck -fn`, and the
+  snapshot-backed root overlay hash was unchanged.  Preserve the authoritative
+  evidence at
+  `/home/karl/linux-work/qemu-SAM9X75/t/linux4microchip-can-20260827/release-r2/`;
+  `release-r1` is diagnostic because its host validator mishandled the
+  report's fixed-width session-ID formatting.
+- A separate userspace interoperability boot at the same QEMU checkpoint ran
+  Linux4Microchip's can-utils 2023.03 `canfdtest`.  The classic 8-byte profile
+  and the 64-byte CAN-FD/BRS profile each reported exactly 10,000 messages
+  sent and received.  Both generators exited zero, each controller ended with
+  20,030 RX and TX packets, zero errors/drops and `ERROR-ACTIVE` state, QEMU's
+  diagnostic log was empty, `e2fsck -fn` passed and the root overlay was
+  unchanged.  Preserve
+  `/home/karl/linux-work/qemu-SAM9X75/t/linux4microchip-canfdtest-20260827/release-r1/`.
+- Both new gates deliberately use one internal QEMU CAN bus with the second
+  Linux M_CAN as the peer.  They do not prove `can-host-socketcan`, ESI
+  injection or two isolated external paths.  Those remain a separate host
+  `vcan` gate requiring the host `vcan` module and permission to create two
+  network interfaces.
 
 ## Immediate continuation order
 
@@ -132,8 +159,9 @@ Do these steps before starting another device model or another operating
 system.
 
 1. Extend the remaining P0 external-path coverage with independent host
-   connections for both CAN controllers, the 10,000-frame CAN profile and a
-   separate `canfdtest` interoperability run.
+   connections for both CAN controllers.  Repeat the now-green 10,000-frame
+   semantic and separate `canfdtest` profiles over those isolated SocketCAN
+   paths, retaining ESI injection on the virtual host peers.
 2. Add quiescent whole-machine migration at the documented partner barriers,
    then carefully controlled in-flight migration.  The USART receive timer
    itself already has qtest migration coverage.
@@ -324,11 +352,13 @@ ADMA NOP issue.
   independent host/guest TAP and JSON.  The two-iteration/two-worker crypto
   entry remains a combined-contention profile and does not replace the
   standalone four-iteration/three-worker/65,536-byte crypto release gate.
-- The Linux4Microchip CAN fixture passed 1,000 frames per role on one shared
-  internal bus.  Next add independent host connections for both controllers,
-  the 10,000-frame gate and a separate `canfdtest` interoperability run.  Do
-  not use the shared bus as proof of two independent external paths, and do
-  not request ESI injection from the Linux M_CAN used as its peer.
+- The standalone Linux4Microchip CAN fixture passed 10,000 frames per role on
+  one shared internal bus, and a separate `canfdtest` boot passed 10,000
+  classic plus 10,000 64-byte CAN-FD/BRS exchanges.  Next add independent host
+  connections for both controllers and repeat both profiles through
+  `can-host-socketcan`.  Do not use the shared bus as proof of two independent
+  external paths, and do not request ESI injection from the Linux M_CAN used
+  as its peer; retain ESI for virtual host peers.
 - The current-head firmware-to-disk-root plus GEM gate is achieved at
   repository checkpoint `9665c77235`.  Preserve
   `linux4microchip-firmware-gem-20260827/release-r4`; do not confuse its
@@ -459,9 +489,11 @@ evidence.  Read the dated crypto-fixes artifact and do not add a QEMU
 workaround for the documented Linux driver bugs.  The larger UHPHS
 write/hash, clean hotplug and proven-active raw-read removal gate is also
 green; preserve its release-r4 evidence and the dated EHCI-fix artifact.  The
-immediate tasks are independent external CAN paths, the 10,000-frame and
-`canfdtest` profiles, followed by quiescent and controlled in-flight
-migration.  Keep other operating systems deferred.
+standalone shared-bus 10,000-frame CAN semantic gate and separate classic plus
+CAN-FD/BRS `canfdtest` gate are green at `4ab0af5c6a`; preserve their dated
+release evidence.  The immediate tasks are isolated external SocketCAN paths,
+followed by quiescent and controlled in-flight migration.  Keep other
+operating systems deferred.
 
 Use the r5 hardware handoff only for sanitized evidence, safety rules and
 physical-test design because its software head is older than current main.

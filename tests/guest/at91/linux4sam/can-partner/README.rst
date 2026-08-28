@@ -204,6 +204,31 @@ Other useful generator/capture tools include::
 separate interoperability cases, not commands to run concurrently with the
 deterministic fixture.
 
+Validated internal Linux4Microchip gates
+-----------------------------------------
+
+At QEMU repository checkpoint ``4ab0af5c6a`` (machine binary source
+``1851743e84``), Linux4Microchip 2026.04 passed the standalone semantic
+profile with 10,000 stress frames in each direction, window 16 and all 86
+boundary cases each way.  Both roles passed TAP 5/5 with exact sent, received
+and acknowledged counts, zero integrity error, zero interface error/drop,
+zero receive-queue overflow and advancing controller interrupts.  The
+authoritative workspace-local evidence is
+``t/linux4microchip-can-20260827/release-r2`` relative to the workspace root.
+
+A separate boot ran can-utils 2023.03 entirely inside the guest, with
+``can0`` as responder and ``can1`` as generator on the shared QEMU CAN bus.
+Both ``canfdtest -g -f 16 -l 10000 -s 8`` and
+``canfdtest -g -d -b -f 16 -l 10000 -s 64`` reported exactly 10,000 messages
+sent and received.  ESI was correctly omitted for this real-controller peer
+topology.  The authoritative evidence is
+``t/linux4microchip-canfdtest-20260827/release-r1``.
+
+These are internal controller/driver/protocol and userspace-interoperability
+gates.  They do not replace the isolated ``can-host-socketcan`` profile above,
+which is still required to prove both host backends independently and to
+inject ESI through virtual ``vcan`` peers.
+
 Reset and migration hooks
 -------------------------
 

@@ -705,15 +705,22 @@ Support matrix
        remain for board validation; that work needs the appropriate header
        pinmux and a CAN transceiver rather than a direct connection to the SoC
        pins.
-       The exact Linux4Microchip 2026.04 combined gate also passed 1,000
+       The exact Linux4Microchip 2026.04 combined gate passed 1,000
        bidirectional protocol stress frames between ``can0`` and ``can1`` on
-       one internal QEMU CAN bus, with classic, RTR, CAN-FD/BRS and 64-byte
-       payload coverage and no duplicate, gap, corruption, queue overflow or
-       controller error.  This topology cannot inject ESI from userspace:
-       Linux's real-controller API treats ESI as controller-generated and its
-       M_CAN transmit path ignores that request.  ESI reception remains
-       covered with a virtual host ``vcan`` peer; one internal bus is not proof
-       of two independent external board paths.
+       one internal QEMU CAN bus.  A standalone current-head gate extended
+       that to 10,000 simultaneous 64-byte CAN-FD/BRS frames in each direction
+       plus all 86 classic, RTR and CAN-FD boundary cases each way.  It ended
+       with zero protocol error, controller error/drop or receive-queue
+       overflow and an empty QEMU diagnostic log.  A separate can-utils
+       ``canfdtest`` boot passed 10,000 classic 8-byte exchanges and 10,000
+       64-byte CAN-FD/BRS exchanges, leaving both controllers ``ERROR-ACTIVE``
+       with zero errors and drops.  This topology cannot inject ESI from
+       userspace: Linux's real-controller API treats ESI as
+       controller-generated and its M_CAN transmit path ignores that request.
+       ESI reception remains part of the virtual host ``vcan`` profile; the
+       current machine's isolated two-path host gate still requires privileged
+       interface setup.  One internal bus is not proof of two independent
+       external board paths.
    * - Crypto, TRNG, OTP and PUF
      - Initial
      - AES has 128/192/256-bit keys; ECB, CBC, OFB, CFB8/16/32/64/128, CTR,
@@ -1435,11 +1442,14 @@ bring-up, DHCP, ICMP and deterministic full-duplex TCP/UDP packet exchange are
 achieved with the exact Linux4Microchip image and unchanged shipped overlay.
 The concurrent Linux4Microchip gate is also achieved: GEM TCP/UDP, both M_CAN
 controllers, FLEXCOM1 UART, SHA/HMAC/AES/TDES, CPU, memory and filesystem
-integrity all passed in one bounded run.  A separate UHPHS ext4 result disk
-was written, cleanly unmounted and passed host-side filesystem checking, with
-an empty QEMU diagnostic log.  Remaining integration gates include full guest
-``mmc_spi`` operation through J24, independent external CAN paths and their
-long/canfdtest profiles, the remaining board jumper and mux behavior, genuine
+integrity all passed in one bounded run.  The standalone shared-bus CAN gate
+also passed 10,000 semantic frames per direction, and separate classic plus
+CAN-FD/BRS ``canfdtest`` profiles each passed 10,000 exchanges.  A separate
+UHPHS ext4 result disk was written, cleanly unmounted and passed host-side
+filesystem checking, with an empty QEMU diagnostic log.  Remaining
+integration gates include full guest
+``mmc_spi`` operation through J24, independent external CAN paths, the
+remaining board jumper and mux behavior, genuine
 QSPI and NAND RomBOOT, broader USB hotplug/error/migration behavior, expansion
 buses, multimedia/security, whole-machine migration and finally hardware
 differential validation.  Normal supported boots must be clean with
