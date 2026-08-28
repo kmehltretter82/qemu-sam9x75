@@ -102,8 +102,26 @@
 #define WPMR_ENABLE_MASK      0x7
 #define WPMR_KEY              0x51535000
 
+static void at91_ospi_set_request(qemu_irq irq, bool *old_level,
+                                  bool new_level)
+{
+    if (*old_level != new_level) {
+        *old_level = new_level;
+        qemu_set_irq(irq, new_level);
+    }
+}
+
+/*
+ * Every status change funnels through here, so the XDMAC request lines are
+ * kept in step with the transmit-empty and receive-full flags.  A disabled
+ * controller requests nothing, which also covers reset.
+ */
 static void at91_ospi_update_irq(AT91OSPIState *s)
 {
+    at91_ospi_set_request(s->tx_request, &s->tx_request_level,
+                          s->enabled && (s->isr & ISR_TDRE));
+    at91_ospi_set_request(s->rx_request, &s->rx_request_level,
+                          s->enabled && (s->isr & ISR_RDRF));
     qemu_set_irq(s->irq, !!(s->isr & s->imr));
 }
 
@@ -492,14 +510,23 @@ static void at91_ospi_reg_write(void *opaque, hwaddr offset, uint64_t value,
     }
 }
 
+/*
+ * The registers are 32 bits wide, but an XDMAC channel paced by the QSPI
+ * request lines accesses TDR and RDR at its programmed data width, so
+ * narrow accesses are widened to one register access.
+ */
 static const MemoryRegionOps at91_ospi_reg_ops = {
     .read = at91_ospi_reg_read,
     .write = at91_ospi_reg_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
-        .min_access_size = 4,
+        .min_access_size = 1,
         .max_access_size = 4,
         .unaligned = false,
+    },
+    .impl = {
+        .min_access_size = 4,
+        .max_access_size = 4,
     },
 };
 
@@ -585,6 +612,9 @@ static int at91_ospi_post_load(void *opaque, int version_id)
     AT91OSPIState *s = opaque;
 
     qemu_set_irq(s->cs, s->cs_asserted ? 0 : 1);
+    /* Request levels are derived state; re-drive them from the flags. */
+    s->tx_request_level = false;
+    s->rx_request_level = false;
     at91_ospi_update_irq(s);
     return 0;
 }
@@ -635,6 +665,8 @@ static void at91_ospi_init(Object *obj)
     sysbus_init_mmio(sbd, &s->memory_mmio);
     sysbus_init_irq(sbd, &s->irq);
     qdev_init_gpio_out_named(dev, &s->cs, "cs", 1);
+    qdev_init_gpio_out_named(dev, &s->tx_request, "tx-request", 1);
+    qdev_init_gpio_out_named(dev, &s->rx_request, "rx-request", 1);
 
     s->pclk = qdev_init_clock_in(dev, "pclk", NULL, NULL, 0);
     s->gclk = qdev_init_clock_in(dev, "gclk", NULL, NULL, 0);

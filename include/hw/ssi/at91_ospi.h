@@ -22,6 +22,11 @@ struct AT91OSPIState {
     MemoryRegion memory_mmio;
     qemu_irq irq;
     qemu_irq cs;
+    /* XDMAC hardware request lines, level-driven from TDRE and RDRF. */
+    qemu_irq tx_request;
+    qemu_irq rx_request;
+    bool tx_request_level;
+    bool rx_request_level;
     Clock *pclk;
     Clock *gclk;
     SSIBus *spi;

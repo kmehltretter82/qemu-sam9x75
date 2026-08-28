@@ -19005,6 +19005,153 @@ static void qspi_configure_read(QTestState *qts, uint8_t opcode,
     qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_IFR, ifr);
 }
 
+/*
+ * DS60001813E Table 16.1 routes QSPI transmit and receive to XDMAC0
+ * hardware requests 26 and 27.  The exact Linux driver moves QSPI data with
+ * memcpy-style DMA through the AHB window, so these request lines are
+ * exercised here rather than by the Linux gate.
+ */
+static void qspi_xdmac_tx_byte(QTestState *qts, uint64_t channel,
+                               uint32_t source, uint8_t value)
+{
+    qtest_memwrite(qts, source, &value, sizeof(value));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CSA, source);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CDA,
+                 SAM9X7_QSPI_BASE + QSPI_TDR);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC, 1);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_DSYNC_MEM2PER |
+                 XDMAC_CC_PERID(26) | XDMAC_CC_SAM_INC);
+}
+
+static uint8_t qspi_xdmac_rx_byte(QTestState *qts, uint64_t channel,
+                                  unsigned int index, uint32_t target)
+{
+    uint8_t value = 0;
+
+    qtest_memwrite(qts, target, &value, sizeof(value));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CSA,
+                 SAM9X7_QSPI_BASE + QSPI_RDR);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CDA, target);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CUBC, 1);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_PERID(27) | XDMAC_CC_DAM_INC);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(index));
+    xdmac_waitl(qts, XDMAC_GS, BIT(index), 0);
+    qtest_memread(qts, target, &value, sizeof(value));
+    return value;
+}
+
+static void test_qspi_xdmac_requests(void)
+{
+    static const uint8_t jedec_id[] = { 0xbf, 0x26, 0x43 };
+    const char *path = "/machine/soc/qspi";
+    const uint32_t tx_source = SAM9X7_DDR_BASE + 0xf000;
+    const uint32_t rx_target = SAM9X7_DDR_BASE + 0xf100;
+    const uint64_t tx_channel = XDMAC_CHANNEL(0);
+    const uint64_t rx_channel = XDMAC_CHANNEL(1);
+    QTestState *qts;
+    unsigned int i;
+
+    /* Request levels follow enable state and the data flags. */
+    qts = qtest_init(SAM9X75_MACHINE);
+    qtest_irq_intercept_out_named(qts, path, "tx-request");
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_CR, QSPI_CR_QSPIEN);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_CR, QSPI_CR_QSPIDIS);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_quit(qts);
+
+    qts = qtest_init(SAM9X75_MACHINE);
+    qtest_irq_intercept_out_named(qts, path, "rx-request");
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_CR, QSPI_CR_QSPIEN);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_TDR, 0x9f);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_RDR);
+    g_assert_false(qtest_get_irq(qts, 0));
+    /* Byte-wide data accesses, as a byte-width XDMAC channel issues them. */
+    qtest_writeb(qts, SAM9X7_QSPI_BASE + QSPI_TDR, 0);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_false(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR) &
+                   QSPI_ISR_OVRES);
+    qtest_readb(qts, SAM9X7_QSPI_BASE + QSPI_RDR);
+    g_assert_false(qtest_get_irq(qts, 0));
+    /* Disabling withdraws a pending receive request. */
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_TDR, 0);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_CR, QSPI_CR_QSPIDIS);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_quit(qts);
+
+    /* Request-paced channels read the flash identity byte by byte. */
+    qts = qtest_init(SAM9X75_MACHINE);
+    ebi_enable_ddr(qts);
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+
+    /* A transmit channel started while disabled waits for QSPIEN. */
+    qspi_xdmac_tx_byte(qts, tx_channel, tx_source, 0x9f);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
+    qtest_clock_step(qts, 100000);
+    g_assert_true(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) & BIT(0));
+    g_assert_false(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR) &
+                   QSPI_ISR_RDRF);
+    qtest_writel(qts, SAM9X7_QSPI_BASE + QSPI_CR, QSPI_CR_QSPIEN);
+    xdmac_waitl(qts, XDMAC_GS, BIT(0), 0);
+    g_assert_true(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR) &
+                  QSPI_ISR_RDRF);
+    /* The opcode-phase byte is drained through the receive request. */
+    qspi_xdmac_rx_byte(qts, rx_channel, 1, rx_target);
+    g_assert_false(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR) &
+                   (QSPI_ISR_RDRF | QSPI_ISR_OVRES));
+
+    for (i = 0; i < ARRAY_SIZE(jedec_id); i++) {
+        qspi_xdmac_tx_byte(qts, tx_channel, tx_source, 0);
+        qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(0));
+        xdmac_waitl(qts, XDMAC_GS, BIT(0), 0);
+        g_assert_cmphex(qspi_xdmac_rx_byte(qts, rx_channel, 1, rx_target),
+                        ==, jedec_id[i]);
+    }
+    g_assert_false(qtest_readl(qts, SAM9X7_QSPI_BASE + QSPI_ISR) &
+                   (QSPI_ISR_RDRF | QSPI_ISR_OVRES));
+    qspi_finish_transfer(qts);
+    qtest_quit(qts);
+}
+
+static void test_qspi_xdmac_request_migration(void)
+{
+    const char *path = "/machine/soc/qspi";
+    QTestState *from = qtest_init(SAM9X75_MACHINE);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+
+    /* Intercept on the destination before its state arrives. */
+    qtest_irq_intercept_out_named(to, path, "rx-request");
+    g_assert_false(qtest_get_irq(to, 0));
+
+    qtest_writel(from, SAM9X7_QSPI_BASE + QSPI_CR, QSPI_CR_QSPIEN);
+    qtest_writel(from, SAM9X7_QSPI_BASE + QSPI_TDR, 0x9f);
+    g_assert_true(qtest_readl(from, SAM9X7_QSPI_BASE + QSPI_ISR) &
+                  QSPI_ISR_RDRF);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    /* A pending receive byte re-drives its request after load. */
+    g_assert_true(qtest_readl(to, SAM9X7_QSPI_BASE + QSPI_ISR) &
+                  QSPI_ISR_RDRF);
+    g_assert_true(qtest_get_irq(to, 0));
+    qtest_readl(to, SAM9X7_QSPI_BASE + QSPI_RDR);
+    g_assert_false(qtest_get_irq(to, 0));
+    qtest_writel(to, SAM9X7_QSPI_BASE + QSPI_TDR, 0);
+    g_assert_true(qtest_get_irq(to, 0));
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
 static void test_qspi_status_irq_and_edges(void)
 {
     const char *path = "/machine/soc/qspi";
@@ -25882,6 +26029,9 @@ int main(int argc, char **argv)
                    test_sys_irq_migration_and_reset);
     qtest_add_func("sam9x75/qspi/status-irq-and-edges",
                    test_qspi_status_irq_and_edges);
+    qtest_add_func("sam9x75/qspi/xdmac-requests", test_qspi_xdmac_requests);
+    qtest_add_func("sam9x75/qspi/xdmac-request-migration",
+                   test_qspi_xdmac_request_migration);
     qtest_add_func("sam9x75/qspi/status-migration-and-reset",
                    test_qspi_status_migration_and_reset);
     qtest_add_func("sam9x75/qspi/flash-read-program-and-erase",

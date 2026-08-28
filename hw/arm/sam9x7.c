@@ -663,6 +663,11 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(s->memory, SAM9X7_QSPI_MEM_BASE, mr);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->qspi), 0,
                        qdev_get_gpio_in(DEVICE(&s->aic), 35));
+    /* DS60001813E Table 16.1: XDMAC0 requests 26 and 27 are QSPI TX/RX. */
+    qdev_connect_gpio_out_named(DEVICE(&s->qspi), "tx-request", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 26));
+    qdev_connect_gpio_out_named(DEVICE(&s->qspi), "rx-request", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 27));
 
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->gmac), errp)) {
         return;
