@@ -1272,6 +1272,7 @@
 #define TCB_CMR_CLOCK2          1
 #define TCB_CMR_CPCSTOP         BIT(6)
 #define TCB_CMR_WAVESEL_UP_RC   (2U << 13)
+#define TCB_CMR_WAVESEL_UPDOWN_RC (3U << 13)
 #define TCB_CMR_WAVE            BIT(15)
 #define TCB_INT_CPAS            BIT(2)
 #define TCB_INT_LDRAS           BIT(5)
@@ -7652,6 +7653,87 @@ static void test_tcb_tioa_waveform_and_capture(void)
  * selects it as the external event, in which case it is an input and the
  * channel must not drive it.
  */
+/*
+ * UPDOWN_RC counts up to RC and then back down to zero instead of
+ * restarting, so RA and RB compare twice per period, once on each leg, and
+ * the counter is seen to fall.
+ */
+static void test_tcb_updown_counting(void)
+{
+    const uint64_t ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t first;
+    uint32_t second;
+    unsigned int i;
+    bool fell = false;
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MCKR, 1);
+    pmc_write_pcr(qts, 17, PMC_PCR_EN);
+
+    qtest_writel(qts, ch0 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE | TCB_CMR_WAVESEL_UPDOWN_RC);
+    qtest_writel(qts, ch0 + TCB_RA, 100);
+    qtest_writel(qts, ch0 + TCB_RC, 200);
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+
+    /* Climb to the RC compare that turns the period around. */
+    for (i = 0; i < 200; i++) {
+        qtest_clock_step(qts, 4000);
+        if (qtest_readl(qts, ch0 + TCB_SR) & TCB_INT_CPAS) {
+            break;
+        }
+    }
+    g_assert_cmpuint(i, <, 200);
+    first = qtest_readl(qts, ch0 + TCB_CV);
+    for (i = 0; i < 200; i++) {
+        qtest_clock_step(qts, 4000);
+        if (qtest_readl(qts, ch0 + TCB_SR) & TCB_INT_CPCS) {
+            break;
+        }
+    }
+    g_assert_cmpuint(i, <, 200);
+
+    /* On the way down the counter falls and RA compares a second time. */
+    for (i = 0; i < 40; i++) {
+        qtest_clock_step(qts, 4000);
+        second = qtest_readl(qts, ch0 + TCB_CV);
+        if (second < first) {
+            fell = true;
+            break;
+        }
+        first = second;
+    }
+    g_assert_true(fell);
+    for (i = 0; i < 200; i++) {
+        qtest_clock_step(qts, 4000);
+        if (qtest_readl(qts, ch0 + TCB_SR) & TCB_INT_CPAS) {
+            break;
+        }
+    }
+    g_assert_cmpuint(i, <, 200);
+
+    /* The counter never passes RC in this mode. */
+    for (i = 0; i < 60; i++) {
+        qtest_clock_step(qts, 4000);
+        g_assert_cmpuint(qtest_readl(qts, ch0 + TCB_CV), <=, 200);
+    }
+
+    /* UP_RC restarts from zero instead, so it never counts down. */
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKDIS);
+    qtest_writel(qts, ch0 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE | TCB_CMR_WAVESEL_UP_RC);
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    for (i = 0; i < 200; i++) {
+        qtest_clock_step(qts, 4000);
+        if (qtest_readl(qts, ch0 + TCB_SR) & TCB_INT_CPCS) {
+            break;
+        }
+    }
+    g_assert_cmpuint(i, <, 200);
+
+    qtest_quit(qts);
+}
+
 static void test_tcb_tiob_waveform_output(void)
 {
     const uint64_t ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
@@ -27368,6 +27450,8 @@ int main(int argc, char **argv)
                    test_tcb_external_event);
     qtest_add_func("sam9x75/tcb/tiob-waveform-output",
                    test_tcb_tiob_waveform_output);
+    qtest_add_func("sam9x75/tcb/updown-counting",
+                   test_tcb_updown_counting);
     qtest_add_func("sam9x75/tcb1/reset-masks-and-independence",
                    test_tcb1_reset_masks_and_independence);
     qtest_add_func("sam9x75/tcb1/clock-gating-and-irq",

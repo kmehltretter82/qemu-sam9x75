@@ -51,6 +51,8 @@
 #define TCB_CMR_CPCDIS          BIT(7)
 #define TCB_CMR_WAVESEL_MASK    (3U << 13)
 #define TCB_CMR_WAVESEL_UP_RC   (2U << 13)
+#define TCB_CMR_WAVESEL_UPDOWN  (1U << 13)
+#define TCB_CMR_WAVESEL_UPDOWN_RC (3U << 13)
 #define TCB_CMR_WAVE            BIT(15)
 /* Waveform mode: what a compare or a software trigger does to TIOA. */
 #define TCB_CMR_ACPA_SHIFT      16
@@ -220,16 +222,28 @@ static void at91_tcb_update_irq(AT91TCBState *s)
     at91_tcb_update_compare_requests(s);
 }
 
-static bool at91_tcb_auto_rc(const AT91TCBChannel *ch)
+/* Counter value at which the period restarts: RC in up-RC mode, else wrap. */
+/* UPDOWN and UPDOWN_RC count back down after reaching the period end. */
+static bool at91_tcb_updown(const AT91TCBChannel *ch)
 {
-    return (ch->cmr & (TCB_CMR_WAVE | TCB_CMR_WAVESEL_MASK)) ==
-           (TCB_CMR_WAVE | TCB_CMR_WAVESEL_UP_RC);
+    uint32_t sel = ch->cmr & (TCB_CMR_WAVE | TCB_CMR_WAVESEL_MASK);
+
+    return sel == (TCB_CMR_WAVE | TCB_CMR_WAVESEL_UPDOWN) ||
+           sel == (TCB_CMR_WAVE | TCB_CMR_WAVESEL_UPDOWN_RC);
 }
 
-/* Counter value at which the period restarts: RC in up-RC mode, else wrap. */
+/* RC bounds the period in both of the modes that name it. */
+static bool at91_tcb_rc_bounded(const AT91TCBChannel *ch)
+{
+    uint32_t sel = ch->cmr & (TCB_CMR_WAVE | TCB_CMR_WAVESEL_MASK);
+
+    return sel == (TCB_CMR_WAVE | TCB_CMR_WAVESEL_UP_RC) ||
+           sel == (TCB_CMR_WAVE | TCB_CMR_WAVESEL_UPDOWN_RC);
+}
+
 static uint64_t at91_tcb_period_end(const AT91TCBChannel *ch)
 {
-    if (at91_tcb_auto_rc(ch) && ch->rc) {
+    if (at91_tcb_rc_bounded(ch) && ch->rc) {
         return ch->rc;
     }
     return TCB_COUNTER_RANGE;
@@ -244,18 +258,31 @@ static bool at91_tcb_compares_active(const AT91TCBChannel *ch)
     return ch->cmr & TCB_CMR_WAVE;
 }
 
-/* The next counter value at which a status bit is due, after "from". */
+/*
+ * The next counter value at which a status bit is due.  Counting up that
+ * is the nearest of RA, RB and the period end above "from"; counting down
+ * it is the nearest of RA and RB below "from", or zero.
+ */
 static uint64_t at91_tcb_next_boundary(const AT91TCBChannel *ch,
-                                       uint64_t from)
+                                       uint64_t from, bool down)
 {
-    uint64_t next = at91_tcb_period_end(ch);
+    uint64_t next = down ? 0 : at91_tcb_period_end(ch);
 
     if (at91_tcb_compares_active(ch)) {
-        if (ch->ra > from && ch->ra < next) {
-            next = ch->ra;
-        }
-        if (ch->rb > from && ch->rb < next) {
-            next = ch->rb;
+        if (down) {
+            if (ch->ra < from && ch->ra > next) {
+                next = ch->ra;
+            }
+            if (ch->rb < from && ch->rb > next) {
+                next = ch->rb;
+            }
+        } else {
+            if (ch->ra > from && ch->ra < next) {
+                next = ch->ra;
+            }
+            if (ch->rb > from && ch->rb < next) {
+                next = ch->rb;
+            }
         }
     }
     return next;
@@ -318,12 +345,15 @@ static void at91_tcb_set_period(AT91TCBChannel *ch)
 static uint32_t at91_tcb_counter(AT91TCBChannel *ch)
 {
     uint64_t remaining = ptimer_get_count(ch->timer);
-    uint64_t span = ch->segment_end - ch->segment_start;
+    bool down = ch->segment_end < ch->segment_start;
+    uint64_t span = down ? ch->segment_start - ch->segment_end
+                         : ch->segment_end - ch->segment_start;
 
     if (!remaining || remaining > span) {
         return ch->segment_start;
     }
-    return ch->segment_start + (span - remaining);
+    return down ? ch->segment_start - (span - remaining)
+                : ch->segment_start + (span - remaining);
 }
 
 
@@ -331,13 +361,23 @@ static uint32_t at91_tcb_counter(AT91TCBChannel *ch)
 static void at91_tcb_arm_segment(AT91TCBChannel *ch, uint32_t counter)
 {
     uint64_t boundary;
+    uint64_t span;
 
     if (counter >= at91_tcb_period_end(ch)) {
         counter = 0;
+        ch->counting_down = false;
     }
-    boundary = at91_tcb_next_boundary(ch, counter);
+    if (!at91_tcb_updown(ch)) {
+        ch->counting_down = false;
+    }
+    boundary = at91_tcb_next_boundary(ch, counter, ch->counting_down);
     ch->segment_start = counter;
     ch->segment_end = boundary;
+    span = ch->counting_down ? counter - boundary : boundary - counter;
+    if (!span) {
+        /* Already at the boundary: step one tick so progress is made. */
+        span = 1;
+    }
 
     ptimer_stop(ch->timer);
     at91_tcb_set_period(ch);
@@ -345,7 +385,7 @@ static void at91_tcb_arm_segment(AT91TCBChannel *ch, uint32_t counter)
      * One-shot per segment: the tick handler arms the next one, so the
      * channel only stops at a period end that CPCSTOP or CPCDIS selected.
      */
-    ptimer_set_limit(ch->timer, boundary - counter, 1);
+    ptimer_set_limit(ch->timer, span, 1);
     ch->clock_suspended = !at91_tcb_clock_active(ch);
     if (ch->running && !ch->clock_suspended) {
         ptimer_run(ch->timer, 1);
@@ -362,6 +402,10 @@ static void at91_tcb_configure_channel(AT91TCBChannel *ch, uint32_t counter)
 static void at91_tcb_start_channel(AT91TCBChannel *ch, bool reset)
 {
     uint32_t counter = reset ? 0 : at91_tcb_counter(ch);
+
+    if (reset) {
+        ch->counting_down = false;
+    }
 
     ch->enabled = true;
     ch->running = true;
@@ -791,7 +835,9 @@ static void at91_tcb_tick(void *opaque)
 {
     AT91TCBChannel *ch = opaque;
     uint64_t boundary = ch->segment_end;
-    bool period_end = boundary >= at91_tcb_period_end(ch);
+    bool down = ch->counting_down;
+    bool period_end = !down && boundary >= at91_tcb_period_end(ch);
+    bool zero_end = down && boundary == 0;
 
     if (at91_tcb_compares_active(ch)) {
         if (ch->ra == boundary) {
@@ -805,7 +851,7 @@ static void at91_tcb_tick(void *opaque)
     }
 
     if (period_end) {
-        if (at91_tcb_auto_rc(ch)) {
+        if (at91_tcb_rc_bounded(ch)) {
             ch->status |= TCB_INT_CPCS;
             at91_tcb_apply_tioa_effect(ch, TCB_CMR_ACPC_SHIFT);
             at91_tcb_apply_pin_effect(ch, TCB_CMR_BCPC_SHIFT, false);
@@ -818,6 +864,12 @@ static void at91_tcb_tick(void *opaque)
         } else if (ch->cmr & TCB_CMR_CPCSTOP) {
             ch->running = false;
         }
+        /* An UPDOWN period turns around here instead of restarting. */
+        if (at91_tcb_updown(ch)) {
+            ch->counting_down = true;
+        }
+    } else if (zero_end) {
+        ch->counting_down = false;
     }
 
     /*
@@ -825,7 +877,8 @@ static void at91_tcb_tick(void *opaque)
      * This runs inside the ptimer callback, which already holds the
      * transaction, so the segment is armed directly.
      */
-    at91_tcb_arm_segment(ch, period_end ? 0 : boundary);
+    at91_tcb_arm_segment(ch, (period_end && !at91_tcb_updown(ch)) ?
+                         0 : boundary);
     at91_tcb_update_irq(ch->owner);
 }
 
@@ -890,6 +943,7 @@ static void at91_tcb_reset(DeviceState *dev)
         ch->segment_end = TCB_COUNTER_RANGE;
         memset(ch->compare_request_level, 0,
                sizeof(ch->compare_request_level));
+        ch->counting_down = false;
         ch->tioa_out = false;
         ch->tiob_out = false;
         ch->tioa_in = false;
@@ -1002,6 +1056,7 @@ static const VMStateDescription at91_tcb_channel_vmstate = {
         VMSTATE_UINT64_V(segment_start, AT91TCBChannel, 2),
         VMSTATE_UINT64_V(segment_end, AT91TCBChannel, 2),
         VMSTATE_BOOL_ARRAY_V(compare_request_level, AT91TCBChannel, 3, 2),
+        VMSTATE_BOOL_V(counting_down, AT91TCBChannel, 3),
         VMSTATE_BOOL_V(tioa_out, AT91TCBChannel, 3),
         VMSTATE_BOOL_V(tiob_out, AT91TCBChannel, 3),
         VMSTATE_BOOL_V(tioa_in, AT91TCBChannel, 3),

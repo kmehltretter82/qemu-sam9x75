@@ -39,6 +39,8 @@ typedef struct AT91TCBChannel {
      */
     uint64_t segment_start;
     uint64_t segment_end;
+    /* UPDOWN modes reverse at the period end and again at zero. */
+    bool counting_down;
     /* Levels driven on the per-channel compare request lines. */
     bool compare_request_level[3];
     /* TIOA pin state: the level this channel drives, and what it sees. */
