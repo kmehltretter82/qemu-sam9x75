@@ -17,11 +17,11 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `fcfbe1ae0e`
-  (`tests/guest: Add active CAN migration trigger`)
-- Latest documentation checkpoint: the commit that added this paragraph,
-  `docs: record SAM9X75 isolated external SocketCAN CAN gates`, which is the
-  tip of `main`.  It changes no source or test code.
+- Latest tested repository checkpoint: `c5ee939fd0`
+  (`hw/arm/sam9x75-curiosity: Route the PA13 GPIO chip select to the M.2
+  card`)
+- Preceding generic QEMU fix: `8fb8b5db49`
+  (`hw/sd: Fix incoming migration of a powered-up SPI-mode card`)
 - The frozen binary used by the Linux4Microchip integration and migration
   evidence reports `v11.1.0-417-g1851743e84`.  Commits through the latest
   tested repository checkpoint after that implementation source change only
@@ -62,7 +62,8 @@ The QEMU implementation at `1851743e84` compiled cleanly in
 `build-verify-serial`; the host regressions below were repeated at repository
 checkpoint `fcfbe1ae0e` after relinking.
 
-- The complete SAM9X75 Curiosity qtest binary passed **238/238**.
+- The complete SAM9X75 Curiosity qtest binary passed **240/240**, including
+  the two new SPI chip-select tests below.
 - The complete generic chardev unit binary passed **42/42**.  The new TCP and
   Unix reconnect cases prove that a failed reconnect after a previous client
   closes no longer tries to unregister an unregistered yank callback; the old
@@ -231,6 +232,27 @@ checkpoint `fcfbe1ae0e` after relinking.
 - In both gates QEMU's `unimp,guest_errors` log was exactly empty, host
   `e2fsck -fn` passed and the snapshot-backed root overlay hash was unchanged.
   `smoke-r1` is a retained 200-frame bring-up run of the same topology.
+- The first recorded `mmc_spi` blocker is closed.  FLEXCOM4 IO4/NPCS1 and
+  PA13 are the same pad, and the board previously wired only the native NPCS1
+  output to the `ssi-sd` adapter, so the unchanged upstream `wilc_spi`
+  overlay could not select the card.  A new `at91-pad-mux` device models the
+  shared pad: the PIO output wins whenever the PIO drives it, and the pad
+  otherwise follows the peripheral function.  Both routes now reach the same
+  adapter and the native route is unchanged.
+- `sam9x75/sdcard/spi-gpio-chip-select` covers selection, deselection,
+  reselection and the handover back to the peripheral function.
+  `sam9x75/sdcard/spi-gpio-chip-select-migration` migrates a machine whose
+  card is selected through the GPIO route and re-checks both routes on the
+  destination.
+- That migration test exposed a generic QEMU bug, fixed separately in
+  `8fb8b5db49`.  `sd_set_ocr()` powers an SPI-mode card up at reset, but
+  `sd_vmstate_pre_load()` then called the assert-guarded `sd_ocr_powerup()`
+  unconditionally, so **any** machine holding an SPI-mode SD card aborted on
+  incoming migration.  The pre-load path is now idempotent.
+- The second `mmc_spi` blocker is untouched and still gates the consumer
+  gate: the read-only FLEXCOM SPI `+0xfc` `SPI_VERSION` value must be
+  measured on silicon.  Do not invent it, and do not add a fictional PDC or
+  version register to satisfy the driver.
 - The host `vcan` prerequisite is an environment setup step, not a code
   change.  On this workstation the README's private-namespace recipe cannot
   work because Ubuntu sets `kernel.apparmor_restrict_unprivileged_userns=1`,
@@ -246,18 +268,28 @@ checkpoint `fcfbe1ae0e` after relinking.
 Do these steps before starting another device model or another operating
 system.
 
-The previously blocking external-path item is now closed; both isolated
-SocketCAN profiles passed.  Do these steps next.
+Both isolated SocketCAN profiles passed, and the first `mmc_spi` blocker is
+closed.  Do these steps next.
 
-1. Take the next bounded implementation slice from the machine support matrix.
-   The adjacent CAN candidate is roadmap phase 6: M_CAN error confinement,
-   retry, timestamp synchronization and debug-message behavior, with the usual
-   reset, negative, interrupt and migration coverage.  Keep Linux4Microchip as
-   the primary OS; NetBSD, FreeBSD, other guests and the newer-mainline matrix
-   remain deliberately deferred.
-2. In parallel, the physical-board agent can run the safe crypto validation in
+1. Remaining P0 integration work, in order: the board jumper and mux behavior
+   that is still unmodeled, and broader USB hotplug, error and migration
+   behavior.  The `mmc_spi` consumer gate itself is blocked only on a silicon
+   measurement (see item 4) and must not be forced.
+2. Then the next bounded P1 implementation slice from the machine support
+   matrix.  The adjacent CAN candidate is roadmap phase 6: M_CAN bus-error
+   counters, error confinement, retry, timestamp synchronization and
+   debug-message behavior, with the usual reset, negative, interrupt and
+   migration coverage.  The M_CAN model currently has no TEC/REC at all, so
+   this is new work rather than a refinement.  Completing it is also what
+   would let a real controller reach error-passive and generate ESI natively.
+   Keep Linux4Microchip as the primary OS; NetBSD, FreeBSD, other guests and
+   the newer-mainline matrix remain deliberately deferred.
+3. In parallel, the physical-board agent can run the safe crypto validation in
    `artifacts/linux4microchip-crypto-fixes-20260827/REAL-HARDWARE-TESTS.md`.
-3. Two CAN sub-gates remain deliberately open and must not be claimed from the
+4. Also on the board, take the read-only FLEXCOM SPI `+0xfc` probe in
+   `tests/guest/at91/linux4sam/spi-consumer/README.rst`.  It is the only thing
+   still blocking the `mmc_spi` gate now that the chip-select routing exists.
+5. Two CAN sub-gates remain deliberately open and must not be claimed from the
    evidence above.  ESI is injected by a virtual `vcan` peer rather than
    observed from a real error-passive controller, and host SocketCAN state
    lives outside the VM, so it is not itself migrated; the migrated-CAN
@@ -610,8 +642,13 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 238/238 for Curiosity, 42/42 for chardev, 7/7
-for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  The two
+The post-gate regressions pass 240/240 for Curiosity, 42/42 for chardev, 7/7
+for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  The
+board now routes the upstream overlay's PA13 GPIO chip select to the M.2 card
+through an `at91-pad-mux`, closing the first `mmc_spi` blocker; the second
+still needs a silicon `SPI_VERSION` measurement and must not be invented.
+That work also fixed a generic QEMU bug where any machine holding an
+SPI-mode SD card aborted on incoming migration.  The two
 CAN sub-gates still deliberately open are ESI observed from a real
 error-passive controller and migration of host SocketCAN state, which lives
 outside the VM.  Keep other operating systems deferred.

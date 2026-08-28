@@ -253,7 +253,11 @@ Support matrix
        chip-select and transfer delays, local loopback, comparison,
        interrupts, migration and its documented XDMAC pair.  The host data
        path uses a normal QEMU SSI bus, and FLEXCOM4 NPCS1 reaches the M.2
-       socket through J24.  FLEXCOM0--3 have two physical NPCS signals and
+       socket through J24.  IO4/NPCS1 and PA13 are the same pad, so an
+       ``at91-pad-mux`` models that pad: the PIO output wins whenever the PIO
+       drives it and the pad otherwise follows the NPCS1 function, which lets
+       both the native route and the upstream overlay's active-low PA13 GPIO
+       chip select reach the same card.  FLEXCOM0--3 have two physical NPCS signals and
        FLEXCOM4--5 have four.  The behavior of CSR and PCS encodings that do
        not have a corresponding package signal is not inferred from the pin
        count and still requires hardware readback.
@@ -317,6 +321,13 @@ Support matrix
        the M.2 socket through SDMMC1.  Its SPI position electrically
        disconnects that host and attaches the same drive to FLEXCOM4 NPCS1;
        a board qtest clocks the card and receives its SPI-mode CMD0 response.
+       Separate qtests drive the same card through the PA13 GPIO chip select
+       that the unchanged ``wilc_spi`` overlay uses, covering selection,
+       deselection, reselection, the handover back to the peripheral function
+       and migration of a machine whose card is selected through the GPIO
+       route.  Completing the ``mmc_spi`` consumer gate now only waits on the
+       read-only FLEXCOM SPI ``+0xfc`` value, which must be measured on
+       silicon rather than invented.
        Host preset registers, the SAM9X7 Host Control 2 writable mask, combined
        command/data/all software reset, the vendor registers covered by
        ``SWRSTALL``, and the Linux ADMA descriptor form are covered.  Writable
