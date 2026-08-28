@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `4d83948c14`
+- Latest tested repository checkpoint: `bf926d5931`
+  (`hw/timer/at91_tcb: Add the capture-mode external trigger`)
+- Preceding implementation checkpoint: `4d83948c14`
   (`hw/timer/at91_tcb: Add TIOA waveform output and capture mode`)
 - Preceding test checkpoint: `87451ea2a6`
   (`tests/qtest/sam9x75: Cover SPI response-phase migration`)
@@ -327,11 +329,12 @@ checkpoint `fcfbe1ae0e` after relinking.
   uses `dmaengine_prep_dma_memcpy` through the AHB window, not request-paced
   transfers, so requests 26/27 have no Linux consumer and the qtests are the
   gate.  Do not claim a Linux DMA gate for QSPI from this evidence.
-- The XDMAC request map is complete except for the TC external-trigger
-  lines 49--50, which need the external trigger the TCB model does not
-  implement.  The capture requests 41--42 are wired at `4d83948c14` but stay idle
-  on this board, because nothing drives TIOA: the pin is modeled as a named
-  GPIO and the Curiosity routes it nowhere.  The TC compare events 43--48 were wired
+- **Every request in DS60001813E Table 16.1 now has a source**, the last
+  two wired at `bf926d5931`.  The four timer lines 41--42 and 49--50 stay idle on
+  this board: TIOA and TIOB are modeled as named GPIOs and the Curiosity
+  routes neither, so capture and triggering are reachable from a test but
+  not from a guest.  If a future expansion board routes those pins, the
+  model side is already in place.  The TC compare events 43--48 were wired
   with the TCB compare slice, and SSC 38/39 with the new SSC model at
   `d35568571c`.
 - The SDMMC0 card-detect pin follows the medium at `73631d172f`.  The exact
@@ -1000,7 +1003,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 261/261 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 262/262 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two
 full Curiosity runs on 2026-08-28 aborted at QEMU startup; that was host
 memory pressure, not a model fault, and the rule it implies is below.

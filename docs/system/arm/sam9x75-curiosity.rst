@@ -322,11 +322,11 @@ Support matrix
        an accepted chunk outstanding; re-driving an already-asserted line is
        not a new request.  The TC compare events 43--48 are wired to
        channel 1 of each timer block.  The SSC transmit and receive
-       requests 38 and 39 are wired to the SSC model.  The TC capture events 41--42 are
-       wired too, though they stay idle on this board because nothing drives
-       TIOA.  Of the 51 requests in DS60001813E Table 16.1, the only ones
-       that remain are the TC external-trigger lines 49--50, which need the
-       external trigger the TCB model does not implement.  GWAC pool weighting and
+       requests 38 and 39 are wired to the SSC model.  The TC capture events 41--42 and the
+       external-trigger events 49--50 are wired too, so every one of the 51
+       requests in DS60001813E Table 16.1 now has a source.  Those four stay
+       idle on this board, which routes neither TIOA nor TIOB, so they are
+       reachable from a test rather than from a guest.  GWAC pool weighting and
        CNDC/descriptor QOS effects, security policy, bus/burst and
        arbitration timing, and coherency effects remain missing.  DMA memory
        accesses are synchronous in QEMU, so positive RDIP/WRIP intervals can
@@ -728,10 +728,21 @@ Support matrix
        a compare equal to RC reports both on one tick, and the segment base
        migrates.  Each compare drives an XDMAC request line that follows its
        latched status bit, and channel 1 of each block is wired to requests
-       43--48.  In capture mode RA and RB are loaded from TIOA/TIOB instead,
-       which this model does not have, so no compare fires there.  The
-       common TCB model does not yet cover external TCLK/TIO
-       capture and waveform routing, up/down modes or QDEC.  The SAM9X7 ADC is
+       43--48.  Waveform mode also drives a per-channel TIOA output through
+       ``ACPA``, ``ACPC`` and ``ASWTRG``.  Capture mode instead loads RA and
+       RB from the counter on the TIOA edges ``LDRA`` and ``LDRB`` select,
+       which are independent of each other, raising ``LDRAS`` and ``LDRBS``
+       and driving requests 41--42; no compare fires in that mode.  The
+       capture-mode external trigger selects TIOA or TIOB through
+       ``ABETRG`` and its edge through ``ETRGEDG``, restarts the counter,
+       sets the read-to-clear ``ETRGS`` and drives requests 49--50.  TIOA
+       and TIOB are exposed as named GPIOs per channel, but the Curiosity
+       board routes neither, so on this machine nothing drives them and
+       capture and triggering are reachable only from a test.  The common
+       TCB model does not yet cover TCLK inputs, the TIOB output, the
+       ``BMR`` XC0--XC2 cross-connect that can clock one channel from
+       another's TIOA, waveform-mode external events, up/down modes or
+       QDEC.  The SAM9X7 ADC is
        mapped at ``0xf804c000`` with its eight physical inputs, PID/AIC source
        19, peripheral and generic clocks, and XDMAC receive request 40.  It
        models numeric and programmable channel sequences, software, external,
