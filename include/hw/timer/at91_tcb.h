@@ -44,7 +44,9 @@ typedef struct AT91TCBChannel {
     /* TIOA pin state: the level this channel drives, and what it sees. */
     bool tioa_out;
     bool tioa_in;
+    bool tiob_in;
     bool capture_request_level;
+    bool etrg_request_level;
 } AT91TCBChannel;
 
 struct AT91TCBState {
@@ -64,6 +66,7 @@ struct AT91TCBState {
      */
     qemu_irq tioa[AT91_TCB_NUM_CHANNELS];
     qemu_irq capture_request[AT91_TCB_NUM_CHANNELS];
+    qemu_irq etrg_request[AT91_TCB_NUM_CHANNELS];
     Clock *pclk;
     Clock *gclk;
     Clock *slck;

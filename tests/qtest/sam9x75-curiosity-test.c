@@ -1276,6 +1276,9 @@
 #define TCB_INT_CPAS            BIT(2)
 #define TCB_INT_LDRAS           BIT(5)
 #define TCB_INT_LDRBS           BIT(6)
+#define TCB_INT_ETRGS           BIT(7)
+#define TCB_CMR_ABETRG          BIT(10)
+#define TCB_CMR_ETRGEDG(v)      ((uint32_t)(v) << 8)
 #define TCB_CMR_ACPA(v)         ((uint32_t)(v) << 16)
 #define TCB_CMR_ACPC(v)         ((uint32_t)(v) << 18)
 #define TCB_CMR_ASWTRG(v)       ((uint32_t)(v) << 22)
@@ -7623,6 +7626,73 @@ static void test_tcb_tioa_waveform_and_capture(void)
     qtest_set_irq_in(qts, tcb, "tioa-in", 0, 1);
     g_assert_cmphex(qtest_readl(qts, ch0 + TCB_SR) &
                     (TCB_INT_LDRAS | TCB_INT_LDRBS), ==, 0);
+
+    qtest_quit(qts);
+}
+
+/*
+ * The capture-mode external trigger: ABETRG selects TIOA or TIOB and
+ * ETRGEDG selects the edge.  The trigger restarts the counter, reports
+ * itself in the read-to-clear ETRGS bit and drives XDMAC request 49.
+ */
+static void test_tcb_external_trigger(void)
+{
+    const uint64_t ch1 = SAM9X7_TCB_BASE + TCB_CHANNEL(1);
+    const char *tcb = "/machine/soc/tcb";
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t counter;
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MCKR, 1);
+    pmc_write_pcr(qts, 17, PMC_PCR_EN);
+    qtest_irq_intercept_out_named(qts, tcb, "etrg-request");
+
+    /* TIOB as the trigger, on a rising edge. */
+    qtest_writel(qts, ch1 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_ETRGEDG(1));
+    qtest_writel(qts, ch1 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_clock_step(qts, 120000);
+    counter = qtest_readl(qts, ch1 + TCB_CV);
+    g_assert_cmpuint(counter, >, 0);
+    g_assert_false(qtest_get_irq(qts, 1));
+
+    /* TIOA is not the selected pin, so it must not trigger. */
+    qtest_set_irq_in(qts, tcb, "tioa-in", 1, 1);
+    g_assert_cmphex(qtest_readl(qts, ch1 + TCB_SR) & TCB_INT_ETRGS, ==, 0);
+    g_assert_false(qtest_get_irq(qts, 1));
+
+    /* The selected pin restarts the counter and reports the trigger. */
+    qtest_set_irq_in(qts, tcb, "tiob-in", 1, 1);
+    g_assert_true(qtest_get_irq(qts, 1));
+    g_assert_cmpuint(qtest_readl(qts, ch1 + TCB_CV), <, counter);
+    g_assert_cmphex(qtest_readl(qts, ch1 + TCB_SR) & TCB_INT_ETRGS, ==,
+                    TCB_INT_ETRGS);
+    /* ETRGS is cleared by the status read, which releases the request. */
+    g_assert_false(qtest_get_irq(qts, 1));
+
+    /* A falling edge is not the selected edge. */
+    qtest_set_irq_in(qts, tcb, "tiob-in", 1, 0);
+    g_assert_cmphex(qtest_readl(qts, ch1 + TCB_SR) & TCB_INT_ETRGS, ==, 0);
+
+    /* Selecting TIOA moves the trigger to that pin. */
+    qtest_writel(qts, ch1 + TCB_CCR, TCB_CCR_CLKDIS);
+    qtest_writel(qts, ch1 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_ABETRG | TCB_CMR_ETRGEDG(1));
+    qtest_writel(qts, ch1 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_clock_step(qts, 120000);
+    qtest_set_irq_in(qts, tcb, "tioa-in", 1, 0);
+    qtest_set_irq_in(qts, tcb, "tioa-in", 1, 1);
+    g_assert_cmphex(qtest_readl(qts, ch1 + TCB_SR) & TCB_INT_ETRGS, ==,
+                    TCB_INT_ETRGS);
+
+    /* A waveform-mode channel takes no external trigger here. */
+    qtest_writel(qts, ch1 + TCB_CCR, TCB_CCR_CLKDIS);
+    qtest_writel(qts, ch1 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE | TCB_CMR_ABETRG |
+                 TCB_CMR_ETRGEDG(1));
+    qtest_writel(qts, ch1 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_set_irq_in(qts, tcb, "tioa-in", 1, 0);
+    qtest_set_irq_in(qts, tcb, "tioa-in", 1, 1);
+    g_assert_cmphex(qtest_readl(qts, ch1 + TCB_SR) & TCB_INT_ETRGS, ==, 0);
 
     qtest_quit(qts);
 }
@@ -27157,6 +27227,8 @@ int main(int argc, char **argv)
                    test_tcb_tioa_waveform_and_capture);
     qtest_add_func("sam9x75/tcb/capture-xdmac-request",
                    test_tcb_capture_xdmac_request);
+    qtest_add_func("sam9x75/tcb/external-trigger",
+                   test_tcb_external_trigger);
     qtest_add_func("sam9x75/tcb1/reset-masks-and-independence",
                    test_tcb1_reset_masks_and_independence);
     qtest_add_func("sam9x75/tcb1/clock-gating-and-irq",

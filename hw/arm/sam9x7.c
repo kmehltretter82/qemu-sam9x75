@@ -473,6 +473,12 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
         qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 41));
     qdev_connect_gpio_out_named(DEVICE(&s->tcb1), "capture-request", 1,
         qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 42));
+    /* Requests 49 and 50 are the external-trigger events of the same
+     * channels, which fire on the TIOA or TIOB pin ABETRG selects. */
+    qdev_connect_gpio_out_named(DEVICE(&s->tcb), "etrg-request", 1,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 49));
+    qdev_connect_gpio_out_named(DEVICE(&s->tcb1), "etrg-request", 1,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 50));
 
     for (i = 0; i < 3; i++) {
         qdev_connect_gpio_out_named(DEVICE(&s->tcb), "compare-request",

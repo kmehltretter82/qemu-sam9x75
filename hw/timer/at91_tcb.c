@@ -68,6 +68,10 @@
 #define TCB_LDR_RISING          1
 #define TCB_LDR_FALLING         2
 #define TCB_LDR_EDGE            3
+/* Capture mode external trigger: which pin, and on which edge. */
+#define TCB_CMR_ABETRG          BIT(10)
+#define TCB_CMR_ETRGEDG_SHIFT   8
+#define TCB_CMR_ETRGEDG_MASK    3
 
 #define TCB_EMR_NODIVCLK        BIT(8)
 #define TCB_EMR_MASK            (TCB_EMR_NODIVCLK | (3U << 4) | 3U)
@@ -76,6 +80,7 @@
 #define TCB_INT_COVFS           BIT(0)
 #define TCB_INT_LDRAS           BIT(5)
 #define TCB_INT_LDRBS           BIT(6)
+#define TCB_INT_ETRGS           BIT(7)
 #define TCB_INT_CPAS            BIT(2)
 #define TCB_INT_CPBS            BIT(3)
 #define TCB_INT_CPCS            BIT(4)
@@ -154,12 +159,17 @@ static void at91_tcb_update_compare_requests(AT91TCBState *s)
                                                 + j], level);
             }
         }
-        /* The capture request follows either load status bit. */
+        /* The capture and trigger requests follow their status bits. */
         bool capture = !!(ch->status & (TCB_INT_LDRAS | TCB_INT_LDRBS));
+        bool etrg = !!(ch->status & TCB_INT_ETRGS);
 
         if (capture != ch->capture_request_level) {
             ch->capture_request_level = capture;
             qemu_set_irq(s->capture_request[i], capture);
+        }
+        if (etrg != ch->etrg_request_level) {
+            ch->etrg_request_level = etrg;
+            qemu_set_irq(s->etrg_request[i], etrg);
         }
     }
 }
@@ -369,19 +379,60 @@ static void at91_tcb_capture_edge(AT91TCBChannel *ch, bool rising)
     at91_tcb_update_irq(ch->owner);
 }
 
-static void at91_tcb_tioa_input(void *opaque, int index, int level)
+/*
+ * In capture mode ABETRG picks TIOA or TIOB as the external trigger and
+ * ETRGEDG picks its edge.  The trigger restarts the counter and reports
+ * itself in ETRGS, which is cleared by reading the status register.
+ */
+static void at91_tcb_external_trigger(AT91TCBChannel *ch, bool from_tioa,
+                                      bool rising)
 {
-    AT91TCBState *s = opaque;
-    AT91TCBChannel *ch = &s->channel[index];
-    bool value = level > 0;
+    unsigned int edge = (ch->cmr >> TCB_CMR_ETRGEDG_SHIFT) &
+                        TCB_CMR_ETRGEDG_MASK;
 
-    if (value == ch->tioa_in) {
+    if (ch->cmr & TCB_CMR_WAVE) {
         return;
     }
-    ch->tioa_in = value;
-    if (ch->enabled && ch->running) {
+    if (from_tioa != !!(ch->cmr & TCB_CMR_ABETRG)) {
+        return;
+    }
+    if (edge == TCB_LDR_NONE ||
+        !(edge == TCB_LDR_EDGE || (edge == TCB_LDR_RISING) == rising)) {
+        return;
+    }
+    ch->status |= TCB_INT_ETRGS;
+    at91_tcb_configure_channel(ch, 0);
+}
+
+static void at91_tcb_pin_input(AT91TCBState *s, unsigned int index,
+                               bool from_tioa, int level)
+{
+    AT91TCBChannel *ch = &s->channel[index];
+    bool value = level > 0;
+    bool *pin = from_tioa ? &ch->tioa_in : &ch->tiob_in;
+
+    if (value == *pin) {
+        return;
+    }
+    *pin = value;
+    if (!ch->enabled || !ch->running) {
+        return;
+    }
+    if (from_tioa) {
         at91_tcb_capture_edge(ch, value);
     }
+    at91_tcb_external_trigger(ch, from_tioa, value);
+    at91_tcb_update_irq(s);
+}
+
+static void at91_tcb_tioa_input(void *opaque, int index, int level)
+{
+    at91_tcb_pin_input(opaque, index, true, level);
+}
+
+static void at91_tcb_tiob_input(void *opaque, int index, int level)
+{
+    at91_tcb_pin_input(opaque, index, false, level);
 }
 
 static void at91_tcb_record_wp_violation(AT91TCBChannel *ch, hwaddr offset)
@@ -773,7 +824,9 @@ static void at91_tcb_reset(DeviceState *dev)
                sizeof(ch->compare_request_level));
         ch->tioa_out = false;
         ch->tioa_in = false;
+        ch->tiob_in = false;
         ch->capture_request_level = false;
+        ch->etrg_request_level = false;
     }
     s->bmr = 0;
     s->qimr = 0;
@@ -799,7 +852,11 @@ static void at91_tcb_init(Object *obj)
     qdev_init_gpio_out_named(DEVICE(s), s->capture_request,
                              "capture-request",
                              ARRAY_SIZE(s->capture_request));
+    qdev_init_gpio_out_named(DEVICE(s), s->etrg_request, "etrg-request",
+                             ARRAY_SIZE(s->etrg_request));
     qdev_init_gpio_in_named(DEVICE(s), at91_tcb_tioa_input, "tioa-in",
+                            AT91_TCB_NUM_CHANNELS);
+    qdev_init_gpio_in_named(DEVICE(s), at91_tcb_tiob_input, "tiob-in",
                             AT91_TCB_NUM_CHANNELS);
 
     s->pclk = qdev_init_clock_in(DEVICE(s), "pclk",
@@ -876,7 +933,9 @@ static const VMStateDescription at91_tcb_channel_vmstate = {
         VMSTATE_BOOL_ARRAY_V(compare_request_level, AT91TCBChannel, 3, 2),
         VMSTATE_BOOL_V(tioa_out, AT91TCBChannel, 3),
         VMSTATE_BOOL_V(tioa_in, AT91TCBChannel, 3),
+        VMSTATE_BOOL_V(tiob_in, AT91TCBChannel, 3),
         VMSTATE_BOOL_V(capture_request_level, AT91TCBChannel, 3),
+        VMSTATE_BOOL_V(etrg_request_level, AT91TCBChannel, 3),
         VMSTATE_END_OF_LIST()
     },
 };
