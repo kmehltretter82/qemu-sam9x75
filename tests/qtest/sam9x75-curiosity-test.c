@@ -7911,6 +7911,27 @@ static void test_tcb_external_event(void)
     g_assert_cmpuint(qtest_readl(qts, ch0 + TCB_CV), <, counter);
 
     /*
+     * XC0 is selectable as the event source too, so a TCLK0 edge routed
+     * through BMR reaches the channel exactly like a TIOB edge.
+     */
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKDIS);
+    qtest_writel(qts, SAM9X7_TCB_BASE + TCB_BMR, TCB_BMR_XC0S(0));
+    qtest_writel(qts, ch0 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE | TCB_CMR_WAVESEL_UP_RC |
+                 TCB_CMR_EEVT(1) | TCB_CMR_EEVTEDG(1) | TCB_CMR_AEEVT(3));
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    tioa = qtest_get_irq(qts, 0);
+    qtest_set_irq_in(qts, tcb, "tclk-in", 0, 1);
+    g_assert_cmpint(qtest_get_irq(qts, 0), !=, tioa);
+    /* A TIOB edge is now the unselected source and must do nothing. */
+    tioa = qtest_get_irq(qts, 0);
+    qtest_set_irq_in(qts, tcb, "tiob-in", 0, 1);
+    g_assert_cmpint(qtest_get_irq(qts, 0), ==, tioa);
+    qtest_writel(qts, SAM9X7_TCB_BASE + TCB_BMR, 0);
+    qtest_set_irq_in(qts, tcb, "tclk-in", 0, 0);
+    qtest_set_irq_in(qts, tcb, "tiob-in", 0, 0);
+
+    /*
      * A capture-mode channel takes no external event: a TIOB edge leaves
      * TIOA alone.  Note bits 9:8 are EEVTEDG in waveform mode but ETRGEDG
      * in capture mode, so this configuration deliberately leaves both at

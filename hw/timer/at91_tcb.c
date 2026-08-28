@@ -150,6 +150,8 @@ static bool at91_tcb_tiob_is_output(const AT91TCBChannel *ch)
 }
 
 static void at91_tcb_xc_refresh(AT91TCBState *s);
+static void at91_tcb_external_event(AT91TCBChannel *ch, unsigned int source,
+                                    bool rising);
 
 /* Apply a waveform-mode effect to one of this channel's outputs. */
 static void at91_tcb_apply_pin_effect(AT91TCBChannel *ch, unsigned int shift,
@@ -543,16 +545,15 @@ static void at91_tcb_external_trigger(AT91TCBChannel *ch, bool from_tioa,
  * does not have.  A TIOB chosen as the event source is an input, so the
  * channel does not drive it.
  */
-static void at91_tcb_external_event(AT91TCBChannel *ch, bool from_tioa,
+static void at91_tcb_external_event(AT91TCBChannel *ch, unsigned int source,
                                     bool rising)
 {
-    unsigned int source = (ch->cmr >> TCB_CMR_EEVT_SHIFT) &
-                          TCB_CMR_EEVT_MASK;
+    unsigned int selected = (ch->cmr >> TCB_CMR_EEVT_SHIFT) &
+                            TCB_CMR_EEVT_MASK;
     unsigned int edge = (ch->cmr >> TCB_CMR_EEVTEDG_SHIFT) &
                         TCB_CMR_EEVTEDG_MASK;
 
-    if (!(ch->cmr & TCB_CMR_WAVE) || from_tioa ||
-        source != TCB_CMR_EEVT_TIOB) {
+    if (!(ch->cmr & TCB_CMR_WAVE) || selected != source) {
         return;
     }
     if (edge == TCB_LDR_NONE ||
@@ -584,7 +585,9 @@ static void at91_tcb_pin_input(AT91TCBState *s, unsigned int index,
         at91_tcb_capture_edge(ch, value);
     }
     at91_tcb_external_trigger(ch, from_tioa, value);
-    at91_tcb_external_event(ch, from_tioa, value);
+    if (!from_tioa) {
+        at91_tcb_external_event(ch, TCB_CMR_EEVT_TIOB, value);
+    }
     at91_tcb_update_irq(s);
 }
 
@@ -1011,6 +1014,10 @@ static void at91_tcb_xc_refresh(AT91TCBState *s)
             if (level == wanted) {
                 at91_tcb_edge_advance(ch);
             }
+        }
+        /* XC0-XC2 are also selectable as the waveform external event. */
+        for (i = 0; i < AT91_TCB_NUM_CHANNELS; i++) {
+            at91_tcb_external_event(&s->channel[i], xc + 1, level);
         }
     }
     at91_tcb_update_irq(s);
