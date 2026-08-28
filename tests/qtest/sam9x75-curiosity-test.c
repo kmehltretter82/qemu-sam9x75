@@ -673,6 +673,7 @@
 #define GEM_TXBCNT              0x10c
 #define GEM_TXMCNT              0x110
 #define GEM_TX64CNT             0x118
+#define GEM_TX65CNT             0x11c
 #define GEM_TXURUNCNT           0x134
 #define GEM_SINGLECOLLCNT       0x138
 #define GEM_OCTRXLO             0x150
@@ -681,6 +682,7 @@
 #define GEM_RXBROADCNT          0x15c
 #define GEM_RXMULTICNT          0x160
 #define GEM_RX64CNT             0x168
+#define GEM_RX65CNT             0x16c
 #define GEM_RXUDPCCNT           0x1b0
 #define GEM_STAT_FIRST          GEM_OCTTXLO
 #define GEM_STAT_LAST           GEM_RXUDPCCNT
@@ -6154,35 +6156,35 @@ static void test_gem_statistics_generated_and_clear(void)
     gem_transmit_test_frame(qts, ipv6_multicast,
                             GEM_NWCTRL_LBL | GEM_NWCTRL_RXEN);
     gem_assert_test_receive(qts);
-    gem_assert_stat_rtc(qts, GEM_OCTTXLO, 64);
+    gem_assert_stat_rtc(qts, GEM_OCTTXLO, 68);
     gem_assert_stat_rtc(qts, GEM_OCTTXHI, 0);
     gem_assert_stat_rtc(qts, GEM_TXCNT, 1);
     gem_assert_stat_rtc(qts, GEM_TXBCNT, 0);
     gem_assert_stat_rtc(qts, GEM_TXMCNT, 1);
-    gem_assert_stat_rtc(qts, GEM_TX64CNT, 1);
-    gem_assert_stat_rtc(qts, GEM_OCTRXLO, 64);
+    gem_assert_stat_rtc(qts, GEM_TX65CNT, 1);
+    gem_assert_stat_rtc(qts, GEM_OCTRXLO, 68);
     gem_assert_stat_rtc(qts, GEM_OCTRXHI, 0);
     gem_assert_stat_rtc(qts, GEM_RXCNT, 1);
     gem_assert_stat_rtc(qts, GEM_RXBROADCNT, 0);
     gem_assert_stat_rtc(qts, GEM_RXMULTICNT, 1);
-    gem_assert_stat_rtc(qts, GEM_RX64CNT, 1);
+    gem_assert_stat_rtc(qts, GEM_RX65CNT, 1);
 
     gem_prepare_test_receive(qts);
     gem_transmit_test_frame(qts, broadcast,
                             GEM_NWCTRL_LBL | GEM_NWCTRL_RXEN);
     gem_assert_test_receive(qts);
-    gem_assert_stat_rtc(qts, GEM_OCTTXLO, 64);
+    gem_assert_stat_rtc(qts, GEM_OCTTXLO, 68);
     gem_assert_stat_rtc(qts, GEM_OCTTXHI, 0);
     gem_assert_stat_rtc(qts, GEM_TXCNT, 1);
     gem_assert_stat_rtc(qts, GEM_TXBCNT, 1);
     gem_assert_stat_rtc(qts, GEM_TXMCNT, 0);
-    gem_assert_stat_rtc(qts, GEM_TX64CNT, 1);
-    gem_assert_stat_rtc(qts, GEM_OCTRXLO, 64);
+    gem_assert_stat_rtc(qts, GEM_TX65CNT, 1);
+    gem_assert_stat_rtc(qts, GEM_OCTRXLO, 68);
     gem_assert_stat_rtc(qts, GEM_OCTRXHI, 0);
     gem_assert_stat_rtc(qts, GEM_RXCNT, 1);
     gem_assert_stat_rtc(qts, GEM_RXBROADCNT, 1);
     gem_assert_stat_rtc(qts, GEM_RXMULTICNT, 0);
-    gem_assert_stat_rtc(qts, GEM_RX64CNT, 1);
+    gem_assert_stat_rtc(qts, GEM_RX65CNT, 1);
 
     /* CLRSTAT takes effect before a simultaneous TSTART command. */
     gem_transmit_test_frame(qts, broadcast, 0);
@@ -6190,12 +6192,12 @@ static void test_gem_statistics_generated_and_clear(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL) &
                     (GEM_NWCTRL_TXEN | GEM_NWCTRL_CLRSTAT), ==,
                     GEM_NWCTRL_TXEN);
-    gem_assert_stat_rtc(qts, GEM_OCTTXLO, 64);
+    gem_assert_stat_rtc(qts, GEM_OCTTXLO, 68);
     gem_assert_stat_rtc(qts, GEM_OCTTXHI, 0);
     gem_assert_stat_rtc(qts, GEM_TXCNT, 1);
     gem_assert_stat_rtc(qts, GEM_TXBCNT, 0);
     gem_assert_stat_rtc(qts, GEM_TXMCNT, 0);
-    gem_assert_stat_rtc(qts, GEM_TX64CNT, 1);
+    gem_assert_stat_rtc(qts, GEM_TX65CNT, 1);
 
     qtest_quit(qts);
 }
@@ -6269,6 +6271,99 @@ static void test_gem_statistics_test_controls(void)
     qtest_quit(qts);
 }
 
+/*
+ * Silicon counts what crossed the wire: a broadcast is not also a multicast,
+ * and the octet counters and size buckets include the four-octet FCS even
+ * when FCS_REMOVE keeps it out of the receive buffer.  Measured on a
+ * SAM9X75 Curiosity: 29 ARP broadcasts gave tx_broadcast +29 with no
+ * matching multicast, and 20 multicast frames gave tx_multicast +20 with no
+ * matching broadcast.
+ */
+static void test_gem_statistics_wire_length_and_addressing(void)
+{
+    static const uint8_t broadcast[6] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    };
+    static const uint8_t multicast[6] = {
+        0x33, 0x33, 0x00, 0x00, 0x00, 0x01,
+    };
+    static const uint8_t unicast[6] = {
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
+    };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t nwcfg;
+
+    gem_quiesce_unused_queues(qts);
+    nwcfg = qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_NWCFG);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCFG,
+                 nwcfg | GEM_NWCFG_PROMISC | GEM_NWCFG_FCS_REMOVE);
+
+    /* A broadcast counts only as broadcast, never also as multicast. */
+    gem_prepare_test_receive(qts);
+    gem_transmit_test_frame(qts, broadcast,
+                            GEM_NWCTRL_LBL | GEM_NWCTRL_RXEN);
+    gem_assert_test_receive(qts);
+    gem_assert_stat_rtc(qts, GEM_TXBCNT, 1);
+    gem_assert_stat_rtc(qts, GEM_TXMCNT, 0);
+    gem_assert_stat_rtc(qts, GEM_RXBROADCNT, 1);
+    gem_assert_stat_rtc(qts, GEM_RXMULTICNT, 0);
+    /* 64 octets of frame data are 68 on the wire once the FCS is added. */
+    gem_assert_stat_rtc(qts, GEM_OCTTXLO, 68);
+    gem_assert_stat_rtc(qts, GEM_OCTRXLO, 68);
+    gem_assert_stat_rtc(qts, GEM_TX65CNT, 1);
+    gem_assert_stat_rtc(qts, GEM_RX65CNT, 1);
+    gem_assert_stat_rtc(qts, GEM_TX64CNT, 0);
+    gem_assert_stat_rtc(qts, GEM_RX64CNT, 0);
+    gem_assert_stat_rtc(qts, GEM_TXCNT, 1);
+    gem_assert_stat_rtc(qts, GEM_RXCNT, 1);
+
+    /* A group address that is not broadcast counts only as multicast. */
+    gem_prepare_test_receive(qts);
+    gem_transmit_test_frame(qts, multicast,
+                            GEM_NWCTRL_LBL | GEM_NWCTRL_RXEN);
+    gem_assert_test_receive(qts);
+    gem_assert_stat_rtc(qts, GEM_TXBCNT, 0);
+    gem_assert_stat_rtc(qts, GEM_TXMCNT, 1);
+    gem_assert_stat_rtc(qts, GEM_RXBROADCNT, 0);
+    gem_assert_stat_rtc(qts, GEM_RXMULTICNT, 1);
+    gem_assert_stat_rtc(qts, GEM_OCTTXLO, 68);
+    gem_assert_stat_rtc(qts, GEM_OCTRXLO, 68);
+    gem_assert_stat_rtc(qts, GEM_TX65CNT, 1);
+    gem_assert_stat_rtc(qts, GEM_RX65CNT, 1);
+
+    /* A unicast is neither. */
+    gem_prepare_test_receive(qts);
+    gem_transmit_test_frame(qts, unicast,
+                            GEM_NWCTRL_LBL | GEM_NWCTRL_RXEN);
+    gem_assert_test_receive(qts);
+    gem_assert_stat_rtc(qts, GEM_TXBCNT, 0);
+    gem_assert_stat_rtc(qts, GEM_TXMCNT, 0);
+    gem_assert_stat_rtc(qts, GEM_RXBROADCNT, 0);
+    gem_assert_stat_rtc(qts, GEM_RXMULTICNT, 0);
+    gem_assert_stat_rtc(qts, GEM_OCTTXLO, 68);
+    gem_assert_stat_rtc(qts, GEM_OCTRXLO, 68);
+    gem_assert_stat_rtc(qts, GEM_TX65CNT, 1);
+    gem_assert_stat_rtc(qts, GEM_RX65CNT, 1);
+
+    /*
+     * Keeping the FCS in the buffer does not change the counted length; it
+     * only makes the descriptor report the four extra octets it stored.
+     */
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCFG,
+                 (nwcfg | GEM_NWCFG_PROMISC) & ~GEM_NWCFG_FCS_REMOVE);
+    gem_prepare_test_receive(qts);
+    gem_transmit_test_frame(qts, unicast,
+                            GEM_NWCTRL_LBL | GEM_NWCTRL_RXEN);
+    g_assert_true(qtest_readl(qts, SAM9X7_SRAM0_BASE + 0x5000) &
+                  GEM_RX_DESC_OWNERSHIP);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + 0x5004) & 0x1fff,
+                    ==, 68);
+    gem_assert_stat_rtc(qts, GEM_OCTRXLO, 68);
+    gem_assert_stat_rtc(qts, GEM_RX65CNT, 1);
+
+    qtest_quit(qts);
+}
+
 static void test_gem_statistics_migration(void)
 {
     static const uint8_t multicast[6] = {
@@ -6297,12 +6392,12 @@ static void test_gem_statistics_migration(void)
     wait_for_migration_complete(to);
 
     g_assert_true(qtest_get_irq(to, 0));
-    gem_assert_stat_rtc(to, GEM_OCTTXLO, 64);
+    gem_assert_stat_rtc(to, GEM_OCTTXLO, 68);
     gem_assert_stat_rtc(to, GEM_OCTTXHI, 0);
     gem_assert_stat_rtc(to, GEM_TXCNT, 1);
     gem_assert_stat_rtc(to, GEM_TXBCNT, 0);
     gem_assert_stat_rtc(to, GEM_TXMCNT, 1);
-    gem_assert_stat_rtc(to, GEM_TX64CNT, 1);
+    gem_assert_stat_rtc(to, GEM_TX65CNT, 1);
     gem_assert_stat_rtc(to, GEM_RXUDPCCNT, 7);
     g_assert_true(qtest_readl(to, SAM9X7_GMAC_BASE + GEM_ISR) &
                   GEM_INT_XMIT_COMPLETE);
@@ -25931,6 +26026,8 @@ int main(int argc, char **argv)
                    test_gem_statistics_test_controls);
     qtest_add_func("sam9x75/gem/statistics-migration",
                    test_gem_statistics_migration);
+    qtest_add_func("sam9x75/gem/statistics-wire-length-and-addressing",
+                   test_gem_statistics_wire_length_and_addressing);
     qtest_add_func("sam9x75/board/ethernet-clock-jumper",
                    test_board_ethernet_clock_jumper);
     qtest_add_func("sam9x75/flexcom-usart/registers-irq-and-protection",

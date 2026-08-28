@@ -1051,6 +1051,15 @@ static void gem_update_int_status(CadenceGEMState *s)
  * gem_receive_updatestats:
  * Increment receive statistics.
  */
+/*
+ * The statistics count what the MAC put on or took off the wire, so the
+ * frame check sequence is always included even when FCS_REMOVE keeps it out
+ * of the receive buffer.  The size buckets are named for that wire length:
+ * a minimum Ethernet frame is 64 bytes because 60 octets carry a 4-octet
+ * FCS.  QEMU packets never carry an FCS, so callers add it back.
+ */
+#define GEM_FCS_BYTES 4
+
 static void gem_receive_updatestats(CadenceGEMState *s, const uint8_t *packet,
                                     unsigned bytes)
 {
@@ -1553,8 +1562,14 @@ static ssize_t gem_receive(NetClientState *nc, const uint8_t *buf, size_t size)
         gem_get_rx_desc(s, q);
     }
 
-    /* Count it */
-    gem_receive_updatestats(s, buf, size);
+    /*
+     * Count the wire length.  When FCS_REMOVE is clear the four octets were
+     * already added to size above; otherwise they were stripped and must be
+     * counted here.
+     */
+    gem_receive_updatestats(s, buf,
+                            FIELD_EX32(s->regs[R_NWCFG], NWCFG, FCS_REMOVE) ?
+                            size + GEM_FCS_BYTES : size);
 
     s->regs[R_RXSTATUS] |= R_RXSTATUS_FRAME_RECEIVED_MASK;
     gem_set_isr(s, q, R_ISR_RECV_COMPLETE_MASK);
@@ -1710,8 +1725,9 @@ static void gem_transmit(CadenceGEMState *s)
                     net_checksum_calculate(s->tx_packet, total_bytes, CSUM_ALL);
                 }
 
-                /* Update MAC statistics */
-                gem_transmit_updatestats(s, s->tx_packet, total_bytes);
+                /* Update MAC statistics with the wire length. */
+                gem_transmit_updatestats(s, s->tx_packet,
+                                         total_bytes + GEM_FCS_BYTES);
 
                 /* Send the packet somewhere */
                 if (s->phy_loop || FIELD_EX32(s->regs[R_NWCTRL], NWCTRL,
