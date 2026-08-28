@@ -17,7 +17,10 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `ebe3340acc`
+- Latest tested repository checkpoint: `73631d172f`
+  (`hw/arm/sam9x75-curiosity: Let the SDMMC0 card-detect pin follow the
+  medium`)
+- Preceding implementation checkpoint: `ebe3340acc`
   (`hw/ssi/at91_ospi: Drive the QSPI XDMAC request lines`)
 - Preceding implementation checkpoint: `28529c9b12`
   (`hw/net/can/bosch_m_can: Model error counters and error confinement`)
@@ -66,9 +69,9 @@ The QEMU implementation at `1851743e84` compiled cleanly in
 `build-verify-serial`; the host regressions below were repeated at repository
 checkpoint `fcfbe1ae0e` after relinking.
 
-- The complete SAM9X75 Curiosity qtest binary passed **245/245**, including
-  the two SPI chip-select tests, the three M_CAN error-confinement tests and
-  the two QSPI XDMAC request tests below.
+- The complete SAM9X75 Curiosity qtest binary passed **247/247**, including
+  the two SPI chip-select tests, the three M_CAN error-confinement tests, the
+  two QSPI XDMAC request tests and the two SDMMC0 card-detect tests below.
 - The complete generic chardev unit binary passed **42/42**.  The new TCP and
   Unix reconnect cases prove that a failed reconnect after a previous client
   closes no longer tries to unregister an unregistered yank callback; the old
@@ -302,6 +305,33 @@ checkpoint `fcfbe1ae0e` after relinking.
 - The XDMAC request map is now complete except for lines that need models
   first: SSC 38/39 (no SSC model) and TC 41--50 (TCB raises no capture or
   compare events).  Those are prerequisites, not wiring gaps.
+- The SDMMC0 card-detect pin follows the medium at `73631d172f`.  The exact
+  device tree detects the card through `cd-gpios` on PA23, but the board
+  drove PA23 once at creation and only when a drive existed, so a guest could
+  never see a medium change.  The generic SDHCI model now exposes a
+  `card-inserted` output (unconnected on every other board), `at91-sdhci`
+  re-exports it, and the board inverts it onto PA23 unconditionally.  QMP
+  `eject` and `blockdev-change-medium` address the legacy `-drive` backend
+  with `device`, not `id`.  `sam9x75/sdcard/card-detect-follows-medium` and
+  `sam9x75/sdcard/card-detect-migration` cover pin and present-state, system
+  reset and migration.
+- The Linux SDMMC0 media-change gate passed at `73631d172f`.  Root was on a
+  USB disk (`root=/dev/sda`, rootfs attached with `snapshot=on`) so the SD
+  socket held a disposable 256 MiB ext4 card that also served as the
+  evidence disk.  The guest wrote a 16 MiB deterministic payload, unmounted,
+  and the host ejected and re-inserted the card through QMP; Linux saw the
+  removal and re-insertion through the PA23 `cd-gpios` interrupt, and the
+  payload hash, a rename and a commit marker survived.  A raw read of the
+  whole card was then yanked mid-transfer: it failed with `EIO`
+  (`OSError: [Errno 5]`), the card re-inserted, and the data verified again
+  `ro,noload`.  Linux logged 3 insertions and 2 removals, the
+  `80000000.mmc cd` interrupt advanced exactly 0 -> 4, QEMU's
+  `unimp,guest_errors` log was empty, host `e2fsck -fn` passed and the
+  rootfs hash was unchanged.  Preserve
+  `t/linux4microchip-sd-media-change-20260828/release-r2`; `release-r1` is
+  diagnostic only because its validator looked for the `EIO` text in
+  `dmesg` instead of the captured read error, while every guest phase of r1
+  had already passed.
 - The host `vcan` prerequisite is an environment setup step, not a code
   change.  On this workstation the README's private-namespace recipe cannot
   work because Ubuntu sets `kernel.apparmor_restrict_unprivileged_userns=1`,
@@ -336,12 +366,50 @@ closed.  Do these steps next.
    fidelity items.  Keep Linux4Microchip as the primary OS;
    NetBSD, FreeBSD, other guests and the newer-mainline matrix remain
    deliberately deferred.
-3. In parallel, the physical-board agent can run the safe crypto validation in
-   `artifacts/linux4microchip-crypto-fixes-20260827/REAL-HARDWARE-TESTS.md`.
+3. **Physical-board agent (macOS workstation with the Curiosity board):**
+   the ordered, safe measurements that this checkpoint needs, all read-only
+   or on disposable media.  Use the r5 safety rules; never program OTPC,
+   QSPI or NAND.
+   - The read-only FLEXCOM4 SPI `+0xfc` (`SPI_VERSION`) probe in
+     `tests/guest/at91/linux4sam/spi-consumer/README.rst`.  It is the only
+     thing blocking the `mmc_spi` gate now that the PA13 chip-select routing
+     exists.  Record an abort as a result; do not write.
+   - The safe crypto validation in
+     `artifacts/linux4microchip-crypto-fixes-20260827/REAL-HARDWARE-TESTS.md`.
+   - SDMMC0 card-detect comparison with a disposable card: with the exact
+     image booted, remove and re-insert the card and capture `dmesg`,
+     `/proc/interrupts` (`mmc0` and `80000000.mmc cd` lines) and the PA23
+     level.  QEMU's expected sequence is in the SD media-change gate
+     evidence below.  Compare debounce and edge counts.
+   - M_CAN error confinement with **no transceiver bus connected** (the
+     controller alone, which is safe): bring `can0` up, send one frame, and
+     capture `ip -details -statistics link show can0` plus `berr-counter`
+     over time.  QEMU raises TEC by 8 per attempt and reaches bus-off after
+     32 unacknowledged attempts; silicon retransmits autonomously, so
+     compare the *sequence* (ERROR-WARNING at 96, ERROR-PASSIVE at 128,
+     BUS-OFF past 255) and the recovery after `ip link set can0 down/up`,
+     not the wall-clock timing.
+   - Optionally a read-only QSPI RDID (`9Fh`) through an XDMAC
+     request-paced byte channel, to compare the narrow-access behaviour that
+     QEMU now models.  RDID reads only; nothing else.
+   The datasheet used for every register claim in this checkpoint is
+   `references/SAM9X7-Series-Data-Sheet-DS60001813E.pdf` (Table 16.1 for
+   XDMAC requests, the UDPHS `INTSTA` and TC `SR` bit layouts).
 4. Also on the board, take the read-only FLEXCOM SPI `+0xfc` probe in
    `tests/guest/at91/linux4sam/spi-consumer/README.rst`.  It is the only thing
    still blocking the `mmc_spi` gate now that the chip-select routing exists.
-5. Two CAN sub-gates remain deliberately open and must not be claimed from the
+5. **UDPHS suspend/resume/SOF needs a design decision before any code.**
+   Linux `atmel_usba_udc` consumes `DET_SUSPD`, `WAKE_UP` and `ENDOFRSM`,
+   the model defines none of them, and QEMU's USB core gives a device no
+   callback for host port suspend or resume: `USBPortOps` and
+   `USBDeviceClass` have attach/reset/packet/wakeup hooks only, and port
+   suspend lives solely in EHCI `PORTSC`/OHCI `HcControl`.  The gadget
+   bridge is a plain `USBDevice`, so a faithful implementation needs either
+   a generic USB API addition (new port/device suspend-resume hooks that
+   EHCI and OHCI call) or a bridge-only back-channel.  Choose deliberately;
+   do not infer suspend from packet inactivity, because QEMU never delivers
+   SOFs to devices and a polled interrupt endpoint would false-trigger.
+6. Two CAN sub-gates remain deliberately open and must not be claimed from the
    evidence above.  ESI is injected by a virtual `vcan` peer rather than
    observed from a real error-passive controller, and host SocketCAN state
    lives outside the VM, so it is not itself migrated; the migrated-CAN
@@ -694,8 +762,12 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 245/245 for Curiosity, 42/42 for chardev, 7/7
-for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  The QSPI
+The post-gate regressions pass 247/247 for Curiosity, 42/42 for chardev, 7/7
+for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  The
+SDMMC0 card-detect pin now follows the medium and a Linux media-change gate
+covers clean removal, re-insertion and an active-read yank; see the handoff
+for its evidence directory.  The next physical-board work is listed as an
+ordered, safety-bounded section in the continuation order.  The QSPI
 XDMAC request lines 26/27 are wired and qtest-gated; Linux uses memcpy DMA
 through the AHB window, so do not claim a Linux DMA gate for them.  The
 M_CAN model now has transmit-side ISO 11898-1 error confinement: TEC/REC,

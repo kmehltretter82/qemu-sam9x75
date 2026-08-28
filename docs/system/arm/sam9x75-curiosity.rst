@@ -331,7 +331,19 @@ Support matrix
        and migration of a machine whose card is selected through the GPIO
        route.  Completing the ``mmc_spi`` consumer gate now only waits on the
        read-only FLEXCOM SPI ``+0xfc`` value, which must be measured on
-       silicon rather than invented.
+       silicon rather than invented.  The SDMMC0 card-detect switch on PA23
+       follows the medium: the generic SDHCI model exposes a
+       ``card-inserted`` level output driven from its insertion path, the
+       ``at91-sdhci`` wrapper re-exports it, and the board inverts it onto
+       PA23 unconditionally, so an empty socket reads "no card" and QMP
+       ``eject``/``blockdev-change-medium`` are visible to a guest that uses
+       ``cd-gpios``.  Qtests cover the pin and present-state following the
+       medium, system reset and migration, and an exact Linux4Microchip gate
+       with root on a USB disk ejected and re-inserted a disposable card
+       through QMP: a 16 MiB payload survived a clean removal, a raw read
+       yanked mid-transfer failed with ``EIO`` and the card recovered, with
+       the card-detect interrupt advancing exactly once per edge and an
+       empty diagnostic log.
        Host preset registers, the SAM9X7 Host Control 2 writable mask, combined
        command/data/all software reset, the vendor registers covered by
        ``SWRSTALL``, and the Linux ADMA descriptor form are covered.  Writable
@@ -912,7 +924,8 @@ Support matrix
        PAC1934 to FLEXCOM7; its SoC, USB-bridge and disconnected jumper routes
        have a machine option and functional SoC-side NACK behavior.  J24
        defaults to the M.2 SDIO route; its SPI position disconnects SDMMC1 and
-       routes the card to FLEXCOM4 NPCS1.  J12 controls the LAN8840
+       routes the card to FLEXCOM4 NPCS1.  PA23 follows SDMMC0 card
+       presence at run time.  J12 controls the LAN8840
        daughterboard's required 25 MHz clock, with functional MDIO and traffic
        loss when open.  The remaining power, clock and interface-selection
        jumpers, mikroBUS, Raspberry Pi header, non-storage M.2 peripherals and
