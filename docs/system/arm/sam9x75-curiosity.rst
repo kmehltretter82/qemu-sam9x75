@@ -742,8 +742,11 @@ Support matrix
        A waveform-mode external event on TIOB acts on TIOA through
        ``AEEVT`` and, with ``ENETRG``, also restarts the counter; note that
        ``CMR`` bits 9:8 are ``EEVTEDG`` in waveform mode and ``ETRGEDG`` in
-       capture mode.  The common
-       TCB model does not yet cover TCLK inputs, the TIOB output, the
+       capture mode.  TIOB is a waveform output
+       driven by ``BCPB``, ``BCPC``, ``BSWTRG`` and ``BEEVT``, except while
+       ``EEVT`` selects it as the external event, when it is an input and
+       the channel does not drive it.  The common
+       TCB model does not yet cover TCLK inputs, the
        ``BMR`` XC0--XC2 cross-connect that can clock one channel from
        another's TIOA or supply an external event, up/down modes or
        QDEC.  The SAM9X7 ADC is

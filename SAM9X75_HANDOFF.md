@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `cfc8205878`
+- Latest tested repository checkpoint: `f243bf9689`
+  (`hw/timer/at91_tcb: Drive the TIOB waveform output`)
+- Preceding implementation checkpoint: `cfc8205878`
   (`hw/timer/at91_tcb: Add the waveform-mode external event`)
 - Preceding implementation checkpoint: `bf926d5931`
   (`hw/timer/at91_tcb: Add the capture-mode external trigger`)
@@ -592,10 +594,11 @@ silicon-confirmed.  Do these steps next.
    `artifacts/linux4microchip-crypto-fixes-20260827/`; both are now
    hardware-confirmed (see the results section above).
 2. Then the next bounded P1 implementation slice.  The TCB now covers RA/RB
-   compares, the TIOA output, capture loading, the external trigger and the
-   waveform-mode external event, and every XDMAC request has a source.
+   compares, the TIOA and TIOB outputs, capture loading, the external
+   trigger and the waveform-mode external event, and every XDMAC request
+   has a source.
    What remains there, all unblocked but unstarted: TCLK clock inputs, the
-   TIOB output, the `BMR` XC0--XC2 cross-connect (which would also supply
+   `BMR` XC0--XC2 cross-connect (which would also supply
    the XC external-event sources this model refuses), up/down counting and
    QDEC.  Note the cross-connect routes TIOA as a *clock*, so wiring it
    means teaching the channel to count edges rather than run on a ptimer --
@@ -1013,7 +1016,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 263/263 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 264/264 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two
 full Curiosity runs on 2026-08-28 aborted at QEMU startup; that was host
 memory pressure, not a model fault, and the rule it implies is below.
