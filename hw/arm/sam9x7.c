@@ -669,6 +669,19 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
         qdev_get_gpio_in_named(DEVICE(s), "ebi-assignment",
                                SAM9X7_EBI_ASSIGN_NAND_D16));
 
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->ssc), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->ssc), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_SSC_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->ssc), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 28));
+    /* DS60001813E Table 16.1: XDMAC0 requests 38 and 39 are SSC TX/RX. */
+    qdev_connect_gpio_out_named(DEVICE(&s->ssc), "tx-request", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 38));
+    qdev_connect_gpio_out_named(DEVICE(&s->ssc), "rx-request", 0,
+        qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request", 39));
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->qspi), errp)) {
         return;
     }
@@ -941,6 +954,7 @@ static void sam9x7_init_vddcore_reset(SAM9X7State *s)
     sam9x7_vddcore_add(s, DEVICE(&s->mpddrc));
     sam9x7_vddcore_add(s, DEVICE(&s->pmecc));
     sam9x7_vddcore_add(s, DEVICE(&s->smc));
+    sam9x7_vddcore_add(s, DEVICE(&s->ssc));
     sam9x7_vddcore_add(s, DEVICE(&s->qspi));
     sam9x7_vddcore_add(s, DEVICE(&s->gmac));
     sam9x7_vddcore_add(s, DEVICE(&s->matrix));
@@ -1188,6 +1202,11 @@ static void sam9x7_init(Object *obj)
     object_initialize_child(obj, "smc", &s->smc, TYPE_AT91_SMC);
     object_initialize_child(obj, "nand", &s->nand, TYPE_AT91_NAND);
 
+    object_initialize_child(obj, "ssc", &s->ssc, TYPE_AT91_SSC);
+    qdev_connect_clock_in(DEVICE(&s->ssc), "pclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "pclk[28]"));
+    qdev_connect_clock_in(DEVICE(&s->ssc), "gclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "gclk[28]"));
     object_initialize_child(obj, "qspi", &s->qspi, TYPE_AT91_OSPI);
     qdev_connect_clock_in(DEVICE(&s->qspi), "pclk",
                           qdev_get_clock_out(DEVICE(&s->pmc), "pclk[35]"));

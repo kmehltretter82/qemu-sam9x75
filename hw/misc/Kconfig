@@ -321,3 +321,6 @@ config AXIADO_CLK
     bool
 
 source macio/Kconfig
+
+config AT91_SSC
+    bool

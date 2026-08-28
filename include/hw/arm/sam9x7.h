@@ -19,6 +19,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/dma/at91_xdmac.h"
 #include "hw/gpio/at91_pio.h"
+#include "hw/misc/at91_ssc.h"
 #include "hw/i2c/at91_twi.h"
 #include "hw/intc/at91_aic.h"
 #include "hw/misc/at91_aes.h"
@@ -97,6 +98,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 /* User peripherals. */
 #define SAM9X7_OTPC_BASE             0xeff00000
 #define SAM9X7_XDMAC_BASE            0xf0008000
+#define SAM9X7_SSC_BASE              0xf0010000
 #define SAM9X7_QSPI_BASE             0xf0014000
 #define SAM9X7_I2SMCC_BASE           0xf001c000
 #define SAM9X7_PIT64B0_BASE          0xf0028000
@@ -190,6 +192,7 @@ struct SAM9X7State {
     AT91RTCState rtc;
     AT91TCBState tcb;
     AT91TCBState tcb1;
+    AT91SSCState ssc;
     AT91WDTState wdt;
     OrIRQState sys_irq;
     OrIRQState ebi_irq;

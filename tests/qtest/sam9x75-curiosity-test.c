@@ -39,6 +39,7 @@
 #define SAM9X7_SDMMC1_BASE      0x90000000
 #define SAM9X7_OTPC_BASE        0xeff00000
 #define SAM9X7_XDMAC_BASE       0xf0008000
+#define SAM9X7_SSC_BASE         0xf0010000
 #define SAM9X7_QSPI_BASE        0xf0014000
 #define SAM9X7_I2SMCC_BASE      0xf001c000
 #define SAM9X7_SHA_BASE         0xf002c000
@@ -1714,6 +1715,35 @@
 #define PMERRLOC_ERR_COUNT(n)   ((n) << 8)
 #define PMERRLOC_CFG_ERRNUM(n)  ((n) << 16)
 
+#define SSC_CR                  0x00
+#define SSC_CMR                 0x04
+#define SSC_RCMR                0x10
+#define SSC_RFMR                0x14
+#define SSC_TCMR                0x18
+#define SSC_TFMR                0x1c
+#define SSC_RHR                 0x20
+#define SSC_THR                 0x24
+#define SSC_RC0R                0x38
+#define SSC_SR                  0x40
+#define SSC_IER                 0x44
+#define SSC_IDR                 0x48
+#define SSC_IMR                 0x4c
+#define SSC_WPMR                0xe4
+#define SSC_WPSR                0xe8
+#define SSC_CR_RXEN             BIT(0)
+#define SSC_CR_RXDIS            BIT(1)
+#define SSC_CR_TXEN             BIT(8)
+#define SSC_CR_TXDIS            BIT(9)
+#define SSC_CR_SWRST            BIT(15)
+#define SSC_SR_TXRDY            BIT(0)
+#define SSC_SR_TXEMPTY          BIT(1)
+#define SSC_SR_RXRDY            BIT(4)
+#define SSC_SR_OVRUN            BIT(5)
+#define SSC_SR_TXEN             BIT(16)
+#define SSC_SR_RXEN             BIT(17)
+#define SSC_RFMR_LOOP           BIT(5)
+#define SSC_RFMR_DATLEN(n)      ((n) - 1)
+#define SSC_WPMR_KEY            0x53534300
 #define QSPI_CR                 0x00
 #define QSPI_MR                 0x04
 #define QSPI_RDR                0x08
@@ -20146,6 +20176,128 @@ static void test_qspi_xdmac_request_migration(void)
     qtest_quit(from);
 }
 
+/*
+ * The SSC is enabled and reset through SSC_CR, moves data in loop mode
+ * where TD is tied back to RD, and drives XDMAC requests 38 and 39 from
+ * TXRDY and RXRDY.  Frame timing and the external pins are not modeled, so
+ * loop mode is the only path that carries data.
+ */
+static void test_ssc_registers_loopback_and_requests(void)
+{
+    const uint64_t base = SAM9X7_SSC_BASE;
+    const char *path = "/machine/soc/ssc";
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t value;
+
+    /* Reset state: nothing enabled, transmitter reported empty. */
+    g_assert_cmphex(qtest_readl(qts, base + SSC_CMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_RFMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_IMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_SR) &
+                    (SSC_SR_TXEN | SSC_SR_RXEN | SSC_SR_RXRDY), ==, 0);
+
+    pmc_write_pcr(qts, 28, PMC_PCR_EN);
+    qtest_writel(qts, base + SSC_CMR, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_CMR), ==, 0xfff);
+    qtest_writel(qts, base + SSC_RFMR,
+                 SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8));
+    qtest_writel(qts, base + SSC_TFMR, SSC_RFMR_DATLEN(8));
+
+    /* Enabling the transmitter makes it ready. */
+    qtest_writel(qts, base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
+    value = qtest_readl(qts, base + SSC_SR);
+    g_assert_cmphex(value & (SSC_SR_TXEN | SSC_SR_RXEN), ==,
+                    SSC_SR_TXEN | SSC_SR_RXEN);
+    g_assert_true(value & SSC_SR_TXRDY);
+    g_assert_false(value & SSC_SR_RXRDY);
+
+    /* Loop mode delivers the transmitted word to the receiver. */
+    qtest_writel(qts, base + SSC_THR, 0xa5);
+    g_assert_true(qtest_readl(qts, base + SSC_SR) & SSC_SR_RXRDY);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_RHR), ==, 0xa5);
+    g_assert_false(qtest_readl(qts, base + SSC_SR) & SSC_SR_RXRDY);
+
+    /* Only DATLEN bits are received. */
+    qtest_writel(qts, base + SSC_THR, 0x1234);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_RHR), ==, 0x34);
+
+    /* A second word before the first is read reports an overrun. */
+    qtest_writel(qts, base + SSC_THR, 0x11);
+    qtest_writel(qts, base + SSC_THR, 0x22);
+    value = qtest_readl(qts, base + SSC_SR);
+    g_assert_true(value & SSC_SR_OVRUN);
+    /* The status read clears it. */
+    g_assert_false(qtest_readl(qts, base + SSC_SR) & SSC_SR_OVRUN);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_RHR), ==, 0x22);
+
+    /* Interrupts follow the mask. */
+    qtest_irq_intercept_out_named(qts, path, "sysbus-irq");
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_writel(qts, base + SSC_IER, SSC_SR_RXRDY);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_IMR), ==, SSC_SR_RXRDY);
+    qtest_writel(qts, base + SSC_THR, 0x5a);
+    g_assert_true(qtest_get_irq(qts, 0));
+    qtest_readl(qts, base + SSC_RHR);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_writel(qts, base + SSC_IDR, SSC_SR_RXRDY);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_IMR), ==, 0);
+
+    /* Write protection refuses the format registers and records the offset. */
+    qtest_writel(qts, base + SSC_WPMR, SSC_WPMR_KEY | 1);
+    qtest_writel(qts, base + SSC_RCMR, 0xdeadbeef);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_RCMR), ==, 0);
+    value = qtest_readl(qts, base + SSC_WPSR);
+    g_assert_cmphex(value & 1, ==, 1);
+    g_assert_cmphex((value >> 8) & 0xffff, ==, SSC_RCMR);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_WPSR), ==, 0);
+    qtest_writel(qts, base + SSC_WPMR, SSC_WPMR_KEY);
+    qtest_writel(qts, base + SSC_RCMR, 0x2);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_RCMR), ==, 0x2);
+
+    /* Disabling the receiver stops delivery; a software reset clears all. */
+    qtest_writel(qts, base + SSC_CR, SSC_CR_RXDIS);
+    qtest_writel(qts, base + SSC_THR, 0x77);
+    g_assert_false(qtest_readl(qts, base + SSC_SR) & SSC_SR_RXRDY);
+    qtest_writel(qts, base + SSC_CR, SSC_CR_SWRST);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_RFMR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_SR) &
+                    (SSC_SR_TXEN | SSC_SR_RXEN), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static void test_ssc_xdmac_requests(void)
+{
+    const uint64_t base = SAM9X7_SSC_BASE;
+    const char *path = "/machine/soc/ssc";
+    QTestState *qts;
+
+    /* The transmit request follows TXRDY, which needs the peripheral clock. */
+    qts = qtest_init(SAM9X75_MACHINE);
+    qtest_irq_intercept_out_named(qts, path, "tx-request");
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_writel(qts, base + SSC_CR, SSC_CR_TXEN);
+    g_assert_false(qtest_get_irq(qts, 0));
+    pmc_write_pcr(qts, 28, PMC_PCR_EN);
+    g_assert_true(qtest_get_irq(qts, 0));
+    pmc_write_pcr(qts, 28, 0);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_quit(qts);
+
+    /* The receive request follows RXRDY and clears when RHR is read. */
+    qts = qtest_init(SAM9X75_MACHINE);
+    qtest_irq_intercept_out_named(qts, path, "rx-request");
+    pmc_write_pcr(qts, 28, PMC_PCR_EN);
+    qtest_writel(qts, base + SSC_RFMR, SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8));
+    qtest_writel(qts, base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_writel(qts, base + SSC_THR, 0x3c);
+    g_assert_true(qtest_get_irq(qts, 0));
+    g_assert_cmphex(qtest_readl(qts, base + SSC_RHR), ==, 0x3c);
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_quit(qts);
+}
+
 static void test_qspi_status_irq_and_edges(void)
 {
     const char *path = "/machine/soc/qspi";
@@ -27042,6 +27194,10 @@ int main(int argc, char **argv)
                    test_smc_shared_irq_migration_and_reset);
     qtest_add_func("sam9x75/system/or-irq-migration-and-reset",
                    test_sys_irq_migration_and_reset);
+    qtest_add_func("sam9x75/ssc/registers-loopback-and-requests",
+                   test_ssc_registers_loopback_and_requests);
+    qtest_add_func("sam9x75/ssc/xdmac-requests",
+                   test_ssc_xdmac_requests);
     qtest_add_func("sam9x75/qspi/status-irq-and-edges",
                    test_qspi_status_irq_and_edges);
     qtest_add_func("sam9x75/qspi/xdmac-requests", test_qspi_xdmac_requests);
