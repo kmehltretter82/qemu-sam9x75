@@ -1250,6 +1250,8 @@
 #define TCB_CCR                 0x00
 #define TCB_CMR                 0x04
 #define TCB_CV                  0x10
+#define TCB_RA                  0x14
+#define TCB_RB                  0x18
 #define TCB_RC                  0x1c
 #define TCB_SR                  0x20
 #define TCB_IER                 0x24
@@ -1270,6 +1272,8 @@
 #define TCB_CMR_CPCSTOP         BIT(6)
 #define TCB_CMR_WAVESEL_UP_RC   (2U << 13)
 #define TCB_CMR_WAVE            BIT(15)
+#define TCB_INT_CPAS            BIT(2)
+#define TCB_INT_CPBS            BIT(3)
 #define TCB_INT_CPCS            BIT(4)
 #define TCB_INT_SECE            BIT(10)
 #define TCB_INT_MASK            (0xffU | TCB_INT_SECE)
@@ -7508,6 +7512,182 @@ static void test_pit64b_timing_gating_and_irq(void)
     g_assert_cmpuint(qtest_readl(qts,
                                  SAM9X7_PIT64B1_BASE + PIT64B_TLSBR), >,
                      value);
+
+    qtest_quit(qts);
+}
+
+/*
+ * RA and RB are compare registers in waveform mode: the counter passing
+ * each one sets CPAS or CPBS on its way to the RC compare, in counter
+ * order and without disturbing the period.  In capture mode they are
+ * loaded from TIOA/TIOB edges instead, which this model does not have, so
+ * no compare may fire there.
+ */
+static void test_tcb_ra_rb_compares(void)
+{
+    const uint64_t ch = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
+    const uint32_t wave = TCB_CMR_CLOCK2 | TCB_CMR_WAVE |
+                          TCB_CMR_WAVESEL_UP_RC;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t status;
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MCKR, 1);
+    pmc_write_pcr(qts, 17, PMC_PCR_EN);
+    aic_configure(qts, 17, AIC_SMR_LEVEL_HIGH | 3, 0x17171717);
+
+    qtest_writel(qts, ch + TCB_CMR, wave);
+    qtest_writel(qts, ch + TCB_RA, 100);
+    qtest_writel(qts, ch + TCB_RB, 200);
+    qtest_writel(qts, ch + TCB_RC, 300);
+    qtest_writel(qts, ch + TCB_IER, TCB_INT_CPAS | TCB_INT_CPBS |
+                 TCB_INT_CPCS);
+    qtest_writel(qts, ch + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+
+    /* Nothing has been reached yet. */
+    qtest_clock_step(qts, 1000);
+    g_assert_cmpuint(qtest_readl(qts, ch + TCB_CV), <, 100);
+    g_assert_cmphex(qtest_readl(qts, ch + TCB_SR) &
+                    (TCB_INT_CPAS | TCB_INT_CPBS | TCB_INT_CPCS), ==, 0);
+
+    /* RA first, and the counter keeps running past it. */
+    qtest_clock_step(qts, 80000);
+    status = qtest_readl(qts, ch + TCB_SR);
+    g_assert_cmphex(status & (TCB_INT_CPAS | TCB_INT_CPBS | TCB_INT_CPCS),
+                    ==, TCB_INT_CPAS);
+    g_assert_cmpuint(qtest_readl(qts, ch + TCB_CV), >=, 100);
+    g_assert_cmpuint(qtest_readl(qts, ch + TCB_CV), <, 200);
+    /* Status is read-to-clear. */
+    g_assert_cmphex(qtest_readl(qts, ch + TCB_SR) & TCB_INT_CPAS, ==, 0);
+
+    /* Then RB, still inside the same period. */
+    qtest_clock_step(qts, 80000);
+    status = qtest_readl(qts, ch + TCB_SR);
+    g_assert_cmphex(status & (TCB_INT_CPAS | TCB_INT_CPBS | TCB_INT_CPCS),
+                    ==, TCB_INT_CPBS);
+    g_assert_cmpuint(qtest_readl(qts, ch + TCB_CV), >=, 200);
+
+    /* Then RC ends the period and the counter restarts. */
+    qtest_clock_step(qts, 80000);
+    status = qtest_readl(qts, ch + TCB_SR);
+    g_assert_cmphex(status & TCB_INT_CPCS, ==, TCB_INT_CPCS);
+    g_assert_cmpuint(qtest_readl(qts, ch + TCB_CV), <, 100);
+
+    /* The next period repeats every compare. */
+    qtest_clock_step(qts, 240000);
+    status = qtest_readl(qts, ch + TCB_SR);
+    g_assert_cmphex(status & (TCB_INT_CPAS | TCB_INT_CPBS | TCB_INT_CPCS),
+                    ==, TCB_INT_CPAS | TCB_INT_CPBS | TCB_INT_CPCS);
+
+    /* A compare equal to RC reports both on the same tick. */
+    qtest_writel(qts, ch + TCB_CCR, TCB_CCR_CLKDIS);
+    qtest_writel(qts, ch + TCB_RA, 300);
+    qtest_writel(qts, ch + TCB_RB, 0);
+    qtest_readl(qts, ch + TCB_SR);
+    qtest_writel(qts, ch + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_clock_step(qts, 240000);
+    status = qtest_readl(qts, ch + TCB_SR);
+    g_assert_cmphex(status & (TCB_INT_CPAS | TCB_INT_CPCS), ==,
+                    TCB_INT_CPAS | TCB_INT_CPCS);
+
+    /* Capture mode loads RA/RB from pins, so no compare may fire. */
+    qtest_writel(qts, ch + TCB_CCR, TCB_CCR_CLKDIS);
+    qtest_writel(qts, ch + TCB_CMR, TCB_CMR_CLOCK2);
+    qtest_writel(qts, ch + TCB_RA, 100);
+    qtest_writel(qts, ch + TCB_RB, 200);
+    qtest_readl(qts, ch + TCB_SR);
+    qtest_writel(qts, ch + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    qtest_clock_step(qts, 240000);
+    g_assert_cmphex(qtest_readl(qts, ch + TCB_SR) &
+                    (TCB_INT_CPAS | TCB_INT_CPBS), ==, 0);
+
+    qtest_quit(qts);
+}
+
+static uint32_t xdmac_waitl(QTestState *qts, uint64_t offset,
+                            uint32_t mask, uint32_t expected);
+
+/*
+ * DS60001813E Table 16.1 assigns XDMAC requests 43-48 to the compare
+ * events of channel 1 of each timer block.  A compare drives its request
+ * line, and reading the status register releases it, so a request-paced
+ * channel advances once per compare.
+ */
+static void test_tcb_compare_xdmac_requests(void)
+{
+    const uint64_t ch = SAM9X7_TCB_BASE + TCB_CHANNEL(1);
+    const uint64_t ch1 = SAM9X7_TCB1_BASE + TCB_CHANNEL(1);
+    const uint64_t dma = XDMAC_CHANNEL(4);
+    const uint32_t src = SAM9X7_DDR_BASE + 0x40000;
+    const uint32_t dst = SAM9X7_DDR_BASE + 0x41000;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint8_t source[8];
+    uint8_t result[8];
+    unsigned int i;
+
+    ebi_enable_ddr(qts);
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MCKR, 1);
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    pmc_write_pcr(qts, 17, PMC_PCR_EN);
+    pmc_write_pcr(qts, 45, PMC_PCR_EN);
+
+    for (i = 0; i < sizeof(source); i++) {
+        source[i] = 0x30 + i;
+    }
+    qtest_memwrite(qts, src, source, sizeof(source));
+    memset(result, 0, sizeof(result));
+    qtest_memwrite(qts, dst, result, sizeof(result));
+
+    /* One byte per request, paced by TC0 channel 1's RA compare (43). */
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + dma + XDMAC_CSA, src);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + dma + XDMAC_CDA, dst);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + dma + XDMAC_CUBC, sizeof(source));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + dma + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_DSYNC_MEM2PER |
+                 XDMAC_CC_PERID(43) | XDMAC_CC_SAM_INC | XDMAC_CC_DAM_INC);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(4));
+    qtest_clock_step(qts, 1000);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + dma + XDMAC_CUBC),
+                    ==, sizeof(source));
+
+    qtest_writel(qts, ch + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE | TCB_CMR_WAVESEL_UP_RC);
+    qtest_writel(qts, ch + TCB_RA, 100);
+    qtest_writel(qts, ch + TCB_RC, 200);
+    qtest_writel(qts, ch + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+
+    /* Each compare releases one datum once the status read clears it. */
+    for (i = 0; i < sizeof(source); i++) {
+        qtest_clock_step(qts, 200000);
+        qtest_readl(qts, ch + TCB_SR);
+    }
+    xdmac_waitl(qts, XDMAC_GS, BIT(4), 0);
+    qtest_memread(qts, dst, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), source, sizeof(source));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + dma + XDMAC_CIS) &
+                    (XDMAC_INT_RBEIS | XDMAC_INT_WBEIS), ==, 0);
+
+    /* TC1 channel 1 drives the second block's lines, 46 to 48. */
+    qtest_writel(qts, ch1 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE | TCB_CMR_WAVESEL_UP_RC);
+    qtest_writel(qts, ch1 + TCB_RB, 100);
+    qtest_writel(qts, ch1 + TCB_RC, 200);
+    memset(result, 0, sizeof(result));
+    qtest_memwrite(qts, dst, result, sizeof(result));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + dma + XDMAC_CSA, src);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + dma + XDMAC_CDA, dst);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + dma + XDMAC_CUBC, sizeof(source));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + dma + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_DSYNC_MEM2PER |
+                 XDMAC_CC_PERID(47) | XDMAC_CC_SAM_INC | XDMAC_CC_DAM_INC);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(4));
+    qtest_writel(qts, ch1 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    for (i = 0; i < sizeof(source); i++) {
+        qtest_clock_step(qts, 200000);
+        qtest_readl(qts, ch1 + TCB_SR);
+    }
+    xdmac_waitl(qts, XDMAC_GS, BIT(4), 0);
+    qtest_memread(qts, dst, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), source, sizeof(source));
 
     qtest_quit(qts);
 }
@@ -26114,6 +26294,10 @@ int main(int argc, char **argv)
                    test_pit64b_timing_gating_and_irq);
     qtest_add_func("sam9x75/tcb/clocksource-clockevent-and-protection",
                    test_tcb_clocksource_clockevent_and_protection);
+    qtest_add_func("sam9x75/tcb/ra-rb-compares",
+                   test_tcb_ra_rb_compares);
+    qtest_add_func("sam9x75/tcb/compare-xdmac-requests",
+                   test_tcb_compare_xdmac_requests);
     qtest_add_func("sam9x75/tcb1/reset-masks-and-independence",
                    test_tcb1_reset_masks_and_independence);
     qtest_add_func("sam9x75/tcb1/clock-gating-and-irq",

@@ -33,6 +33,14 @@ typedef struct AT91TCBChannel {
     bool enabled;
     bool running;
     bool clock_suspended;
+    /*
+     * The ptimer runs one segment at a time, from segment_start up to the
+     * next compare boundary, so RA and RB compares can fire inside a period.
+     */
+    uint64_t segment_start;
+    uint64_t segment_end;
+    /* Levels driven on the per-channel compare request lines. */
+    bool compare_request_level[3];
 } AT91TCBChannel;
 
 struct AT91TCBState {
@@ -40,6 +48,12 @@ struct AT91TCBState {
 
     MemoryRegion mmio;
     qemu_irq irq;
+    /*
+     * XDMAC compare request lines, three per channel in RA, RB, RC order.
+     * DS60001813E Table 16.1 assigns requests 43-48 to the CPA, CPB and CPC
+     * events of channel 1 of each timer block.
+     */
+    qemu_irq compare_request[AT91_TCB_NUM_CHANNELS * 3];
     Clock *pclk;
     Clock *gclk;
     Clock *slck;

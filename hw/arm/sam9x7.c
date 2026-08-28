@@ -459,6 +459,21 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->tcb1), 0,
                        qdev_get_gpio_in(DEVICE(&s->aic), 45));
 
+    /*
+     * DS60001813E Table 16.1: requests 43-48 are the compare events of
+     * channel 1 of each timer block, in CPA, CPB, CPC order for TC0 then
+     * TC1.  The channel-1 lines are index 3, 4 and 5 of the block's
+     * compare-request array.
+     */
+    for (i = 0; i < 3; i++) {
+        qdev_connect_gpio_out_named(DEVICE(&s->tcb), "compare-request",
+            3 + i, qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request",
+                                          43 + i));
+        qdev_connect_gpio_out_named(DEVICE(&s->tcb1), "compare-request",
+            3 + i, qdev_get_gpio_in_named(DEVICE(&s->xdmac), "request",
+                                          46 + i));
+    }
+
     object_property_set_link(OBJECT(&s->xdmac), "dma-memory",
                              OBJECT(s->memory), &error_abort);
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->xdmac), errp)) {

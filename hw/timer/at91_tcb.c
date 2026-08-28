@@ -58,6 +58,8 @@
 #define TCB_SMMR_MASK           0x3
 
 #define TCB_INT_COVFS           BIT(0)
+#define TCB_INT_CPAS            BIT(2)
+#define TCB_INT_CPBS            BIT(3)
 #define TCB_INT_CPCS            BIT(4)
 #define TCB_INT_SECE            BIT(10)
 #define TCB_INT_MASK            (0xffU | TCB_INT_SECE)
@@ -79,6 +81,34 @@
 
 #define TCB_COUNTER_RANGE       (UINT64_C(1) << 32)
 
+#define AT91_TCB_COMPARE_REQUESTS 3
+
+/*
+ * A compare event is a pulse to the XDMAC: the request line follows the
+ * latched status bit, so reading the status register releases it.
+ */
+static void at91_tcb_update_compare_requests(AT91TCBState *s)
+{
+    static const uint32_t bits[AT91_TCB_COMPARE_REQUESTS] = {
+        TCB_INT_CPAS, TCB_INT_CPBS, TCB_INT_CPCS,
+    };
+    unsigned int i, j;
+
+    for (i = 0; i < ARRAY_SIZE(s->channel); i++) {
+        AT91TCBChannel *ch = &s->channel[i];
+
+        for (j = 0; j < AT91_TCB_COMPARE_REQUESTS; j++) {
+            bool level = !!(ch->status & bits[j]);
+
+            if (level != ch->compare_request_level[j]) {
+                ch->compare_request_level[j] = level;
+                qemu_set_irq(s->compare_request[i * AT91_TCB_COMPARE_REQUESTS
+                                                + j], level);
+            }
+        }
+    }
+}
+
 static void at91_tcb_update_irq(AT91TCBState *s)
 {
     bool level = s->qisr & s->qimr;
@@ -88,6 +118,7 @@ static void at91_tcb_update_irq(AT91TCBState *s)
         level |= !!(s->channel[i].status & s->channel[i].imr);
     }
     qemu_set_irq(s->irq, level);
+    at91_tcb_update_compare_requests(s);
 }
 
 static bool at91_tcb_auto_rc(const AT91TCBChannel *ch)
@@ -96,12 +127,39 @@ static bool at91_tcb_auto_rc(const AT91TCBChannel *ch)
            (TCB_CMR_WAVE | TCB_CMR_WAVESEL_UP_RC);
 }
 
-static uint64_t at91_tcb_limit(const AT91TCBChannel *ch)
+/* Counter value at which the period restarts: RC in up-RC mode, else wrap. */
+static uint64_t at91_tcb_period_end(const AT91TCBChannel *ch)
 {
     if (at91_tcb_auto_rc(ch) && ch->rc) {
         return ch->rc;
     }
     return TCB_COUNTER_RANGE;
+}
+
+/*
+ * RA and RB are compare registers in waveform mode only; in capture mode
+ * they are loaded from TIOA/TIOB edges, which this model does not have.
+ */
+static bool at91_tcb_compares_active(const AT91TCBChannel *ch)
+{
+    return ch->cmr & TCB_CMR_WAVE;
+}
+
+/* The next counter value at which a status bit is due, after "from". */
+static uint64_t at91_tcb_next_boundary(const AT91TCBChannel *ch,
+                                       uint64_t from)
+{
+    uint64_t next = at91_tcb_period_end(ch);
+
+    if (at91_tcb_compares_active(ch)) {
+        if (ch->ra > from && ch->ra < next) {
+            next = ch->ra;
+        }
+        if (ch->rb > from && ch->rb < next) {
+            next = ch->rb;
+        }
+    }
+    return next;
 }
 
 static Clock *at91_tcb_selected_clock(AT91TCBChannel *ch,
@@ -161,38 +219,44 @@ static void at91_tcb_set_period(AT91TCBChannel *ch)
 static uint32_t at91_tcb_counter(AT91TCBChannel *ch)
 {
     uint64_t remaining = ptimer_get_count(ch->timer);
-    uint64_t limit = at91_tcb_limit(ch);
+    uint64_t span = ch->segment_end - ch->segment_start;
 
-    if (!remaining) {
-        return 0;
+    if (!remaining || remaining > span) {
+        return ch->segment_start;
     }
-    return limit - remaining;
+    return ch->segment_start + (span - remaining);
 }
 
-static bool at91_tcb_periodic(const AT91TCBChannel *ch)
+
+/* Arm the segment starting at "counter"; the ptimer transaction is held. */
+static void at91_tcb_arm_segment(AT91TCBChannel *ch, uint32_t counter)
 {
-    return !(ch->cmr & (TCB_CMR_CPCSTOP | TCB_CMR_CPCDIS));
+    uint64_t boundary;
+
+    if (counter >= at91_tcb_period_end(ch)) {
+        counter = 0;
+    }
+    boundary = at91_tcb_next_boundary(ch, counter);
+    ch->segment_start = counter;
+    ch->segment_end = boundary;
+
+    ptimer_stop(ch->timer);
+    at91_tcb_set_period(ch);
+    /*
+     * One-shot per segment: the tick handler arms the next one, so the
+     * channel only stops at a period end that CPCSTOP or CPCDIS selected.
+     */
+    ptimer_set_limit(ch->timer, boundary - counter, 1);
+    ch->clock_suspended = !at91_tcb_clock_active(ch);
+    if (ch->running && !ch->clock_suspended) {
+        ptimer_run(ch->timer, 1);
+    }
 }
 
 static void at91_tcb_configure_channel(AT91TCBChannel *ch, uint32_t counter)
 {
-    uint64_t limit = at91_tcb_limit(ch);
-
-    if (counter >= limit) {
-        counter = 0;
-    }
-
     ptimer_transaction_begin(ch->timer);
-    ptimer_stop(ch->timer);
-    at91_tcb_set_period(ch);
-    ptimer_set_limit(ch->timer, limit, 1);
-    if (counter) {
-        ptimer_set_count(ch->timer, limit - counter);
-    }
-    ch->clock_suspended = !at91_tcb_clock_active(ch);
-    if (ch->running && !ch->clock_suspended) {
-        ptimer_run(ch->timer, !at91_tcb_periodic(ch));
-    }
+    at91_tcb_arm_segment(ch, counter);
     ptimer_transaction_commit(ch->timer);
 }
 
@@ -387,10 +451,14 @@ static void at91_tcb_channel_write(AT91TCBState *s, unsigned int index,
         ch->smmr = value & TCB_SMMR_MASK;
         break;
     case TCB_RA:
+        counter = at91_tcb_counter(ch);
         ch->ra = value;
+        at91_tcb_configure_channel(ch, counter);
         break;
     case TCB_RB:
+        counter = at91_tcb_counter(ch);
         ch->rb = value;
+        at91_tcb_configure_channel(ch, counter);
         break;
     case TCB_RC:
         counter = at91_tcb_counter(ch);
@@ -504,19 +572,38 @@ static const MemoryRegionOps at91_tcb_ops = {
 static void at91_tcb_tick(void *opaque)
 {
     AT91TCBChannel *ch = opaque;
+    uint64_t boundary = ch->segment_end;
+    bool period_end = boundary >= at91_tcb_period_end(ch);
 
-    if (at91_tcb_auto_rc(ch)) {
-        ch->status |= TCB_INT_CPCS;
-    } else {
-        ch->status |= TCB_INT_COVFS;
+    if (at91_tcb_compares_active(ch)) {
+        if (ch->ra == boundary) {
+            ch->status |= TCB_INT_CPAS;
+        }
+        if (ch->rb == boundary) {
+            ch->status |= TCB_INT_CPBS;
+        }
     }
 
-    if (ch->cmr & TCB_CMR_CPCDIS) {
-        ch->enabled = false;
-        ch->running = false;
-    } else if (ch->cmr & TCB_CMR_CPCSTOP) {
-        ch->running = false;
+    if (period_end) {
+        if (at91_tcb_auto_rc(ch)) {
+            ch->status |= TCB_INT_CPCS;
+        } else {
+            ch->status |= TCB_INT_COVFS;
+        }
+        if (ch->cmr & TCB_CMR_CPCDIS) {
+            ch->enabled = false;
+            ch->running = false;
+        } else if (ch->cmr & TCB_CMR_CPCSTOP) {
+            ch->running = false;
+        }
     }
+
+    /*
+     * Arm the next segment: the period restarts at zero, else continue.
+     * This runs inside the ptimer callback, which already holds the
+     * transaction, so the segment is armed directly.
+     */
+    at91_tcb_arm_segment(ch, period_end ? 0 : boundary);
     at91_tcb_update_irq(ch->owner);
 }
 
@@ -543,7 +630,8 @@ static void at91_tcb_clock_changed(void *opaque, ClockEvent event)
         } else {
             at91_tcb_set_period(ch);
             if (ch->running && ch->clock_suspended) {
-                ptimer_run(ch->timer, !at91_tcb_periodic(ch));
+                /* Segments are one-shot; the tick handler arms the next. */
+                ptimer_run(ch->timer, 1);
                 ch->clock_suspended = false;
             }
         }
@@ -576,6 +664,10 @@ static void at91_tcb_reset(DeviceState *dev)
         ch->enabled = false;
         ch->running = false;
         ch->clock_suspended = false;
+        ch->segment_start = 0;
+        ch->segment_end = TCB_COUNTER_RANGE;
+        memset(ch->compare_request_level, 0,
+               sizeof(ch->compare_request_level));
     }
     s->bmr = 0;
     s->qimr = 0;
@@ -594,6 +686,8 @@ static void at91_tcb_init(Object *obj)
                           TYPE_AT91_TCB, TCB_MMIO_SIZE);
     sysbus_init_mmio(sbd, &s->mmio);
     sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_out_named(DEVICE(s), s->compare_request, "compare-request",
+                             ARRAY_SIZE(s->compare_request));
 
     s->pclk = qdev_init_clock_in(DEVICE(s), "pclk",
                                  at91_tcb_clock_changed, s, ClockUpdate);
@@ -648,7 +742,7 @@ static void at91_tcb_finalize(Object *obj)
 
 static const VMStateDescription at91_tcb_channel_vmstate = {
     .name = TYPE_AT91_TCB "/channel",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_PTIMER(timer, AT91TCBChannel),
@@ -664,6 +758,9 @@ static const VMStateDescription at91_tcb_channel_vmstate = {
         VMSTATE_BOOL(enabled, AT91TCBChannel),
         VMSTATE_BOOL(running, AT91TCBChannel),
         VMSTATE_BOOL(clock_suspended, AT91TCBChannel),
+        VMSTATE_UINT64_V(segment_start, AT91TCBChannel, 2),
+        VMSTATE_UINT64_V(segment_end, AT91TCBChannel, 2),
+        VMSTATE_BOOL_ARRAY_V(compare_request_level, AT91TCBChannel, 3, 2),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -671,7 +768,21 @@ static const VMStateDescription at91_tcb_channel_vmstate = {
 static int at91_tcb_post_load(void *opaque, int version_id)
 {
     AT91TCBState *s = opaque;
+    unsigned int i;
 
+    for (i = 0; i < ARRAY_SIZE(s->channel); i++) {
+        AT91TCBChannel *ch = &s->channel[i];
+
+        /*
+         * A version-1 channel ran one segment covering the whole period, and
+         * any stream can be repaired to that shape without losing the count.
+         */
+        if (ch->segment_end <= ch->segment_start ||
+            ch->segment_end > TCB_COUNTER_RANGE) {
+            ch->segment_start = 0;
+            ch->segment_end = at91_tcb_period_end(ch);
+        }
+    }
     at91_tcb_update_irq(s);
     return 0;
 }
