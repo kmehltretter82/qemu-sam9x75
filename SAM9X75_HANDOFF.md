@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `66740ef43a`
+- Latest tested repository checkpoint: `46d4328430`
+  (`hw/timer/at91_tcb: Clock channels from XC0-XC2`)
+- Preceding implementation checkpoint: `66740ef43a`
   (`hw/timer/at91_tcb: Add UPDOWN counting`)
 - Preceding implementation checkpoint: `f243bf9689`
   (`hw/timer/at91_tcb: Drive the TIOB waveform output`)
@@ -597,13 +599,15 @@ silicon-confirmed.  Do these steps next.
    hardware-confirmed (see the results section above).
 2. Then the next bounded P1 implementation slice.  The TCB now covers RA/RB
    compares, the TIOA and TIOB outputs, capture loading, the external
-   trigger, the waveform-mode external event and all four `WAVSEL`
-   behaviours including UPDOWN, and every XDMAC request has a source.
-   What remains there, all unblocked but unstarted: TCLK clock inputs, the
-   `BMR` XC0--XC2 cross-connect (which would also supply the XC
-   external-event sources this model refuses), and QDEC.  TCLK and the
-   cross-connect are one slice, not two: TCLK reaches a channel only
-   through XC.  Note the cross-connect routes TIOA as a *clock*, so wiring it
+   trigger, the waveform-mode external event, all four `WAVSEL` behaviours
+   including UPDOWN, and XC edge clocking with the `BMR` cross-connect, and
+   every XDMAC request has a source.
+   What remains there is QDEC, and the XC external-event sources, which the
+   waveform-mode event path still refuses.  The edge-counting rework that
+   TCLK and the `BMR` cross-connect needed is done at `46d4328430`: an XC-clocked
+   channel advances per edge and keeps its own counter, reusing the same
+   boundary handling as the ptimer path, so QDEC now has the counting
+   mechanism it needs and is mostly decode work on top.  Note the cross-connect routes TIOA as a *clock*, so wiring it
    means teaching the channel to count edges rather than run on a ptimer --
    a change to the counting core that Linux's clocksource depends on, so it
    deserves its own careful slice.  The UDPHS suspend/resume design
@@ -1019,7 +1023,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 265/265 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 266/266 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two
 full Curiosity runs on 2026-08-28 aborted at QEMU startup; that was host
 memory pressure, not a model fault, and the rule it implies is below.

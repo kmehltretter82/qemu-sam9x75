@@ -749,9 +749,13 @@ Support matrix
        ``WAVSEL`` selects all four waveform behaviours: the UP modes restart
        at the period end while the UPDOWN modes reverse there and again at
        zero, so RA and RB compare once on each leg.  The common
-       TCB model does not yet cover TCLK inputs, the
-       ``BMR`` XC0--XC2 cross-connect that can clock one channel from
-       another's TIOA or supply an external event, or QDEC.  The SAM9X7 ADC is
+       A channel whose ``TCCLKS`` names XC0--XC2 is clocked by that signal
+       instead: it advances one count per edge, with ``CLKI`` selecting
+       which edge, and ``BMR`` routes each XC from a ``TCLK`` pin or from
+       another channel's TIOA, so channels chain internally.  TCLK is a
+       named input per channel, which this board also does not route.  The
+       common TCB model does not yet cover QDEC or the XC external-event
+       sources.  The SAM9X7 ADC is
        mapped at ``0xf804c000`` with its eight physical inputs, PID/AIC source
        19, peripheral and generic clocks, and XDMAC receive request 40.  It
        models numeric and programmable channel sequences, software, external,
