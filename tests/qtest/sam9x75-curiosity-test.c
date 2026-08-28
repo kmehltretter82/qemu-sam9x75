@@ -16388,6 +16388,127 @@ static void test_sdcard_spi_block_transfer_and_data_migration(void)
  * calls out specially, and the card must take an ordinary command again
  * afterwards.
  */
+/*
+ * Migration taken inside a write data phase and inside the CRC that
+ * follows it.  These use different ssi-sd states from the read path
+ * (DATA_WRITE and SKIP_CRC16) and a different sd.c path, so the block must
+ * still land intact when the transfer is finished on the destination.
+ */
+static void test_sdcard_spi_write_phase_migration(void)
+{
+    const unsigned int block = 512;
+    g_autofree char *sd_path = NULL;
+    g_autofree uint8_t *payload = g_malloc(block);
+    g_autofree uint8_t *readback = g_malloc(block);
+    QTestState *from;
+    QTestState *to;
+    QTestState *final;
+    GError *error = NULL;
+    unsigned int i;
+    uint8_t value;
+    int fd;
+    int ret;
+
+    fd = g_file_open_tmp("sam9x75-spi-sd-wr-XXXXXX", &sd_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = ftruncate(fd, 1 << 20);
+    g_assert_cmpint(ret, ==, 0);
+    close(fd);
+
+    for (i = 0; i < block; i++) {
+        payload[i] = (uint8_t)(0xc3 ^ (i * 7));
+    }
+
+    from = qtest_initf(SAM9X75_MACHINE ",m2-interface=spi"
+                       " -drive file=%s,if=sd,index=1,format=raw,"
+                       "auto-read-only=off,file.locking=off", sd_path);
+    to = qtest_initf(SAM9X75_MACHINE ",m2-interface=spi"
+                     " -drive file=%s,if=sd,index=1,format=raw,"
+                     "auto-read-only=off,file.locking=off"
+                     " -incoming defer", sd_path);
+    spi_sd_initialize(from);
+
+    /* Start a single-block write and stop 200 bytes into the data. */
+    g_assert_cmphex(spi_sd_command_r1(from, 24, 0), ==, 0x00);
+    spi_sd_idle_byte(from);
+    flexcom_spi_transfer_byte(from, SAM9X7_SPI4_BASE, 13, 0xfe, 217);
+    for (i = 0; i < 200; i++) {
+        flexcom_spi_transfer_byte(from, SAM9X7_SPI4_BASE, 13, payload[i],
+                                  217);
+    }
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    /* The destination finishes the same block. */
+    for (i = 200; i < block; i++) {
+        flexcom_spi_transfer_byte(to, SAM9X7_SPI4_BASE, 13, payload[i], 217);
+    }
+    spi_sd_idle_byte(to);
+    spi_sd_idle_byte(to);
+    for (i = 0; i < 16; i++) {
+        value = spi_sd_idle_byte(to);
+        if (value != 0xff) {
+            break;
+        }
+    }
+    g_assert_cmphex(value & 0x1f, ==, 0x05);
+    for (i = 0; i < 64 && spi_sd_idle_byte(to) == 0x00; i++) {
+        continue;
+    }
+
+    /* The whole block, both halves, is readable on the destination. */
+    spi_sd_read_block(to, 0, readback, block);
+    g_assert_cmpmem(readback, block, payload, block);
+
+    /*
+     * Now migrate again inside the CRC that follows a data phase, which is
+     * a separate ssi-sd state from the data itself.
+     */
+    final = qtest_initf(SAM9X75_MACHINE ",m2-interface=spi"
+                        " -drive file=%s,if=sd,index=1,format=raw,"
+                        "auto-read-only=off,file.locking=off"
+                        " -incoming defer", sd_path);
+    for (i = 0; i < block; i++) {
+        payload[i] = (uint8_t)(0x3c ^ (i * 11));
+    }
+    g_assert_cmphex(spi_sd_command_r1(to, 24, block), ==, 0x00);
+    spi_sd_idle_byte(to);
+    flexcom_spi_transfer_byte(to, SAM9X7_SPI4_BASE, 13, 0xfe, 217);
+    for (i = 0; i < block; i++) {
+        flexcom_spi_transfer_byte(to, SAM9X7_SPI4_BASE, 13, payload[i], 217);
+    }
+    /* One of the two CRC bytes sent; migrate before the second. */
+    spi_sd_idle_byte(to);
+
+    migrate_incoming_qmp(final, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(to, final, NULL, NULL, "{}");
+    wait_for_migration_complete(to);
+    wait_for_migration_complete(final);
+
+    spi_sd_idle_byte(final);
+    for (i = 0; i < 16; i++) {
+        value = spi_sd_idle_byte(final);
+        if (value != 0xff) {
+            break;
+        }
+    }
+    g_assert_cmphex(value & 0x1f, ==, 0x05);
+    for (i = 0; i < 64 && spi_sd_idle_byte(final) == 0x00; i++) {
+        continue;
+    }
+    spi_sd_read_block(final, block, readback, block);
+    g_assert_cmpmem(readback, block, payload, block);
+
+    qtest_quit(final);
+    qtest_quit(to);
+    qtest_quit(from);
+    g_assert_cmpint(g_unlink(sd_path), ==, 0);
+}
+
 static void test_sdcard_spi_multiple_block_read(void)
 {
     const unsigned int block = 512;
@@ -27112,6 +27233,8 @@ int main(int argc, char **argv)
                    test_sdcard_spi_block_transfer_and_data_migration);
     qtest_add_func("sam9x75/sdcard/spi-multiple-block-read",
                    test_sdcard_spi_multiple_block_read);
+    qtest_add_func("sam9x75/sdcard/spi-write-phase-migration",
+                   test_sdcard_spi_write_phase_migration);
     qtest_add_func("sam9x75/sdcard/spi-gpio-chip-select",
                    test_sdcard_spi_gpio_chip_select);
     qtest_add_func("sam9x75/sdcard/spi-gpio-chip-select-migration",
