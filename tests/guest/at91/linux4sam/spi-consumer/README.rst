@@ -215,9 +215,16 @@ MMC I/O error or QEMU ``unimp,guest_errors`` diagnostic.
 Reset and migration follow-up
 -----------------------------
 
-The release gate also needs qtests that complete SPI-mode card initialization
-and single/multiple-block reads and writes, then migrate during a partial
-command, response, data read, data write, CRC and stop-command phase.  An
+Two of these are done at `5bcb06b161`:
+``sam9x75/sdcard/spi-reset-and-partial-command-migration`` covers a machine
+reset taken with a command half sent, after which a complete CMD0 is
+accepted with no stale argument bytes, and a migration taken with four of
+six command bytes transferred, which the destination completes.
+
+The release gate still needs qtests that complete SPI-mode card
+initialization and single/multiple-block reads and writes, then migrate
+during a partial response, data read, data write, CRC and stop-command
+phase.  An
 incomplete write must not reach the backing image; a completed write must do
 so exactly once.  A machine reset must return the card protocol to idle while
 preserving backing bytes.
