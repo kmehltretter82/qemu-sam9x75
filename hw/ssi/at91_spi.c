@@ -404,8 +404,22 @@ static void at91_spi_begin_dlybs(AT91SPIState *s)
 
 static bool at91_spi_can_start(AT91SPIState *s, uint32_t entry)
 {
+    bool rx_blocked;
+
+    /*
+     * WDRBT waits for unread receive data before starting a transfer.  With
+     * the FIFOs enabled the receive side is the FIFO: the Linux driver fills
+     * the transmit FIFO, waits for RXFTHF at the data count and only then
+     * reads, so a transfer may start while the receive FIFO has room and is
+     * blocked only when it is full.
+     */
+    if (s->fifo_enabled) {
+        rx_blocked = s->rx_count >= AT91_SPI_FIFO_SIZE;
+    } else {
+        rx_blocked = s->rx_count != 0;
+    }
     return at91_spi_entry_clocked(s, entry) &&
-           (!(s->mode & SPI_MR_WDRBT) || !s->rx_count);
+           (!(s->mode & SPI_MR_WDRBT) || !rx_blocked);
 }
 
 static void at91_spi_start_next(AT91SPIState *s)

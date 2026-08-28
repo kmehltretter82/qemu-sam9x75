@@ -8204,6 +8204,176 @@ static void test_xdmac_flexcom_live_migration(void)
     qtest_quit(from);
 }
 
+/*
+ * The exact Linux spi-atmel driver on SAM9X7 enables the 16-entry FIFO and
+ * runs a byte-wide XDMAC channel per direction with one data per request.
+ * Both channels are live at once, so a request change on one direction
+ * must never re-assert the other direction's still-pending request into
+ * the XDMAC; that raised a spurious ROIS and aborted every Linux transfer.
+ */
+/*
+ * Linux's FIFO PIO path: flush both FIFOs, set RXFTHRES to the data count,
+ * fill the transmit FIFO two 8-bit data per 32-bit TDR write, then wait for
+ * RXFTHF before reading anything.  WDRBT is always set by the driver, so with
+ * the FIFOs enabled it must block only a full receive FIFO, not the first
+ * unread datum; the non-FIFO meaning is unchanged.
+ */
+static void test_flexcom_spi_fifo_pio_wdrbt(void)
+{
+    const uint64_t base = SAM9X7_SPI4_BASE;
+    const uint32_t mode = SPI_MR_MSTR | SPI_MR_LLB | SPI_MR_WDRBT |
+                          SPI_MR_PCS(0xe);
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint64_t byte_ns;
+    unsigned int i;
+
+    pmc_write_pcr(qts, 13, PMC_PCR_EN);
+    qtest_writeb(qts, SAM9X7_FLEXCOM4_BASE + FLEX_MR, FLEX_MODE_SPI);
+    qtest_writel(qts, base + SPI_CR, SPI_CR_FIFOEN);
+    qtest_writel(qts, base + SPI_MR, mode);
+    qtest_writel(qts, base + SPI_CSR(0),
+                 SPI_CSR_BITS(8) | SPI_CSR_SCBR(217) | SPI_CSR_DLYBS(1));
+    qtest_writel(qts, base + SPI_CR, SPI_CR_SPIEN);
+    byte_ns = usart_cycles_to_ns(qts, 13, 1 + 8 * 217);
+
+    qtest_writel(qts, base + SPI_CR, SPI_CR_RXFCLR | SPI_CR_TXFCLR);
+    g_assert_cmphex(qtest_readl(qts, base + SPI_FLR), ==, 0);
+    qtest_writel(qts, base + SPI_FMR, 10U << 24);
+    qtest_readl(qts, base + SPI_SR);
+    qtest_writel(qts, base + SPI_IER, SPI_INT_RXFTHF);
+    for (i = 0; i < 5; i++) {
+        qtest_writel(qts, base + SPI_TDR,
+                     ((0xa0 + 2 * i + 1) << 16) | (0xa0 + 2 * i));
+    }
+    /* The first datum is already in the shift register. */
+    g_assert_cmphex(qtest_readl(qts, base + SPI_FLR) & 0xff, ==, 9);
+
+    /* All ten data must shift without any RDR read in between. */
+    for (i = 0; i < 12; i++) {
+        qtest_clock_step(qts, byte_ns);
+    }
+    g_assert_cmphex(qtest_readl(qts, base + SPI_FLR), ==, 10U << 16);
+    g_assert_true(qtest_readl(qts, base + SPI_SR) & SPI_INT_RXFTHF);
+    for (i = 0; i < 10; i++) {
+        g_assert_cmphex(qtest_readb(qts, base + SPI_RDR), ==, 0xa0 + i);
+    }
+    g_assert_cmphex(qtest_readl(qts, base + SPI_FLR), ==, 0);
+
+    /* Sixteen data fill the receive FIFO; the seventeenth waits for a read. */
+    for (i = 0; i < 8; i++) {
+        qtest_writel(qts, base + SPI_TDR, ((2 * i + 1) << 16) | (2 * i));
+    }
+    for (i = 0; i < 18; i++) {
+        qtest_clock_step(qts, byte_ns);
+    }
+    g_assert_cmphex(qtest_readl(qts, base + SPI_FLR), ==, 16U << 16);
+    qtest_writeb(qts, base + SPI_TDR, 0x5a);
+    for (i = 0; i < 3; i++) {
+        qtest_clock_step(qts, byte_ns);
+    }
+    g_assert_cmphex(qtest_readl(qts, base + SPI_FLR), ==, (16U << 16) | 1);
+    g_assert_cmphex(qtest_readb(qts, base + SPI_RDR), ==, 0);
+    for (i = 0; i < 3; i++) {
+        qtest_clock_step(qts, byte_ns);
+    }
+    g_assert_cmphex(qtest_readl(qts, base + SPI_FLR), ==, 16U << 16);
+
+    /* Without the FIFOs, WDRBT still waits for the single unread datum. */
+    qtest_writel(qts, base + SPI_CR, SPI_CR_SPIDIS);
+    qtest_writel(qts, base + SPI_CR, SPI_CR_FIFODIS);
+    qtest_writel(qts, base + SPI_CR, SPI_CR_SPIEN);
+    qtest_readl(qts, base + SPI_RDR);
+    qtest_writeb(qts, base + SPI_TDR, 0x11);
+    qtest_clock_step(qts, 2 * byte_ns);
+    g_assert_true(qtest_readl(qts, base + SPI_SR) & SPI_INT_RDRF);
+    qtest_writeb(qts, base + SPI_TDR, 0x22);
+    qtest_clock_step(qts, 2 * byte_ns);
+    g_assert_cmphex(qtest_readb(qts, base + SPI_RDR), ==, 0x11);
+    qtest_clock_step(qts, 2 * byte_ns);
+    g_assert_cmphex(qtest_readb(qts, base + SPI_RDR), ==, 0x22);
+    qtest_quit(qts);
+}
+
+static void test_flexcom_spi_fifo_concurrent_xdmac(void)
+{
+    const uint32_t tx_source = SAM9X7_DDR_BASE + 0xf200;
+    const uint32_t rx_target = SAM9X7_DDR_BASE + 0xf300;
+    const uint64_t tx_channel = XDMAC_CHANNEL(2);
+    const uint64_t rx_channel = XDMAC_CHANNEL(3);
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint8_t source[64];
+    uint8_t result[64];
+    uint64_t byte_ns;
+    unsigned int i;
+    uint32_t cis;
+
+    ebi_enable_ddr(qts);
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    pmc_write_pcr(qts, 13, PMC_PCR_EN);
+    qtest_writeb(qts, SAM9X7_FLEXCOM4_BASE + FLEX_MR, FLEX_MODE_SPI);
+    /* Linux: enable the FIFOs first, thresholds at reset, then configure. */
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_CR, SPI_CR_FIFOEN);
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_MR,
+                 SPI_MR_MSTR | SPI_MR_LLB | SPI_MR_PCS(0xe));
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_CSR(0),
+                 SPI_CSR_BITS(8) | SPI_CSR_SCBR(217) | SPI_CSR_DLYBS(1));
+    qtest_writel(qts, SAM9X7_SPI4_BASE + SPI_CR, SPI_CR_SPIEN);
+    byte_ns = usart_cycles_to_ns(qts, 13, 1 + 8 * 217);
+
+    for (i = 0; i < sizeof(source); i++) {
+        source[i] = 0x9f ^ (i * 7);
+    }
+    qtest_memwrite(qts, tx_source, source, sizeof(source));
+    memset(result, 0, sizeof(result));
+    qtest_memwrite(qts, rx_target, result, sizeof(result));
+
+    /* Receive channel first, one byte per request, as the driver does. */
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CSA,
+                 SAM9X7_SPI4_BASE + SPI_RDR);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CDA, rx_target);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CUBC,
+                 sizeof(source));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_PERID(9) | XDMAC_CC_DAM_INC);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(3));
+
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CSA, tx_source);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CDA,
+                 SAM9X7_SPI4_BASE + SPI_TDR);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CUBC,
+                 sizeof(source));
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CC,
+                 XDMAC_CC_TYPE_PER | XDMAC_CC_DSYNC_MEM2PER |
+                 XDMAC_CC_PERID(8) | XDMAC_CC_SAM_INC);
+    qtest_writel(qts, SAM9X7_XDMAC_BASE + XDMAC_GE, BIT(2));
+
+    for (i = 0; i < 4 * sizeof(source); i++) {
+        qtest_clock_step(qts, byte_ns);
+        if (!(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+              (BIT(2) | BIT(3)))) {
+            break;
+        }
+    }
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GS) &
+                    (BIT(2) | BIT(3)), ==, 0);
+
+    /* No request overflow or bus error on either direction. */
+    cis = qtest_readl(qts, SAM9X7_XDMAC_BASE + tx_channel + XDMAC_CIS);
+    g_assert_cmphex(cis & (XDMAC_INT_ROIS | XDMAC_INT_RBEIS |
+                           XDMAC_INT_WBEIS), ==, 0);
+    g_assert_true(cis & XDMAC_INT_BIS);
+    cis = qtest_readl(qts, SAM9X7_XDMAC_BASE + rx_channel + XDMAC_CIS);
+    g_assert_cmphex(cis & (XDMAC_INT_ROIS | XDMAC_INT_RBEIS |
+                           XDMAC_INT_WBEIS), ==, 0);
+    g_assert_true(cis & XDMAC_INT_BIS);
+
+    qtest_memread(qts, rx_target, result, sizeof(result));
+    g_assert_cmpmem(result, sizeof(result), source, sizeof(source));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + rx_channel +
+                                XDMAC_CUBC), ==, 0);
+    qtest_quit(qts);
+}
+
 static void test_flexcom_spi_xdmac_requests_and_mode_gating(void)
 {
     const uint32_t tx_source = SAM9X7_DDR_BASE + 0xf1a0;
@@ -25795,6 +25965,10 @@ int main(int argc, char **argv)
                    test_flexcom_spi_migration);
     qtest_add_func("sam9x75/flexcom-spi/xdmac-and-mode-gating",
                    test_flexcom_spi_xdmac_requests_and_mode_gating);
+    qtest_add_func("sam9x75/flexcom-spi/fifo-concurrent-xdmac",
+                   test_flexcom_spi_fifo_concurrent_xdmac);
+    qtest_add_func("sam9x75/flexcom-spi/fifo-pio-wdrbt",
+                   test_flexcom_spi_fifo_pio_wdrbt);
     qtest_add_func("sam9x75/flexcom-twi/registers-nack-and-protection",
                    test_flexcom_twi_registers_nack_and_protection);
     qtest_add_func("sam9x75/flexcom-twi/eeprom-fifo-and-access-width",

@@ -1007,7 +1007,13 @@ static void at91_xdmac_request(void *opaque, int n, int level)
     uint64_t mask = BIT_ULL(n);
     unsigned int i;
 
-    if (level && (s->request_level & mask)) {
+    /*
+     * A hardware request is a level.  Only a rising edge while a channel
+     * bound to this line still has an accepted chunk outstanding is a
+     * request overflow; driving an already-high line high again is not a
+     * new request and must not be reported as one.
+     */
+    if (level && !(s->request_level & mask)) {
         for (i = 0; i < ARRAY_SIZE(s->channel); i++) {
             AT91XDMACChannel *ch = &s->channel[i];
 

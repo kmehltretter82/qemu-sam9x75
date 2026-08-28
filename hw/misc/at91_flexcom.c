@@ -63,8 +63,21 @@ static void at91_flexcom_update_dma(AT91FlexcomState *s)
     default:
         break;
     }
-    qemu_set_irq(s->tx_request, tx);
-    qemu_set_irq(s->rx_request, rx);
+    /*
+     * The request lines are levels shared by all three personalities.  Only
+     * a change may reach the XDMAC: re-driving an already-high line when the
+     * other direction changes looked like a second request while the first
+     * was still pending, which the XDMAC reported as a request overflow and
+     * Linux then aborted the transfer.
+     */
+    if (tx != s->tx_request_out) {
+        s->tx_request_out = tx;
+        qemu_set_irq(s->tx_request, tx);
+    }
+    if (rx != s->rx_request_out) {
+        s->rx_request_out = rx;
+        qemu_set_irq(s->rx_request, rx);
+    }
 }
 
 static void at91_flexcom_update_mode(AT91FlexcomState *s)
@@ -239,18 +252,25 @@ static void at91_flexcom_reset(DeviceState *dev)
     s->spi_rx_request_level = false;
     s->twi_tx_request_level = false;
     s->twi_rx_request_level = false;
+    s->tx_request_out = false;
+    s->rx_request_out = false;
     at91_flexcom_update_mode(s);
 }
 
 static int at91_flexcom_post_load(void *opaque, int version_id)
 {
-    at91_flexcom_update_mode(AT91_FLEXCOM(opaque));
+    AT91FlexcomState *s = AT91_FLEXCOM(opaque);
+
+    /* Re-drive the request lines from the migrated personality levels. */
+    s->tx_request_out = false;
+    s->rx_request_out = false;
+    at91_flexcom_update_mode(s);
     return 0;
 }
 
 static const VMStateDescription at91_flexcom_vmstate = {
     .name = TYPE_AT91_FLEXCOM,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .post_load = at91_flexcom_post_load,
     .fields = (const VMStateField[]) {
@@ -265,6 +285,8 @@ static const VMStateDescription at91_flexcom_vmstate = {
         VMSTATE_BOOL_V(spi_rx_request_level, AT91FlexcomState, 3),
         VMSTATE_BOOL_V(twi_tx_request_level, AT91FlexcomState, 3),
         VMSTATE_BOOL_V(twi_rx_request_level, AT91FlexcomState, 3),
+        VMSTATE_BOOL_V(tx_request_out, AT91FlexcomState, 4),
+        VMSTATE_BOOL_V(rx_request_out, AT91FlexcomState, 4),
         VMSTATE_END_OF_LIST()
     },
 };

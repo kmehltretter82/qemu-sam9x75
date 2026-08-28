@@ -46,6 +46,9 @@ struct AT91FlexcomState {
     bool spi_rx_request_level;
     bool twi_tx_request_level;
     bool twi_rx_request_level;
+    /* Levels last driven onto the XDMAC request lines. */
+    bool tx_request_out;
+    bool rx_request_out;
 };
 
 void at91_flexcom_set_children(AT91FlexcomState *s, AT91USARTState *usart,
