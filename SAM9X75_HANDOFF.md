@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `fcf594706b`
+- Latest tested repository checkpoint: `936d31a9e3`
+  (`hw/net/cadence_gem: Count statistics by wire length`)
+- Preceding implementation checkpoint: `fcf594706b`
   (`hw/arm/sam9x75: Fix two faults the mmc_spi Linux gate exposed`)
 - Preceding implementation checkpoint: `f8891de72a`
   (`hw/arm/sam9x75: Apply two SAM9X75 silicon measurements`)
@@ -380,6 +382,17 @@ that workstation.
   restart-ms recovery worked.  QEMU stored 256 and read 0xff; fixed at
   `f8891de72a`.  `can1` stayed ERROR-ACTIVE with no interrupts and is inconclusive
   without a pinmux -- do not quote it.
+- **GEM statistics.** Three findings were checked against the model.  The
+  address classification already matched silicon: broadcast increments only
+  the broadcast counter, so the "I/G bit set means multicast" double-count
+  never existed here.  Per-queue counters being live across q0/q1/q4 is
+  consistent with the modeled queues.  The octet finding was a real bug,
+  fixed at `936d31a9e3`: the model counted transmit frames without the FCS the MAC
+  appends, and counted receive frames with it only when `FCS_REMOVE` was
+  clear, which confuses "the application wants the FCS" with "the FCS was on
+  the wire".  Statistics now count the wire length, which also moves a
+  64-octet buffer into the 65--127 bucket where silicon puts it.  The fix is
+  in the shared Cadence GEM, so the Xilinx boards get it too.
 - **QSPI and NAND on the tested unit**: JEDEC identity read all ones with no
   MTD device, and no NAND device was found with the shipped device tree.
   Check J10 and J9 (and NAND enablement in that DTB) before treating the
@@ -842,7 +855,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 249/249 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 250/250 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two of
 five unfiltered full Curiosity runs on 2026-08-28 aborted while starting the
 eighth test (`rom/cpu-reset-entry`) with no message; the same sequence passes

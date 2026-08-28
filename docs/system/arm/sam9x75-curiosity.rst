@@ -602,6 +602,14 @@ Support matrix
        internally consistent for the latter.  Complete PHY reset-value
        fidelity, checksum corner cases, filtering and functional PTP/TSN and
        EEE low-power-idle behavior remain.
+       The MAC statistics count the wire length, so the four-octet FCS is
+       included whether or not ``FCS_REMOVE`` keeps it out of the receive
+       buffer, and the size buckets follow that length: a 64-octet buffer is
+       a 68-octet frame in the 65--127 bucket.  A broadcast increments only
+       the broadcast counter, never also the multicast one.  Both were
+       confirmed against a Curiosity board, and the octet behavior corrected
+       a model that omitted the FCS on transmit and on FCS-stripped
+       receive.
    * - USB host and device
      - Initial
      - UHPHS exposes the documented 1 MiB OHCI and EHCI windows, three
