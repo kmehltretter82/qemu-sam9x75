@@ -409,6 +409,7 @@ struct AT91UHPHSEHCIState {
 void at91_uhphs_ehci_record_dma_error(AT91UHPHSEHCIState *s,
                                       uint64_t addr);
 void ehci_clock_update(EHCIState *s);
+void ehci_init_schedule_state(EHCIState *s);
 void ehci_clock_post_load(EHCIState *s);
 
 struct SysBusEHCIClass {

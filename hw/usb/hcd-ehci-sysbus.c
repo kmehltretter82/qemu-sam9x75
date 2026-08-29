@@ -59,6 +59,7 @@ static void usb_ehci_sysbus_realize(DeviceState *dev, Error **errp)
         return;
     }
     sysbus_init_irq(d, &s->irq);
+    ehci_init_schedule_state(s);
     ehci_clock_update(s);
 }
 

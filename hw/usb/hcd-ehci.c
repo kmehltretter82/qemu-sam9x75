@@ -441,6 +441,18 @@ void ehci_clock_update(EHCIState *s)
     }
 }
 
+/*
+ * The schedule states are only valid once the controller has been reset,
+ * but a clock input can be evaluated as soon as it is realized.  Give them
+ * their idle value up front so that an evaluation before the first reset
+ * does not read them as "a schedule is running" and start one.
+ */
+void ehci_init_schedule_state(EHCIState *s)
+{
+    s->astate = EST_INACTIVE;
+    s->pstate = EST_INACTIVE;
+}
+
 void ehci_clock_post_load(EHCIState *s)
 {
     bool enabled = ehci_clocked(s);
