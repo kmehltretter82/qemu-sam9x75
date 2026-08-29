@@ -694,6 +694,31 @@ the old path and expect no hits before launching.  And the release
 directories under `t/` are now `chmod -R a-w`, so a mistake like this one
 fails loudly instead of silently overwriting the evidence.
 
+## Suspend and resume work in a guest, 2026-08-29
+
+The gates have carried `atmel.pm_modes=standby,ulp0` on the kernel command
+line for weeks without anything ever suspending, so it was never known
+whether the machine could.  It can, in both modes.
+
+Linux reports `AT91: PM: standby: standby, suspend: ulp0` and offers
+`freeze standby mem`.  `rtcwake -m standby -s 5` suspends and is woken by
+the RTC, reaching `PM: suspend exit`; `rtcwake -m mem -s 5` takes the
+deeper path, logging `PM: suspend entry (deep)` before the same clean exit,
+with `random: crng reseeded on system resumption` on the way back.  QEMU's
+`unimp,guest_errors` log is exactly zero bytes for both.  Evidence:
+`t/linux4microchip-pm-suspend-20260829`, with the standby run kept as
+`console-standby.log`.
+
+That exercises a broad slice never covered before: the AT91 PM driver's
+ULP0 path, PMC clock gating across a suspend, the shutdown controller and
+the RTC as a wake-up source.
+
+It also sharpens the UDPHS blocker.  The SoC-level suspend path is not the
+problem -- the machine suspends and resumes cleanly.  What is missing is
+specifically the USB-side notification: QEMU's USB core has no
+device-visible port-suspend hook, so a gadget cannot be told the bus went
+quiet.  The blocker is that one interface, not power management in general.
+
 ## Registers that are stored but do nothing, 2026-08-29
 
 Every SSC gap closed today had the same shape: a register the guest could
