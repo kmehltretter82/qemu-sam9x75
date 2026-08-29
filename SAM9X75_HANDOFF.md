@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `2b8d35c9b8`
+- Latest tested repository checkpoint: `59c7c9ade8`
+  (`tests/qtest/sam9x75: Cover SSC migration`)
+- Preceding implementation checkpoint: `2b8d35c9b8`
   (`hw/timer/at91_tcb: Add quadrature speed measurement`)
 - Preceding implementation checkpoint: `02407e0694`
   (`hw/timer/at91_tcb: Add the quadrature index input`)
@@ -1157,7 +1159,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 268/268 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 270/270 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two
 full Curiosity runs on 2026-08-28 aborted at QEMU startup; that was host
 memory pressure, not a model fault, and the rule it implies is below.

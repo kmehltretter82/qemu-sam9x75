@@ -788,8 +788,9 @@ Support matrix
        that records the refused offset, reset and migration.  Loop mode ties
        TD back to RD and is the only path that carries data, and the
        transmit and receive XDMAC requests 38 and 39 follow their status
-       bits.  Frame timing, the sync and compare units and the external
-       TK/TF/RK/RF pins are not modeled.  The unmodified Linux
+       bits, and the configuration, an unread received word and the derived
+       request levels survive migration.  Frame timing, the sync and compare
+       units and the external TK/TF/RK/RF pins are not modeled.  The unmodified Linux
        ``atmel-ssc`` driver binds the device when the node is enabled by an
        overlay, reporting ``Atmel SSC device`` with its mapped aperture and
        interrupt and leaving QEMU's diagnostic log empty; the exact board
