@@ -694,6 +694,47 @@ the old path and expect no hits before launching.  And the release
 directories under `t/` are now `chmod -R a-w`, so a mistake like this one
 fails loudly instead of silently overwriting the evidence.
 
+## Registers that are stored but do nothing, 2026-08-29
+
+Every SSC gap closed today had the same shape: a register the guest could
+write and read back while the model ignored its meaning -- `CMR.DIV`,
+`DATNB`, `RC0R`/`RC1R`, `RCMR.START`.  That is the worst kind of gap,
+because the register reads back correctly and nothing looks wrong.  The
+AT91 models were therefore swept for the same pattern and each hit checked
+by hand.
+
+Confirmed decorative, written and read back with no effect:
+
+| model | register | what it would control |
+| --- | --- | --- |
+| `at91_ssc` | `TCMR` | transmit clock and start selection |
+| `at91_ssc` | `TSHR` | sync data sent during the frame sync |
+| `at91_ospi` | `SCR` | QSPI serial clock, CPOL and CPHA |
+| `at91_ospi` | `SMR`, `SKR` | QSPI scrambling mode and key |
+| `at91_ospi` | `TOUT` | QSPI timeout |
+| `at91_ospi` | `REFRESH` | QSPI refresh interval |
+| `at91_pmc` | `FSMR` | fast startup sources for wake-up |
+| `at91_pmc` | `MCKLIM` | MCK monitoring limits |
+| `at91_pmc` | `WCR` | write-control configuration |
+| `at91_bsc` | `CR.BOOT` | boot sequence selection |
+| `at91_i2smcc` | `THR` | nothing: vestigial beside `tx_holding[]` |
+
+Two of these deserve a note rather than a fix.  The SSC pair needs the
+TF/TK pins the board does not route, so they cannot be exercised at all.
+QSPI scrambling is transparent to a guest by design -- the controller
+scrambles on write and unscrambles on read -- so ignoring it changes only
+the bytes in the backing image, not what the guest sees; it would diverge
+only if a guest wrote with one key and read with another.
+
+The `at91_i2smcc` `THR` entry is not a gap but dead state: the real
+transmit path is `tx_holding[]`, and the scalar is written, migrated and
+never read.  Removing it would need a vmstate bump for no behavioural gain,
+so it is recorded here instead.
+
+The audit script is not kept; it was a heuristic over `s->field`
+assignments and had false positives (`at91_ssc` `THR` is genuinely used).
+Every entry above was confirmed by reading the model.
+
 ## SSC word timing, 2026-08-29
 
 The SSC shipped this morning delivering a transmitted word instantly and
