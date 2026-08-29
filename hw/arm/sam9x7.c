@@ -1181,6 +1181,7 @@ static void sam9x7_init(Object *obj)
                           qdev_get_clock_out(DEVICE(&s->pmc), "pclk[40]"));
 
     object_initialize_child(obj, "i2smcc", &s->i2smcc, TYPE_AT91_I2SMCC);
+    qdev_prop_set_uint32(DEVICE(&s->i2smcc), "version", 0x110);
     qdev_connect_clock_in(DEVICE(&s->i2smcc), "pclk",
                           qdev_get_clock_out(DEVICE(&s->pmc), "pclk[34]"));
     qdev_connect_clock_in(DEVICE(&s->i2smcc), "gclk",

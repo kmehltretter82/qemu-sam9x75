@@ -9455,7 +9455,7 @@ static void test_i2smcc_registers_irq_and_protection(void)
                     0);
     g_assert_cmphex(qtest_readl(qts,
                                SAM9X7_I2SMCC_BASE + I2SMCC_VERSION), ==,
-                    0x100);
+                    0x110);
 
     qtest_writel(qts, SAM9X7_I2SMCC_BASE + I2SMCC_MRA, UINT32_MAX);
     qtest_writel(qts, SAM9X7_I2SMCC_BASE + I2SMCC_MRB, UINT32_MAX);
@@ -21164,6 +21164,11 @@ static void test_silicon_version_registers(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + 0xfc), ==, 0x803);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + 0xfc), ==,
                     0x4107010c);
+    pmc_write_pcr(qts, 34, PMC_PCR_EN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_I2SMCC_BASE + 0xfc), ==, 0x110);
+    /* SDMMC0 was measured and already matched. */
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SDMMC0_BASE + 0xfc), ==,
+                    0x18020000);
 
     qtest_quit(qts);
 }
