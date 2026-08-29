@@ -632,6 +632,31 @@ The raw write and readback is the part that matters for the `hw/sd`
 change, since it drives full data phases through the SPI path that
 exposed the truncation bug in the first place.
 
+## Remaining consumer gates re-run, 2026-08-29
+
+The other two established gates were re-run against `39b460b736`, so all
+four now have a post-rework result rather than only the two most obviously
+affected.  Both runners derive their own run directory, which was confirmed
+by the audit rule below before either was launched, so neither could reach
+the protected release evidence.
+
+`sd-media-change` passes all five validator lines and five zero return
+codes: three insertions and two removals seen by Linux, the payload hash
+preserved across a clean removal and re-insert, an active raw read failing
+on removal and then recovering, and both SDMMC0 and PIOA card-detect
+interrupts advancing.  That is the gate that exercises `hw/sd` around media
+change, which is where today's `data_size` subsection could have gone wrong
+in a way qtests would not show.
+
+`can-socketcan` passes all seven validator lines and seven zero return
+codes, including both isolated host paths, 86 boundary cases sent and 90
+received per controller, zero corruption or queue overflow, and both guest
+controllers ERROR-ACTIVE with advancing interrupts.
+
+Both left QEMU's `unimp,guest_errors` log at exactly zero bytes.  Evidence:
+`t/linux4microchip-sd-media-change-20260829-postrework` and
+`t/linux4microchip-can-socketcan-20260829-postrework`.
+
 ## In-flight migration gate re-run, and evidence lost doing it, 2026-08-29
 
 The whole-machine migration gate was re-run against `2628006691`, because
