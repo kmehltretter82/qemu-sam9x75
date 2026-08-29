@@ -9,6 +9,7 @@
 
 #include "hw/core/sysbus.h"
 #include "hw/core/clock.h"
+#include "hw/core/ptimer.h"
 #include "qom/object.h"
 
 #define TYPE_AT91_SSC "at91-ssc"
@@ -24,6 +25,8 @@ struct AT91SSCState {
     qemu_irq rx_request;
     Clock *pclk;
     Clock *gclk;
+    /* Shifts one word out over its real duration rather than instantly. */
+    ptimer_state *shifter;
 
     uint32_t cmr;
     uint32_t rcmr;

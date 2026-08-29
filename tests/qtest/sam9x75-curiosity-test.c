@@ -21054,6 +21054,23 @@ static void test_qspi_xdmac_request_migration(void)
  * TXRDY and RXRDY.  Frame timing and the external pins are not modeled, so
  * loop mode is the only path that carries data.
  */
+/*
+ * A word now occupies 2 x DIV x DATLEN peripheral clock cycles rather than
+ * arriving instantly, so a transfer has to be waited for.
+ */
+static void ssc_wait_rxrdy(QTestState *qts)
+{
+    unsigned int i;
+
+    for (i = 0; i < 200; i++) {
+        if (qtest_readl(qts, SAM9X7_SSC_BASE + SSC_SR) & SSC_SR_RXRDY) {
+            return;
+        }
+        qtest_clock_step(qts, 100000);
+    }
+    g_assert_not_reached();
+}
+
 static void test_ssc_registers_loopback_and_requests(void)
 {
     const uint64_t base = SAM9X7_SSC_BASE;
@@ -21074,6 +21091,8 @@ static void test_ssc_registers_loopback_and_requests(void)
     qtest_writel(qts, base + SSC_RFMR,
                  SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8));
     qtest_writel(qts, base + SSC_TFMR, SSC_RFMR_DATLEN(8));
+    /* A divider is required: with DIV zero there is no bit clock. */
+    qtest_writel(qts, base + SSC_CMR, 2);
 
     /* Enabling the transmitter makes it ready. */
     qtest_writel(qts, base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
@@ -21085,17 +21104,24 @@ static void test_ssc_registers_loopback_and_requests(void)
 
     /* Loop mode delivers the transmitted word to the receiver. */
     qtest_writel(qts, base + SSC_THR, 0xa5);
-    g_assert_true(qtest_readl(qts, base + SSC_SR) & SSC_SR_RXRDY);
+    ssc_wait_rxrdy(qts);
     g_assert_cmphex(qtest_readl(qts, base + SSC_RHR), ==, 0xa5);
     g_assert_false(qtest_readl(qts, base + SSC_SR) & SSC_SR_RXRDY);
 
     /* Only DATLEN bits are received. */
     qtest_writel(qts, base + SSC_THR, 0x1234);
+    ssc_wait_rxrdy(qts);
     g_assert_cmphex(qtest_readl(qts, base + SSC_RHR), ==, 0x34);
 
     /* A second word before the first is read reports an overrun. */
     qtest_writel(qts, base + SSC_THR, 0x11);
+    ssc_wait_rxrdy(qts);
     qtest_writel(qts, base + SSC_THR, 0x22);
+    /*
+     * Step rather than poll: reading the status register to wait would
+     * clear the very overrun this is checking for.
+     */
+    qtest_clock_step(qts, 1000000);
     value = qtest_readl(qts, base + SSC_SR);
     g_assert_true(value & SSC_SR_OVRUN);
     /* The status read clears it. */
@@ -21108,6 +21134,7 @@ static void test_ssc_registers_loopback_and_requests(void)
     qtest_writel(qts, base + SSC_IER, SSC_SR_RXRDY);
     g_assert_cmphex(qtest_readl(qts, base + SSC_IMR), ==, SSC_SR_RXRDY);
     qtest_writel(qts, base + SSC_THR, 0x5a);
+    ssc_wait_rxrdy(qts);
     g_assert_true(qtest_get_irq(qts, 0));
     qtest_readl(qts, base + SSC_RHR);
     g_assert_false(qtest_get_irq(qts, 0));
@@ -21129,6 +21156,7 @@ static void test_ssc_registers_loopback_and_requests(void)
     /* Disabling the receiver stops delivery; a software reset clears all. */
     qtest_writel(qts, base + SSC_CR, SSC_CR_RXDIS);
     qtest_writel(qts, base + SSC_THR, 0x77);
+    qtest_clock_step(qts, 1000000);
     g_assert_false(qtest_readl(qts, base + SSC_SR) & SSC_SR_RXRDY);
     qtest_writel(qts, base + SSC_CR, SSC_CR_SWRST);
     g_assert_cmphex(qtest_readl(qts, base + SSC_RFMR), ==, 0);
@@ -21219,6 +21247,72 @@ static void test_silicon_version_registers(void)
     qtest_quit(qts);
 }
 
+/*
+ * A word takes 2 x DIV x DATLEN peripheral clock cycles to shift, so a
+ * larger divider takes proportionally longer and DIV zero never shifts at
+ * all.  This is what makes TXRDY and the XDMAC request meaningful rather
+ * than instantaneous.
+ */
+static void test_ssc_word_timing(void)
+{
+    const uint64_t base = SAM9X7_SSC_BASE;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int fast;
+    unsigned int slow;
+    unsigned int i;
+
+    pmc_write_pcr(qts, 28, PMC_PCR_EN);
+    qtest_writel(qts, base + SSC_RFMR, SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8));
+
+    /* With the divider inactive the word is never shifted. */
+    qtest_writel(qts, base + SSC_CMR, 0);
+    qtest_writel(qts, base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
+    qtest_writel(qts, base + SSC_THR, 0x5c);
+    qtest_clock_step(qts, 50000000);
+    g_assert_false(qtest_readl(qts, base + SSC_SR) & SSC_SR_RXRDY);
+    g_assert_false(qtest_readl(qts, base + SSC_SR) & SSC_SR_TXRDY);
+
+    /* A small divider completes quickly. */
+    qtest_writel(qts, base + SSC_CR, SSC_CR_SWRST);
+    qtest_writel(qts, base + SSC_RFMR, SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8));
+    qtest_writel(qts, base + SSC_CMR, 4);
+    qtest_writel(qts, base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
+    qtest_writel(qts, base + SSC_THR, 0x5c);
+    for (fast = 0; fast < 500; fast++) {
+        if (qtest_readl(qts, base + SSC_SR) & SSC_SR_RXRDY) {
+            break;
+        }
+        qtest_clock_step(qts, 2000);
+    }
+    g_assert_cmpuint(fast, <, 500);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_RHR), ==, 0x5c);
+
+    /* A divider sixteen times larger takes visibly longer. */
+    qtest_writel(qts, base + SSC_CMR, 64);
+    qtest_writel(qts, base + SSC_THR, 0x5c);
+    for (slow = 0; slow < 2000; slow++) {
+        if (qtest_readl(qts, base + SSC_SR) & SSC_SR_RXRDY) {
+            break;
+        }
+        qtest_clock_step(qts, 2000);
+    }
+    g_assert_cmpuint(slow, <, 2000);
+    g_assert_cmpuint(slow, >, fast);
+
+    /* The transmitter is busy while a word is in flight. */
+    qtest_writel(qts, base + SSC_THR, 0x77);
+    g_assert_false(qtest_readl(qts, base + SSC_SR) & SSC_SR_TXRDY);
+    for (i = 0; i < 2000; i++) {
+        if (qtest_readl(qts, base + SSC_SR) & SSC_SR_TXRDY) {
+            break;
+        }
+        qtest_clock_step(qts, 2000);
+    }
+    g_assert_cmpuint(i, <, 2000);
+
+    qtest_quit(qts);
+}
+
 static void test_ssc_migration(void)
 {
     const uint64_t base = SAM9X7_SSC_BASE;
@@ -21232,13 +21326,14 @@ static void test_ssc_migration(void)
     pmc_write_pcr(from, 28, PMC_PCR_EN);
     qtest_writel(from, base + SSC_RFMR, SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8));
     qtest_writel(from, base + SSC_TFMR, SSC_RFMR_DATLEN(8));
-    qtest_writel(from, base + SSC_CMR, 0x123);
+    qtest_writel(from, base + SSC_CMR, 0x123);  /* DIV 0x123: a real clock */
     qtest_writel(from, base + SSC_RCMR, 0x5);
     qtest_writel(from, base + SSC_IER, SSC_SR_RXRDY);
     qtest_writel(from, base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
 
     /* Leave a received word unread and write protection engaged. */
     qtest_writel(from, base + SSC_THR, 0x6c);
+    qtest_clock_step(from, 20000000);
     g_assert_true(qtest_readl(from, base + SSC_SR) & SSC_SR_RXRDY);
     qtest_writel(from, base + SSC_WPMR, SSC_WPMR_KEY | 1);
 
@@ -21270,6 +21365,7 @@ static void test_ssc_migration(void)
     /* The destination still moves data. */
     qtest_writel(to, base + SSC_WPMR, SSC_WPMR_KEY);
     qtest_writel(to, base + SSC_THR, 0x39);
+    qtest_clock_step(to, 20000000);
     g_assert_cmphex(qtest_readl(to, base + SSC_RHR), ==, 0x39);
 
     qtest_quit(to);
@@ -21293,8 +21389,10 @@ static void test_ssc_migration_request_level(void)
 
     pmc_write_pcr(from, 28, PMC_PCR_EN);
     qtest_writel(from, base + SSC_RFMR, SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8));
+    qtest_writel(from, base + SSC_CMR, 2);
     qtest_writel(from, base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
     qtest_writel(from, base + SSC_THR, 0x77);
+    qtest_clock_step(from, 1000000);
 
     qtest_irq_intercept_out_named(to, path, "rx-request");
     g_assert_false(qtest_get_irq(to, 0));
@@ -21335,9 +21433,13 @@ static void test_ssc_xdmac_requests(void)
     qtest_irq_intercept_out_named(qts, path, "rx-request");
     pmc_write_pcr(qts, 28, PMC_PCR_EN);
     qtest_writel(qts, base + SSC_RFMR, SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8));
+    qtest_writel(qts, base + SSC_CMR, 2);
     qtest_writel(qts, base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
     g_assert_false(qtest_get_irq(qts, 0));
     qtest_writel(qts, base + SSC_THR, 0x3c);
+    /* The request only rises once the word has actually been shifted. */
+    g_assert_false(qtest_get_irq(qts, 0));
+    qtest_clock_step(qts, 1000000);
     g_assert_true(qtest_get_irq(qts, 0));
     g_assert_cmphex(qtest_readl(qts, base + SSC_RHR), ==, 0x3c);
     g_assert_false(qtest_get_irq(qts, 0));
@@ -28270,6 +28372,8 @@ int main(int argc, char **argv)
                    test_silicon_version_registers);
     qtest_add_func("sam9x75/sdcard/sdmmc1-independent-controller",
                    test_sdmmc1_independent_controller);
+    qtest_add_func("sam9x75/ssc/word-timing",
+                   test_ssc_word_timing);
     qtest_add_func("sam9x75/ssc/migration",
                    test_ssc_migration);
     qtest_add_func("sam9x75/ssc/migration-request-level",

@@ -15,6 +15,7 @@
 #include "hw/core/irq.h"
 #include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/ptimer.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 
@@ -101,16 +102,30 @@ static void at91_ssc_update(AT91SSCState *s)
 }
 
 /*
- * Loop mode ties TD back to RD, so a transmitted word is received
- * immediately.  Without it there is no modeled serial partner and the word
- * is simply shifted out.
+ * DS60001813E: the divided clock is the peripheral clock over 2 x DIV, and
+ * DIV 0 leaves the divider inactive.  A word therefore occupies DATLEN bit
+ * periods, which is 2 x DIV x DATLEN peripheral clock cycles.
  */
-static void at91_ssc_transmit(AT91SSCState *s, uint32_t value)
+static uint64_t at91_ssc_word_ticks(const AT91SSCState *s)
+{
+    unsigned int div = s->cmr & SSC_CMR_DIV_MASK;
+
+    if (!div) {
+        return 0;
+    }
+    return 2ULL * div * SSC_RFMR_DATLEN(s->rfmr);
+}
+
+/*
+ * Loop mode ties TD back to RD, so a word shifted out is received.  Without
+ * it there is no modeled serial partner and the word is simply shifted out.
+ */
+static void at91_ssc_complete_word(AT91SSCState *s)
 {
     unsigned int bits = SSC_RFMR_DATLEN(s->rfmr);
-    uint32_t data = value & MAKE_64BIT_MASK(0, bits);
+    uint32_t data = s->thr & MAKE_64BIT_MASK(0, bits);
 
-    s->thr = value;
+    s->thr_full = false;
     if (!(s->rfmr & SSC_RFMR_LOOP) || !s->rx_enabled) {
         return;
     }
@@ -121,8 +136,46 @@ static void at91_ssc_transmit(AT91SSCState *s, uint32_t value)
     s->rhr_full = true;
 }
 
+static void at91_ssc_shift_done(void *opaque)
+{
+    AT91SSCState *s = opaque;
+
+    at91_ssc_complete_word(s);
+    at91_ssc_update(s);
+}
+
+static void at91_ssc_transmit(AT91SSCState *s, uint32_t value)
+{
+    uint64_t ticks = at91_ssc_word_ticks(s);
+
+    s->thr = value;
+    if (!s->tx_enabled) {
+        return;
+    }
+    if (!ticks) {
+        /*
+         * With the divider inactive there is no bit clock, so the word is
+         * held in the holding register and never shifted -- which is what
+         * the hardware does, and why a driver must program CMR.
+         */
+        s->thr_full = true;
+        return;
+    }
+    s->thr_full = true;
+    ptimer_transaction_begin(s->shifter);
+    ptimer_stop(s->shifter);
+    ptimer_set_limit(s->shifter, ticks, 1);
+    ptimer_run(s->shifter, 1);
+    ptimer_transaction_commit(s->shifter);
+}
+
 static void at91_ssc_soft_reset(AT91SSCState *s)
 {
+    if (s->shifter) {
+        ptimer_transaction_begin(s->shifter);
+        ptimer_stop(s->shifter);
+        ptimer_transaction_commit(s->shifter);
+    }
     s->cmr = 0;
     s->rcmr = 0;
     s->rfmr = 0;
@@ -311,7 +364,14 @@ static const MemoryRegionOps at91_ssc_ops = {
 
 static void at91_ssc_clock_changed(void *opaque, ClockEvent event)
 {
-    at91_ssc_update(AT91_SSC(opaque));
+    AT91SSCState *s = AT91_SSC(opaque);
+
+    if (s->shifter && clock_is_enabled(s->pclk)) {
+        ptimer_transaction_begin(s->shifter);
+        ptimer_set_period_from_clock(s->shifter, s->pclk, 1);
+        ptimer_transaction_commit(s->shifter);
+    }
+    at91_ssc_update(s);
 }
 
 static void at91_ssc_reset_hold(Object *obj, ResetType type)
@@ -362,6 +422,7 @@ static const VMStateDescription at91_ssc_vmstate = {
         VMSTATE_BOOL(tx_enabled, AT91SSCState),
         VMSTATE_BOOL(thr_full, AT91SSCState),
         VMSTATE_BOOL(rhr_full, AT91SSCState),
+        VMSTATE_PTIMER(shifter, AT91SSCState),
         VMSTATE_CLOCK(pclk, AT91SSCState),
         VMSTATE_CLOCK(gclk, AT91SSCState),
         VMSTATE_END_OF_LIST()
@@ -380,6 +441,7 @@ static void at91_ssc_init(Object *obj)
     sysbus_init_irq(sbd, &s->irq);
     qdev_init_gpio_out_named(dev, &s->tx_request, "tx-request", 1);
     qdev_init_gpio_out_named(dev, &s->rx_request, "rx-request", 1);
+    s->shifter = ptimer_init(at91_ssc_shift_done, s, PTIMER_POLICY_LEGACY);
     s->pclk = qdev_init_clock_in(dev, "pclk", at91_ssc_clock_changed, s,
                                  ClockUpdate);
     s->gclk = qdev_init_clock_in(dev, "gclk", at91_ssc_clock_changed, s,
