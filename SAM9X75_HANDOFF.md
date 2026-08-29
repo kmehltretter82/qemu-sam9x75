@@ -718,9 +718,17 @@ the test was about to assert.  Worth stating as a rule rather than an
 anecdote: **never poll a read-to-clear register for a condition it
 clears**; step the clock and read once.
 
-What remains unmodeled in the SSC is narrower again: the compare units, the
-frame sync *output* shape (`FSOS`, `FSLEN`, `FSEDGE`) and the external
-TK/TF/RK/RF pins.
+The receive compare units followed at `053a62e417`: `RC0R` and `RC1R` were stored
+and never used, so `CP0` and `CP1` could not be set.  They now match the
+low `FSLEN + 1` bits of each received word.  That is an approximation worth
+stating rather than hiding -- the hardware compares a continuous bit
+stream, and this model works a word at a time, so the two agree exactly
+while the pattern is no wider than a word, which is how the start
+conditions use it.
+
+What remains unmodeled in the SSC: the frame sync *output* shape (`FSOS`,
+`FSEDGE`), the external TK/TF/RK/RF pins, and using a compare as a receive
+*start* condition rather than only reporting it.
 
 ## Migration with those four peripherals active, 2026-08-29
 
@@ -1383,7 +1391,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 274/274 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 275/275 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two
 full Curiosity runs on 2026-08-28 aborted at QEMU startup; that was host
 memory pressure, not a model fault, and the rule it implies is below.
