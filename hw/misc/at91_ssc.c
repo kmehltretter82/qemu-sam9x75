@@ -61,6 +61,10 @@ enum {
 #define SSC_RFMR_DATLEN(v)  (((v) & 0x1f) + 1)
 /* DATNB gives the words per frame, which is DATNB + 1. */
 #define SSC_FMR_DATNB(v)    ((((v) >> 8) & 0xf) + 1)
+/* FSLEN gives the comparison pattern length, which is FSLEN + 1 bits. */
+#define SSC_FMR_FSLEN(v)    ((((v) >> 16) & 0xf) + 1)
+#define SSC_SR_CP0          BIT(8)
+#define SSC_SR_CP1          BIT(9)
 
 #define SSC_WPMR_WPEN       BIT(0)
 #define SSC_WPMR_KEY        0x53534300  /* "SSC" */
@@ -135,6 +139,27 @@ static void at91_ssc_advance_frame(uint8_t *word, unsigned int per_frame,
     }
 }
 
+/*
+ * DS60001813E 56.8.6.1: the compare patterns are FSLEN + 1 bits wide and
+ * are matched against the last bits received.  This model works a word at
+ * a time rather than sampling a continuous bit stream, so the comparison
+ * is against the low FSLEN + 1 bits of each received word; that is exact
+ * when the pattern is no wider than a word, which is how the start
+ * conditions use it.
+ */
+static void at91_ssc_compare(AT91SSCState *s, uint32_t data)
+{
+    unsigned int bits = SSC_FMR_FSLEN(s->rfmr);
+    uint32_t mask = MAKE_64BIT_MASK(0, bits);
+
+    if ((data & mask) == (s->rc0r & mask)) {
+        s->status |= SSC_SR_CP0;
+    }
+    if ((data & mask) == (s->rc1r & mask)) {
+        s->status |= SSC_SR_CP1;
+    }
+}
+
 static void at91_ssc_complete_word(AT91SSCState *s)
 {
     unsigned int bits = SSC_RFMR_DATLEN(s->rfmr);
@@ -153,6 +178,7 @@ static void at91_ssc_complete_word(AT91SSCState *s)
     s->rhr_full = true;
     at91_ssc_advance_frame(&s->rx_frame_word, SSC_FMR_DATNB(s->rfmr),
                            &s->status, SSC_SR_RXSYN);
+    at91_ssc_compare(s, data);
 }
 
 static void at91_ssc_shift_done(void *opaque)
@@ -268,7 +294,8 @@ static uint64_t at91_ssc_read(void *opaque, hwaddr offset, unsigned int size)
     case SSC_SR:
         value = s->status;
         /* OVRUN and the sync reports are cleared by this read. */
-        s->status &= ~(SSC_SR_OVRUN | SSC_SR_TXSYN | SSC_SR_RXSYN);
+        s->status &= ~(SSC_SR_OVRUN | SSC_SR_TXSYN | SSC_SR_RXSYN |
+                       SSC_SR_CP0 | SSC_SR_CP1);
         at91_ssc_update(s);
         return value;
     case SSC_IMR:

@@ -1759,6 +1759,7 @@
 #define SSC_RHR                 0x20
 #define SSC_THR                 0x24
 #define SSC_RC0R                0x38
+#define SSC_RC1R                0x3c
 #define SSC_SR                  0x40
 #define SSC_IER                 0x44
 #define SSC_IDR                 0x48
@@ -1779,6 +1780,9 @@
 #define SSC_RFMR_LOOP           BIT(5)
 #define SSC_RFMR_DATLEN(n)      ((n) - 1)
 #define SSC_FMR_DATNB(n)        ((uint32_t)((n) - 1) << 8)
+#define SSC_SR_CP0              BIT(8)
+#define SSC_SR_CP1              BIT(9)
+#define SSC_FMR_FSLEN(n)        ((uint32_t)((n) - 1) << 16)
 #define SSC_SR_TXSYN            BIT(10)
 #define SSC_SR_RXSYN            BIT(11)
 #define SSC_WPMR_KEY            0x53534300
@@ -21389,6 +21393,62 @@ static void test_ssc_frame_sync(void)
     qtest_quit(qts);
 }
 
+/*
+ * The receive compare units match the low FSLEN + 1 bits of a received
+ * word against RC0R and RC1R, reporting CP0 and CP1.  Like the sync bits
+ * these are cleared by a status read, so this test steps the clock rather
+ * than polling.
+ */
+static void test_ssc_receive_compare(void)
+{
+    const uint64_t base = SAM9X7_SSC_BASE;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t status;
+
+    pmc_write_pcr(qts, 28, PMC_PCR_EN);
+    /* Compare on the low four bits. */
+    qtest_writel(qts, base + SSC_RFMR,
+                 SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8) | SSC_FMR_FSLEN(4));
+    qtest_writel(qts, base + SSC_TFMR, SSC_RFMR_DATLEN(8));
+    qtest_writel(qts, base + SSC_CMR, 2);
+    qtest_writel(qts, base + SSC_RC0R, 0x5);
+    qtest_writel(qts, base + SSC_RC1R, 0xa);
+    qtest_writel(qts, base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
+    qtest_readl(qts, base + SSC_SR);
+
+    /* A word whose low four bits are 5 matches compare 0 only. */
+    qtest_writel(qts, base + SSC_THR, 0x35);
+    qtest_clock_step(qts, 2000000);
+    status = qtest_readl(qts, base + SSC_SR);
+    g_assert_cmphex(status & (SSC_SR_CP0 | SSC_SR_CP1), ==, SSC_SR_CP0);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_RHR), ==, 0x35);
+
+    /* The status read cleared it. */
+    g_assert_cmphex(qtest_readl(qts, base + SSC_SR) & SSC_SR_CP0, ==, 0);
+
+    /* Low four bits of a matches compare 1 only. */
+    qtest_writel(qts, base + SSC_THR, 0x7a);
+    qtest_clock_step(qts, 2000000);
+    status = qtest_readl(qts, base + SSC_SR);
+    g_assert_cmphex(status & (SSC_SR_CP0 | SSC_SR_CP1), ==, SSC_SR_CP1);
+    qtest_readl(qts, base + SSC_RHR);
+
+    /* Bits above the pattern length are not compared. */
+    qtest_writel(qts, base + SSC_THR, 0xf5);
+    qtest_clock_step(qts, 2000000);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_SR) & SSC_SR_CP0, ==,
+                    SSC_SR_CP0);
+    qtest_readl(qts, base + SSC_RHR);
+
+    /* A word matching neither reports neither. */
+    qtest_writel(qts, base + SSC_THR, 0x33);
+    qtest_clock_step(qts, 2000000);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_SR) &
+                    (SSC_SR_CP0 | SSC_SR_CP1), ==, 0);
+
+    qtest_quit(qts);
+}
+
 static void test_ssc_migration(void)
 {
     const uint64_t base = SAM9X7_SSC_BASE;
@@ -28452,6 +28512,8 @@ int main(int argc, char **argv)
                    test_ssc_word_timing);
     qtest_add_func("sam9x75/ssc/frame-sync",
                    test_ssc_frame_sync);
+    qtest_add_func("sam9x75/ssc/receive-compare",
+                   test_ssc_receive_compare);
     qtest_add_func("sam9x75/ssc/migration",
                    test_ssc_migration);
     qtest_add_func("sam9x75/ssc/migration-request-level",
