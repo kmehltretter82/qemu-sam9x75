@@ -65,6 +65,11 @@ enum {
 #define SSC_FMR_FSLEN(v)    ((((v) >> 16) & 0xf) + 1)
 #define SSC_SR_CP0          BIT(8)
 #define SSC_SR_CP1          BIT(9)
+/* RCMR: a compare 0 can start the receiver, and STOP picks what ends it. */
+#define SSC_RCMR_START_SHIFT    8
+#define SSC_RCMR_START_MASK     0xf
+#define SSC_RCMR_START_CMP0     8
+#define SSC_RCMR_STOP           BIT(12)
 
 #define SSC_WPMR_WPEN       BIT(0)
 #define SSC_WPMR_KEY        0x53534300  /* "SSC" */
@@ -147,17 +152,27 @@ static void at91_ssc_advance_frame(uint8_t *word, unsigned int per_frame,
  * when the pattern is no wider than a word, which is how the start
  * conditions use it.
  */
-static void at91_ssc_compare(AT91SSCState *s, uint32_t data)
+static bool at91_ssc_compare(AT91SSCState *s, uint32_t data)
 {
     unsigned int bits = SSC_FMR_FSLEN(s->rfmr);
     uint32_t mask = MAKE_64BIT_MASK(0, bits);
+    bool cmp0 = (data & mask) == (s->rc0r & mask);
+    bool cmp1 = (data & mask) == (s->rc1r & mask);
 
-    if ((data & mask) == (s->rc0r & mask)) {
+    if (cmp0) {
         s->status |= SSC_SR_CP0;
     }
-    if ((data & mask) == (s->rc1r & mask)) {
+    if (cmp1) {
         s->status |= SSC_SR_CP1;
     }
+    return cmp0;
+}
+
+/* True when START selects a compare 0 as the receive start condition. */
+static bool at91_ssc_cmp_start(const AT91SSCState *s)
+{
+    return ((s->rcmr >> SSC_RCMR_START_SHIFT) & SSC_RCMR_START_MASK) ==
+           SSC_RCMR_START_CMP0;
 }
 
 static void at91_ssc_complete_word(AT91SSCState *s)
@@ -174,11 +189,32 @@ static void at91_ssc_complete_word(AT91SSCState *s)
     if (s->rhr_full) {
         s->status |= SSC_SR_OVRUN;
     }
+    /*
+     * With a compare start condition the receiver ignores everything until
+     * a word matches compare 0.  That word is the delimiter, so it starts
+     * the receiver but is not itself stored.  STOP then decides what ends
+     * the transfer: clear, each data word returns the receiver to waiting;
+     * set, it runs on until a compare 1.
+     */
+    if (at91_ssc_cmp_start(s) && !s->rx_started) {
+        if (at91_ssc_compare(s, data)) {
+            s->rx_started = true;
+        }
+        return;
+    }
+
     s->rhr = data;
     s->rhr_full = true;
     at91_ssc_advance_frame(&s->rx_frame_word, SSC_FMR_DATNB(s->rfmr),
                            &s->status, SSC_SR_RXSYN);
     at91_ssc_compare(s, data);
+    if (at91_ssc_cmp_start(s)) {
+        if (!(s->rcmr & SSC_RCMR_STOP)) {
+            s->rx_started = false;
+        } else if (s->status & SSC_SR_CP1) {
+            s->rx_started = false;
+        }
+    }
 }
 
 static void at91_ssc_shift_done(void *opaque)
@@ -240,6 +276,7 @@ static void at91_ssc_soft_reset(AT91SSCState *s)
     s->rhr_full = false;
     s->tx_frame_word = 0;
     s->rx_frame_word = 0;
+    s->rx_started = false;
 }
 
 static bool at91_ssc_write_protected(AT91SSCState *s, hwaddr offset)
@@ -472,6 +509,7 @@ static const VMStateDescription at91_ssc_vmstate = {
         VMSTATE_BOOL(rhr_full, AT91SSCState),
         VMSTATE_UINT8(tx_frame_word, AT91SSCState),
         VMSTATE_UINT8(rx_frame_word, AT91SSCState),
+        VMSTATE_BOOL(rx_started, AT91SSCState),
         VMSTATE_PTIMER(shifter, AT91SSCState),
         VMSTATE_CLOCK(pclk, AT91SSCState),
         VMSTATE_CLOCK(gclk, AT91SSCState),

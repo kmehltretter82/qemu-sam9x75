@@ -51,6 +51,8 @@ struct AT91SSCState {
     /* Word position within the current frame, per DATNB. */
     uint8_t tx_frame_word;
     uint8_t rx_frame_word;
+    /* With a compare start condition, whether the receiver has started. */
+    bool rx_started;
     bool tx_request_level;
     bool rx_request_level;
 };

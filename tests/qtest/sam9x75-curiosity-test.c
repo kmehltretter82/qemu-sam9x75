@@ -1780,6 +1780,8 @@
 #define SSC_RFMR_LOOP           BIT(5)
 #define SSC_RFMR_DATLEN(n)      ((n) - 1)
 #define SSC_FMR_DATNB(n)        ((uint32_t)((n) - 1) << 8)
+#define SSC_RCMR_START_CMP0     (8U << 8)
+#define SSC_RCMR_STOP           BIT(12)
 #define SSC_SR_CP0              BIT(8)
 #define SSC_SR_CP1              BIT(9)
 #define SSC_FMR_FSLEN(n)        ((uint32_t)((n) - 1) << 16)
@@ -21449,6 +21451,72 @@ static void test_ssc_receive_compare(void)
     qtest_quit(qts);
 }
 
+/*
+ * A compare 0 can be the receive start condition.  Until a word matches
+ * RC0R the receiver stores nothing; the matching word is the delimiter and
+ * is not itself stored.  STOP then chooses what ends the transfer.
+ */
+static void test_ssc_compare_start(void)
+{
+    const uint64_t base = SAM9X7_SSC_BASE;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    pmc_write_pcr(qts, 28, PMC_PCR_EN);
+    qtest_writel(qts, base + SSC_RFMR,
+                 SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8) | SSC_FMR_FSLEN(8));
+    qtest_writel(qts, base + SSC_TFMR, SSC_RFMR_DATLEN(8));
+    qtest_writel(qts, base + SSC_CMR, 2);
+    qtest_writel(qts, base + SSC_RC0R, 0x7e);
+    qtest_writel(qts, base + SSC_RC1R, 0x7f);
+    /* Start on compare 0, and run on until compare 1. */
+    qtest_writel(qts, base + SSC_RCMR, SSC_RCMR_START_CMP0 | SSC_RCMR_STOP);
+    qtest_writel(qts, base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
+    qtest_readl(qts, base + SSC_SR);
+
+    /* Before the delimiter, nothing is received. */
+    qtest_writel(qts, base + SSC_THR, 0x11);
+    qtest_clock_step(qts, 2000000);
+    g_assert_false(qtest_readl(qts, base + SSC_SR) & SSC_SR_RXRDY);
+
+    /* The delimiter starts the receiver but is not stored. */
+    qtest_writel(qts, base + SSC_THR, 0x7e);
+    qtest_clock_step(qts, 2000000);
+    g_assert_false(qtest_readl(qts, base + SSC_SR) & SSC_SR_RXRDY);
+
+    /* Data after it is received. */
+    qtest_writel(qts, base + SSC_THR, 0x22);
+    qtest_clock_step(qts, 2000000);
+    g_assert_true(qtest_readl(qts, base + SSC_SR) & SSC_SR_RXRDY);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_RHR), ==, 0x22);
+
+    /* With STOP set it keeps receiving. */
+    qtest_writel(qts, base + SSC_THR, 0x23);
+    qtest_clock_step(qts, 2000000);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_RHR), ==, 0x23);
+
+    /* A compare 1 ends the transfer, so the next word is ignored again. */
+    qtest_writel(qts, base + SSC_THR, 0x7f);
+    qtest_clock_step(qts, 2000000);
+    qtest_readl(qts, base + SSC_RHR);
+    qtest_readl(qts, base + SSC_SR);
+    qtest_writel(qts, base + SSC_THR, 0x24);
+    qtest_clock_step(qts, 2000000);
+    g_assert_false(qtest_readl(qts, base + SSC_SR) & SSC_SR_RXRDY);
+
+    /* Continuous start receives everything, with no delimiter needed. */
+    qtest_writel(qts, base + SSC_CR, SSC_CR_SWRST);
+    qtest_writel(qts, base + SSC_RFMR,
+                 SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8) | SSC_FMR_FSLEN(8));
+    qtest_writel(qts, base + SSC_TFMR, SSC_RFMR_DATLEN(8));
+    qtest_writel(qts, base + SSC_CMR, 2);
+    qtest_writel(qts, base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
+    qtest_writel(qts, base + SSC_THR, 0x31);
+    qtest_clock_step(qts, 2000000);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_RHR), ==, 0x31);
+
+    qtest_quit(qts);
+}
+
 static void test_ssc_migration(void)
 {
     const uint64_t base = SAM9X7_SSC_BASE;
@@ -28514,6 +28582,8 @@ int main(int argc, char **argv)
                    test_ssc_frame_sync);
     qtest_add_func("sam9x75/ssc/receive-compare",
                    test_ssc_receive_compare);
+    qtest_add_func("sam9x75/ssc/compare-start",
+                   test_ssc_compare_start);
     qtest_add_func("sam9x75/ssc/migration",
                    test_ssc_migration);
     qtest_add_func("sam9x75/ssc/migration-request-level",
