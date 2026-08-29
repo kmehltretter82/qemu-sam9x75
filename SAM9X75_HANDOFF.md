@@ -694,6 +694,38 @@ the old path and expect no hits before launching.  And the release
 directories under `t/` are now `chmod -R a-w`, so a mistake like this one
 fails loudly instead of silently overwriting the evidence.
 
+## Full ARM qtest suite, and a regression it found, 2026-08-29
+
+Only this board's own suites had been run against the tree.  Running the
+whole `qtest-arm` suite for the first time found that **this project had
+broken every other sysbus EHCI board**, fixed at `9f72ab8c96`.
+
+The AT91 UHPHS work made sysbus EHCI evaluate its clock inputs at realize,
+so a controller gated at boot does not run.  `ehci_clock_update()` ends by
+re-arming the schedule if one looks active, testing `astate` and `pstate` --
+but those are only given their idle value by `ehci_reset()`, which has not
+run at realize.  Zero-initialized they read 0 while `EST_INACTIVE` is 1000,
+so the test was always true, the async bottom half was scheduled before
+reset, and `ehci_advance_async_state()` hit its `g_assert_not_reached()`.
+QEMU aborted during machine creation.
+
+The AT91 board was the one that could not see it: its clocks are gated at
+realize, so it takes the early return and never reaches the re-arm.
+`palmetto-bmc` aborted at startup, taking `aspeed_smc-test` with it, which
+is how it surfaced.  Fixing it takes that suite from an abort to 58 passes.
+
+Two failures remain in that suite and are **not** ours:
+`device-introspect-test` and `qom-test` abort in `object_finalize` on
+`ast2700-a1`, because this build has no aarch64 target and so no
+`cortex-a35-arm-cpu`; the SoC's failed child init is then finalized while
+still parented.  That is an upstream QOM cleanup bug reachable from any
+32-bit-only ARM build, and it reproduces with no SAM9X75 device involved.
+
+The lesson is worth keeping: this project edits generic files -- `hw/sd`,
+`hw/usb/hcd-ehci`, `hw/net/cadence_gem`, `hw/sd/sdhci` -- so the board's own
+suites are not enough.  Run `meson test --suite qtest` after touching
+anything outside `hw/arm/sam9x7*` and the AT91 devices.
+
 ## Immediate continuation order
 
 Do these steps before starting another device model or another operating
