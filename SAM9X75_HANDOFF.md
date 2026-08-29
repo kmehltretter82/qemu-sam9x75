@@ -710,9 +710,17 @@ of them had to stop polling the status register while waiting, because that
 read clears the overrun flag the test was about to check -- a read-to-clear
 register cannot be used as a poll for a condition it clears.
 
-What remains unmodeled in the SSC is now narrower: the frame sync and
-compare units, the external TK/TF/RK/RF pins, and `DATNB` multi-word
-framing.
+`DATNB` framing followed at `7b8c0d3d23`: a frame carries DATNB + 1 words and
+`TXSYN`/`RXSYN` report a frame boundary, cleared by a status read.  Its
+test hit the read-to-clear trap a second time -- the polling helper written
+an hour earlier reads the status register, so it discarded the sync bits
+the test was about to assert.  Worth stating as a rule rather than an
+anecdote: **never poll a read-to-clear register for a condition it
+clears**; step the clock and read once.
+
+What remains unmodeled in the SSC is narrower again: the compare units, the
+frame sync *output* shape (`FSOS`, `FSLEN`, `FSEDGE`) and the external
+TK/TF/RK/RF pins.
 
 ## Migration with those four peripherals active, 2026-08-29
 
@@ -1375,7 +1383,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 273/273 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 274/274 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two
 full Curiosity runs on 2026-08-28 aborted at QEMU startup; that was host
 memory pressure, not a model fault, and the rule it implies is below.

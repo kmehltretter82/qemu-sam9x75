@@ -792,9 +792,10 @@ Support matrix
        request levels survive migration.  A word is shifted over its real
        duration of ``2 x DIV x DATLEN`` peripheral clock cycles rather than
        instantly, so ``TXRDY`` is meaningful and a ``DIV`` of zero never
-       shifts at all.  The frame sync and compare units and the external
-       TK/TF/RK/RF pins are not modeled, and neither is ``DATNB``
-       multi-word framing.  The unmodified Linux
+       shifts at all.  ``DATNB`` sets the words per frame and ``TXSYN`` and
+       ``RXSYN`` report a frame boundary, cleared by a status read.  The
+       compare units, the frame sync *output* shape (``FSOS``, ``FSLEN``,
+       ``FSEDGE``) and the external TK/TF/RK/RF pins are not modeled.  The unmodified Linux
        ``atmel-ssc`` driver binds the device when the node is enabled by an
        overlay, reporting ``Atmel SSC device`` with its mapped aperture and
        interrupt and leaving QEMU's diagnostic log empty; the exact board
