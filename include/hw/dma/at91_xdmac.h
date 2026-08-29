@@ -89,6 +89,8 @@ struct AT91XDMACState {
     uint32_t sw_requests;
     uint64_t request_level;
     AT91XDMACFifoMigrationState fifo_migration[AT91_XDMAC_NUM_CHANNELS];
+    /* "xdmac ch<N>" labels for -d dma_coherency reports */
+    char dmacc_label[AT91_XDMAC_NUM_CHANNELS][24];
     AT91XDMACChannel channel[AT91_XDMAC_NUM_CHANNELS];
 };
 

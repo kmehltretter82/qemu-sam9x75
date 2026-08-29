@@ -512,6 +512,9 @@ const QEMULogItem qemu_log_items[] = {
       "show CPU state before CPU resets" },
     { LOG_UNIMP, "unimp",
       "log unimplemented functionality" },
+    { LOG_DMA_COHERENCY, "dma_coherency",
+      "check device DMA against the guest's cache-maintenance ops\n"
+      "(reports drivers that skip a dma_sync before/after DMA)" },
     { LOG_GUEST_ERROR, "guest_errors",
       "log when the guest OS does something invalid (eg accessing a\n"
       "non-existent register)" },

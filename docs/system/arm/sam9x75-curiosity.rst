@@ -1146,6 +1146,29 @@ as the interactive character backend with::
 
   qemu-system-arm -M sam9x75-curiosity -serial null -serial stdio
 
+DMA coherency checking
+----------------------
+
+QEMU has no cache model, so a Linux driver that omits a ``dma_sync_*()``
+call cannot fail here the way it fails on the non-coherent ARM926.  The
+``-d dma_coherency`` log category enforces the DMA ownership protocol
+instead: it records the guest's CP15 cache-maintenance operations and every
+device DMA into RAM, and reports a device write to a line the CPU has not
+invalidated since it last used it, or a device read of a line the CPU
+modified after its last clean.  It is deliberately stricter than silicon,
+flagging the protocol violation rather than the eventual data corruption::
+
+  qemu-system-arm -M sam9x75-curiosity ... -d dma_coherency -D dmacc.log
+
+Lines the CPU never maintains are treated as coherent (uncacheable) DMA
+memory, such as descriptor rings, and are not checked.  Consecutive bus
+beats of one transfer are judged once.  A summary line is written at exit.
+
+The checker was validated against the ``atmel-tdes`` output bounce-buffer
+regression: a driver without the pre-DMA sync produces a report on every
+reuse of the buffer, and the fixed driver produces none, across otherwise
+identical boots of the Linux4Microchip self-test configuration.
+
 The M_CAN controllers are disconnected from an external CAN network unless a
 CAN bus is supplied.  To place both controllers on one emulated network, use::
 

@@ -12,6 +12,7 @@
 
 #include "system/memory.h"
 #include "system/address-spaces.h"
+#include "hw/misc/dma-coherency.h"
 #include "block/block.h"
 #include "block/accounting.h"
 
@@ -84,6 +85,10 @@ static inline MemTxResult dma_memory_rw_relaxed(AddressSpace *as,
                                                 DMADirection dir,
                                                 MemTxAttrs attrs)
 {
+    if (unlikely(dmacc_enabled())) {
+        dmacc_dma_access(addr, len, dir == DMA_DIRECTION_FROM_DEVICE,
+                         "device");
+    }
     return address_space_rw(as, addr, attrs,
                             buf, len, dir == DMA_DIRECTION_FROM_DEVICE);
 }
