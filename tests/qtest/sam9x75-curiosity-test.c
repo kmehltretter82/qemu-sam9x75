@@ -21137,6 +21137,105 @@ static void test_ssc_registers_loopback_and_requests(void)
     qtest_quit(qts);
 }
 
+/*
+ * The SSC carries configuration, an unread received word, the enable
+ * flags, the interrupt mask and write protection across migration, and
+ * the destination re-drives its XDMAC request from the loaded state
+ * rather than leaving the line stale.
+ */
+static void test_ssc_migration(void)
+{
+    const uint64_t base = SAM9X7_SSC_BASE;
+    QTestState *from;
+    QTestState *to;
+    uint32_t value;
+
+    from = qtest_init(SAM9X75_MACHINE);
+    to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+
+    pmc_write_pcr(from, 28, PMC_PCR_EN);
+    qtest_writel(from, base + SSC_RFMR, SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8));
+    qtest_writel(from, base + SSC_TFMR, SSC_RFMR_DATLEN(8));
+    qtest_writel(from, base + SSC_CMR, 0x123);
+    qtest_writel(from, base + SSC_RCMR, 0x5);
+    qtest_writel(from, base + SSC_IER, SSC_SR_RXRDY);
+    qtest_writel(from, base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
+
+    /* Leave a received word unread and write protection engaged. */
+    qtest_writel(from, base + SSC_THR, 0x6c);
+    g_assert_true(qtest_readl(from, base + SSC_SR) & SSC_SR_RXRDY);
+    qtest_writel(from, base + SSC_WPMR, SSC_WPMR_KEY | 1);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    /* Configuration and status survive. */
+    g_assert_cmphex(qtest_readl(to, base + SSC_CMR), ==, 0x123);
+    g_assert_cmphex(qtest_readl(to, base + SSC_RCMR), ==, 0x5);
+    g_assert_cmphex(qtest_readl(to, base + SSC_RFMR), ==,
+                    SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8));
+    g_assert_cmphex(qtest_readl(to, base + SSC_IMR), ==, SSC_SR_RXRDY);
+    value = qtest_readl(to, base + SSC_SR);
+    g_assert_cmphex(value & (SSC_SR_TXEN | SSC_SR_RXEN), ==,
+                    SSC_SR_TXEN | SSC_SR_RXEN);
+    g_assert_true(value & SSC_SR_RXRDY);
+
+    /* The unread word is still there, once. */
+    g_assert_cmphex(qtest_readl(to, base + SSC_RHR), ==, 0x6c);
+    g_assert_false(qtest_readl(to, base + SSC_SR) & SSC_SR_RXRDY);
+
+    /* Write protection survives, and the offending offset is recorded. */
+    qtest_writel(to, base + SSC_RCMR, 0xdeadbeef);
+    g_assert_cmphex(qtest_readl(to, base + SSC_RCMR), ==, 0x5);
+    g_assert_cmphex(qtest_readl(to, base + SSC_WPSR) & 1, ==, 1);
+
+    /* The destination still moves data. */
+    qtest_writel(to, base + SSC_WPMR, SSC_WPMR_KEY);
+    qtest_writel(to, base + SSC_THR, 0x39);
+    g_assert_cmphex(qtest_readl(to, base + SSC_RHR), ==, 0x39);
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
+/*
+ * A request line asserted on the source must be asserted on the
+ * destination too: the level is derived state, so it is re-driven after
+ * load rather than migrated.
+ */
+static void test_ssc_migration_request_level(void)
+{
+    const uint64_t base = SAM9X7_SSC_BASE;
+    const char *path = "/machine/soc/ssc";
+    QTestState *from;
+    QTestState *to;
+
+    from = qtest_init(SAM9X75_MACHINE);
+    to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+
+    pmc_write_pcr(from, 28, PMC_PCR_EN);
+    qtest_writel(from, base + SSC_RFMR, SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8));
+    qtest_writel(from, base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
+    qtest_writel(from, base + SSC_THR, 0x77);
+
+    qtest_irq_intercept_out_named(to, path, "rx-request");
+    g_assert_false(qtest_get_irq(to, 0));
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_true(qtest_get_irq(to, 0));
+    g_assert_cmphex(qtest_readl(to, base + SSC_RHR), ==, 0x77);
+    g_assert_false(qtest_get_irq(to, 0));
+
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
 static void test_ssc_xdmac_requests(void)
 {
     const uint64_t base = SAM9X7_SSC_BASE;
@@ -28091,6 +28190,10 @@ int main(int argc, char **argv)
                    test_ssc_registers_loopback_and_requests);
     qtest_add_func("sam9x75/ssc/xdmac-requests",
                    test_ssc_xdmac_requests);
+    qtest_add_func("sam9x75/ssc/migration",
+                   test_ssc_migration);
+    qtest_add_func("sam9x75/ssc/migration-request-level",
+                   test_ssc_migration_request_level);
     qtest_add_func("sam9x75/qspi/status-irq-and-edges",
                    test_qspi_status_irq_and_edges);
     qtest_add_func("sam9x75/qspi/xdmac-requests", test_qspi_xdmac_requests);
