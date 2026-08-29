@@ -596,11 +596,20 @@ clocksource or timer failures in `dmesg`, measures a five-second guest
 sleep as six seconds of wall time, and leaves QEMU's `unimp,guest_errors`
 log exactly empty.  Evidence: `t/linux4microchip-tcb-rework-boot-20260829`.
 
-Read that for what it is.  Linux selects `pit64b`, which outranks the TCB,
-so this shows the TCB clocksource registering and being readable rather
-than being the timebase under load.  Making the TCB the active clocksource
-would need the `pit64b` node disabled in an overlay, which is worth doing
-if the counting core is touched again.
+That first boot only showed the TCB clocksource registering, because Linux
+selects `pit64b`, which outranks it.  A second boot closes that gap: with
+both `pit64b` nodes patched to `status = "disabled"` in a DTB copy
+(`/apb/timer@f0028000` and `/apb/timer@f0040000`), Linux reports
+`Switched to clocksource timer@f8008000`, `current_clocksource` is the TCB
+and it is the only entry in `available_clocksource`, `sched_clock` comes
+from it at 32 bits and 1500 kHz, a five-second guest sleep measures as
+exactly five seconds, `dmesg` counts zero timer failures and the
+diagnostic log is again empty.  Evidence:
+`t/linux4microchip-tcb-clocksource-20260829`.
+
+So the reworked counting core has been exercised as the system timebase,
+not merely probed.  Rerun that second boot, not just the first, if the
+core is touched again.
 
 ## Immediate continuation order
 
