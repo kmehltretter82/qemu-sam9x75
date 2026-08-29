@@ -17,7 +17,9 @@ this file current whenever a new checkpoint is committed.
   (`hw/char: Pace AT91 USART receive characters`)
 - Preceding generic QEMU fix: `569ca3a66d`
   (`chardev: Avoid unregistering yank after failed reconnect`)
-- Latest tested repository checkpoint: `e1c545f5e4`
+- Latest tested repository checkpoint: `02407e0694`
+  (`hw/timer/at91_tcb: Add the quadrature index input`)
+- Preceding implementation checkpoint: `e1c545f5e4`
   (`hw/timer/at91_tcb: Add the quadrature decoder`)
 - Preceding implementation checkpoint: `76011576d9`
   (`hw/timer/at91_tcb: Accept XC0-XC2 as external event sources`)
@@ -607,8 +609,9 @@ silicon-confirmed.  Do these steps next.
    including UPDOWN, and XC edge clocking with the `BMR` cross-connect, and
    every XDMAC request has a source.
    QDEC landed at `e1c545f5e4`, which was the last TCB gap on the list.  What is
-   left in that model is narrow and was never on it: SPEEDEN speed
-   measurement and the index input, which count rotations on channel 1.
+   left in that model is narrow and was never on it: `SPEEDEN` speed
+   measurement, whose time base is channel 2.  The index input landed at
+   `02407e0694`; channel 1 counts revolutions.
    `QERR` is deliberately absent -- it needs both phases to move at once,
    and phase inputs arrive one GPIO event at a time, so a branch for it
    would be untestable dead code.  The XC external-event sources are

@@ -762,7 +762,10 @@ Support matrix
        position counter, ``EDGPHA`` selecting one or both phases.  ``QERR``
        is never reported: it marks both phases moving at once, which cannot
        be observed because phase inputs arrive one GPIO event at a time.
-       Speed measurement and the index input remain.  The SAM9X7 ADC is
+       The index arrives on TIOB1, or on PHB with ``IDXPHB``, and channel 1
+       accumulates it so that channel counts revolutions while channel 0
+       counts position.  ``SPEEDEN`` speed measurement, whose time base is
+       channel 2, remains.  The SAM9X7 ADC is
        mapped at ``0xf804c000`` with its eight physical inputs, PID/AIC source
        19, peripheral and generic clocks, and XDMAC receive request 40.  It
        models numeric and programmable channel sequences, software, external,
