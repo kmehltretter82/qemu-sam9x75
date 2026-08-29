@@ -915,8 +915,8 @@ Support matrix
        XDMAC request wiring; write protection; and migration state.  NIST and
        IEEE vectors cover chaining, GCM AAD/tag generation, the Linux GCM
        mode transition and paired XDMAC transfers.  The unmodified Linux
-       driver probes version 0x700 and acquires both DMA channels.  The
-       version value requires hardware confirmation; processing timing,
+       driver probes the version register, which reports the 0x606 measured
+       on silicon, and acquires both DMA channels.  Processing timing,
        double buffering, auto-padding, the AES/SHA protocol path, private-key
        bus and security-event behavior remain incomplete.  TRNG provides
        guest-random 32-bit values after the clocked 84/168-cycle interval,
@@ -931,8 +931,8 @@ Support matrix
        request 34, write protection, security-access reports and migration.
        Known-answer coverage includes every hash width, RFC HMAC-SHA256,
        software and automatic padding, both check modes, timing and multi-block
-       DMA.  The Linux4Microchip driver probes version 0x700 and acquires its
-       DMA channel.  Its generic-request state restoration must clear stale
+       DMA.  The Linux4Microchip driver probes the version register, which
+       reports the 0x604 measured on silicon, and acquires its DMA channel.  Its generic-request state restoration must clear stale
        automatic-padding ``MSR``/``BCR`` state after interleaved HMAC requests;
        the patched driver passed the complete concurrent AF_ALG release gate.
        SHA double-buffer performance, Always-On dummy processing, exact check
@@ -944,8 +944,9 @@ Support matrix
        AIC source 40; XDMAC requests 31/30; write protection, security-access
        reports and migration.  Known-answer tests cover encryption and
        decryption for every algorithm and mode, exact DES/TDES completion
-       timing, paired DMA and TX-only CBC-MAC.  The Linux driver probes version
-       0x700 and acquires both DMA channels, but its upstream
+       timing, paired DMA and TX-only CBC-MAC.  The Linux driver probes the
+       version register, which reports the 0x803 measured on silicon, and
+       acquires both DMA channels, but its upstream
        ``devm_kmalloc()`` device-state allocation can inherit a false busy bit
        and queue every request forever.  With the allocation corrected to
        ``devm_kzalloc()``, the Linux4Microchip driver passed the concurrent
