@@ -1161,15 +1161,22 @@ static void sam9x7_init(Object *obj)
     qdev_connect_clock_in(DEVICE(&s->adc), "gclk",
                           qdev_get_clock_out(DEVICE(&s->pmc), "gclk[19]"));
 
+    /*
+     * Version registers measured on SAM9X75 Curiosity silicon; the models
+     * default to a generic value that no part actually reports.
+     */
     object_initialize_child(obj, "aes", &s->aes, TYPE_AT91_AES);
+    qdev_prop_set_uint32(DEVICE(&s->aes), "version", 0x606);
     qdev_connect_clock_in(DEVICE(&s->aes), "pclk",
                           qdev_get_clock_out(DEVICE(&s->pmc), "pclk[39]"));
 
     object_initialize_child(obj, "sha", &s->sha, TYPE_AT91_SHA);
+    qdev_prop_set_uint32(DEVICE(&s->sha), "version", 0x604);
     qdev_connect_clock_in(DEVICE(&s->sha), "pclk",
                           qdev_get_clock_out(DEVICE(&s->pmc), "pclk[41]"));
 
     object_initialize_child(obj, "tdes", &s->tdes, TYPE_AT91_TDES);
+    qdev_prop_set_uint32(DEVICE(&s->tdes), "version", 0x803);
     qdev_connect_clock_in(DEVICE(&s->tdes), "pclk",
                           qdev_get_clock_out(DEVICE(&s->pmc), "pclk[40]"));
 
@@ -1229,6 +1236,8 @@ static void sam9x7_init(Object *obj)
                           qdev_get_clock_out(DEVICE(&s->pmc), "gclk[35]"));
 
     object_initialize_child(obj, "gmac", &s->gmac, TYPE_CADENCE_GEM);
+    /* Module ID measured on silicon; the model default is the Zynq value. */
+    qdev_prop_set_uint32(DEVICE(&s->gmac), "revision", 0x4107010c);
     qdev_prop_set_uint8(DEVICE(&s->gmac), "phy-addr", 1);
     qdev_prop_set_uint32(DEVICE(&s->gmac), "phy-id", 0x00221650);
     qdev_prop_set_uint8(DEVICE(&s->gmac), "num-priority-queues",

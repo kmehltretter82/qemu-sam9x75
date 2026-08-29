@@ -5606,8 +5606,9 @@ static void test_gem_registers_mdio_dma_and_irqs(void)
     g_assert_true(qtest_qom_get_bool(qts, "/machine", "ethernet-25mhz"));
     g_assert_true(qtest_qom_get_bool(qts, "/machine/soc/gmac",
                                      "phy-clocked"));
+    /* Module ID as measured on silicon, not the shared model's default. */
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_MODID), ==,
-                    0x00020118);
+                    0x4107010c);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_DESCONF6) &
                     (BIT(23) | 0x7f), ==, BIT(23) | 0x3e);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_SPADDR1LO), ==,
@@ -11565,7 +11566,7 @@ static void test_aes_registers_ecb_irq_and_protection(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_AES_BASE + AES_MR), ==,
                     0x00080000);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_AES_BASE + AES_VERSION), ==,
-                    0x700);
+                    0x606);
     pmc_write_pcr(qts, 39, PMC_PCR_EN);
     aic_configure(qts, 39, AIC_SMR_LEVEL_HIGH | 3, 0x39393939);
 
@@ -12071,7 +12072,7 @@ static void test_tdes_vectors_timing_irq_and_protection(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_ISR), ==, 0);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_WPMR), ==, 0);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + TDES_VERSION), ==,
-                    0x700);
+                    0x803);
 
     aic_configure(qts, 40, AIC_SMR_LEVEL_HIGH | 3, 0x40404040);
     tdes_configure(qts, TDES_MR_SMOD_AUTO | TDES_MR_CIPHER,
@@ -12569,7 +12570,7 @@ static void test_sha_vectors_timing_irq_and_protection(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_MR), ==, 0x100);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_IMR), ==, 0);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_VERSION), ==,
-                    0x700);
+                    0x604);
 
     pmc_write_pcr(qts, 41, PMC_PCR_EN);
     aic_configure(qts, 41, AIC_SMR_LEVEL_HIGH | 3, 0x41414141);
@@ -21143,6 +21144,30 @@ static void test_ssc_registers_loopback_and_requests(void)
  * the destination re-drives its XDMAC request from the loaded state
  * rather than leaving the line stale.
  */
+/*
+ * Version and module-ID registers as measured on SAM9X75 Curiosity
+ * silicon.  The AT91 crypto models and the shared Cadence GEM all default
+ * to values no SAM9X7 part reports, so the SoC sets the measured ones and
+ * this pins them: a driver that gates on the IP revision must see what the
+ * hardware would give it.
+ */
+static void test_silicon_version_registers(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    pmc_write_pcr(qts, 39, PMC_PCR_EN);
+    pmc_write_pcr(qts, 41, PMC_PCR_EN);
+    pmc_write_pcr(qts, 40, PMC_PCR_EN);
+
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_AES_BASE + 0xfc), ==, 0x606);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + 0xfc), ==, 0x604);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + 0xfc), ==, 0x803);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + 0xfc), ==,
+                    0x4107010c);
+
+    qtest_quit(qts);
+}
+
 static void test_ssc_migration(void)
 {
     const uint64_t base = SAM9X7_SSC_BASE;
@@ -28190,6 +28215,8 @@ int main(int argc, char **argv)
                    test_ssc_registers_loopback_and_requests);
     qtest_add_func("sam9x75/ssc/xdmac-requests",
                    test_ssc_xdmac_requests);
+    qtest_add_func("sam9x75/silicon-version-registers",
+                   test_silicon_version_registers);
     qtest_add_func("sam9x75/ssc/migration",
                    test_ssc_migration);
     qtest_add_func("sam9x75/ssc/migration-request-level",
