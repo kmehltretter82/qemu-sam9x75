@@ -705,14 +705,21 @@ Confirmed against silicon and already corrected: AES `0x606`, SHA `0x604`,
 TDES `0x803`, GEM module ID `0x4107010c`, and the earlier Atmel SPI
 `0x410`.
 
-Still the model's own guess, worth one `devmem2` read each:
+That sweep was answered on the board:
 
-| peripheral | address | QEMU reports |
-| --- | --- | --- |
-| I2SMCC | `0xf001c0fc` | `0x00000100` |
-| OTPC | `0xeff000fc` | `0x00000202` |
-| SDMMC0 | `0x800000fc` | `0x18020000` |
-| SDMMC1 | `0x900000fc` | `0x18020000` |
+| peripheral | QEMU had | silicon | outcome |
+| --- | --- | --- | --- |
+| SDMMC0 | `0x18020000` | `0x18020000` | already correct, now pinned |
+| I2SMCC | `0x00000100` | `0x00000110` | diverged, corrected |
+| SDMMC1 | `0x18020000` | -- | disabled in the device tree |
+| OTPC | `0x00000202` | -- | no device-tree node, and safety-gated |
+
+Two of the four could not be read and stay unverified rather than being
+recorded as confirmed.  Worth keeping from how the readable two were taken:
+both peripherals had to be *runtime-clocked* first, because an ungated read
+returns zeros across the whole aperture, not just the version word -- the
+same trap as the earlier SPI probe.  A zero reading is therefore evidence
+about the clock, never about the register.
 
 Two entries the sweep found are not version registers and need nothing:
 `QSPI_MEM` and `UHPHS_OHCI` read `0xffffffff` because nothing is mapped at
