@@ -768,8 +768,12 @@ Support matrix
        internally to channel 0's TIOA so each period latches the accumulated
        edges into RA and RB and clears the counter; the decoder still reads
        PHA from the pin, which is a different signal from the channel input
-       in that mode.  ``QERR``, the digital filter and its ``MAXFILT`` width,
-       and the badly-located-index detection are not modeled.  The SAM9X7 ADC is
+       in that mode.  ``QERR`` and the digital
+       filter are not modeled: filtering a pulse means deciding only once it
+       has ended, so it needs the phase edges delayed by the ``MAXFILT``
+       width, and ``MAXFILT`` is therefore stored but inert.  The
+       badly-located-index detection built on that filter is not a gap here,
+       because the SAM9X7 ``TC_BMR`` has no ``BIDXCE`` bit to enable it.  The SAM9X7 ADC is
        mapped at ``0xf804c000`` with its eight physical inputs, PID/AIC source
        19, peripheral and generic clocks, and XDMAC receive request 40.  It
        models numeric and programmable channel sequences, software, external,

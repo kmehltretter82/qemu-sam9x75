@@ -613,10 +613,18 @@ silicon-confirmed.  Do these steps next.
    QDEC landed at `e1c545f5e4`, which was the last TCB gap on the list.  What is
    the index input at `02407e0694` and speed measurement at `2b8d35c9b8` finished
    that list.  What the TCB still lacks is narrower again and none of it was
-   ever on the plan: the digital filter and its `MAXFILT` width, the
-   badly-located-index detection built on it, and `QERR` -- which cannot be
-   modeled at all, since it needs both phases to move at once and phase
-   inputs arrive one GPIO event at a time.
+   ever on the plan: the digital filter, whose `MAXFILT` width is stored
+   but inert, and `QERR`.  Neither is a small omission to fill in later.
+   Filtering means deciding a pulse is noise only once it has ended, so it
+   needs every phase edge delayed by `MAXFILT + 1` peripheral clock cycles
+   -- a timer per phase line that changes the timing of every quadrature
+   edge, for a feature no driver in the exact kernel uses and that no
+   hardware here can validate.  `QERR` cannot be modeled at all: it needs
+   both phases to move at once and phase inputs arrive one GPIO event at a
+   time.  The badly-located-index detection those two would support is not
+   a gap: the SAM9X7 `TC_BMR` has no `BIDXCE` bit, so the part cannot enable
+   it -- the datasheet describes it in generic QDEC text that this variant's
+   register layout does not carry.
    `QERR` is deliberately absent -- it needs both phases to move at once,
    and phase inputs arrive one GPIO event at a time, so a branch for it
    would be untestable dead code.  The XC external-event sources are
