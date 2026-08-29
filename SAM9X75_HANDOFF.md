@@ -694,6 +694,28 @@ the old path and expect no hits before launching.  And the release
 directories under `t/` are now `chmod -R a-w`, so a mistake like this one
 fails loudly instead of silently overwriting the evidence.
 
+## Four peripherals at once under load, 2026-08-29
+
+Every guest check so far enabled exactly one disabled node at a time, so
+nothing had ever exercised these peripherals *together* -- and they share
+the XDMAC, the PMC clock tree and the AIC, which is where interaction bugs
+live.
+
+One overlay therefore enables the GEM, the I2S, the SSC and SDMMC1 at once,
+with a second SD card attached and the network up.  All four probe in the
+same boot: `Atmel SSC device`, `Cadence GEM rev 0x4107010c`, `mmc1: SDHCI
+controller on 90000000.mmc using ADMA` and `mchp_i2s_mcc hw version:
+0x110`.  Concurrent load then runs 4 MiB of urandom to the second card,
+4 MiB to the root filesystem and repeated hashing while the link comes up,
+which it does: `Link is Up - 100Mbps/Full`.  QEMU's `unimp,guest_errors`
+log is exactly zero bytes across the whole run.  Evidence:
+`t/linux4microchip-multi-peripheral-20260829`.
+
+One detail worth knowing before comparing logs: the Linux virq numbers
+differ between this boot and the single-node ones -- the GEM shows irq 29
+here against 28 alone -- because virqs are allocated in probe order, not
+fixed to the AIC source.  Comparing them across boots proves nothing.
+
 ## Which peripherals a stock guest never touches, 2026-08-29
 
 Every node needed for a peripheral gate today shipped `status =
