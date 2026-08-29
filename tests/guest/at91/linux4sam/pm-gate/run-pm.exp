@@ -1,0 +1,35 @@
+#!/usr/bin/expect -f
+set root "/home/karl/linux-work/qemu-SAM9X75"
+set run [file dirname [file normalize [info script]]]
+log_user 1
+log_file -noappend "$run/console.log"
+proc await {p s} { global timeout; set timeout $s
+    expect { -re $p {return 0} timeout {puts stderr "TIMEOUT $p"; exit 124} eof {puts stderr "EOF $p"; exit 125} } }
+spawn env TMPDIR=$run/tmp $root/qemu/build-verify-serial/qemu-system-arm \
+    -M sam9x75-curiosity \
+    -kernel $root/t/linux4microchip-ehci-fix-build-20260827/arch/arm/boot/zImage \
+    -dtb $root/t/linux4microchip-2026.04-base.dtb \
+    -append {console=ttyS0,115200 root=/dev/mmcblk0p2 rw rootfstype=ext4 rootwait cma=64m atmel.pm_modes=standby,ulp0 init=/bin/sh loglevel=7} \
+    -drive file=$root/t/linux4sam-stress-e2e-20260826/linux4microchip-2026.04-stress-overlay.qcow2,if=sd,format=qcow2,snapshot=on \
+    -display none -monitor none -serial stdio \
+    -d unimp,guest_errors -D "$run/qemu.log"
+await {sh-5.2# } 300
+send -- "stty -echo\r"
+await {sh-5.2# } 10
+send -- "mount -t proc proc /proc; mount -t sysfs sysfs /sys; echo PM_STATES=\$(cat /sys/power/state); echo SETUP_DONE\r"
+await {SETUP_DONE} 30
+# Data must survive both suspends, so seed a checksum first.
+send -- "dd if=/dev/urandom of=/root/pm.bin bs=64k count=8 2>/dev/null; sync; echo PM_SHA_BEFORE=\$(sha256sum /root/pm.bin | cut -c1-32); echo SEED_DONE\r"
+await {SEED_DONE} 120
+send -- "rtcwake -m standby -s 5 >/dev/null 2>&1; echo PM_STANDBY_RC=\$?; echo STANDBY_DONE\r"
+await {STANDBY_DONE} 180
+send -- "rtcwake -m mem -s 5 >/dev/null 2>&1; echo PM_MEM_RC=\$?; echo MEM_DONE\r"
+await {MEM_DONE} 180
+send -- "echo PM_SHA_AFTER=\$(sha256sum /root/pm.bin | cut -c1-32); echo PM_SUSPEND_EXITS=\$(dmesg | grep -c 'PM: suspend exit'); echo PM_DEEP=\$(dmesg | grep -c 'suspend entry (deep)'); echo VERIFY_DONE\r"
+await {VERIFY_DONE} 60
+send -- "echo PM_DMESG_ERRORS=\$(dmesg | grep -icE 'Unhandled|Bad mode|BUG:|Oops'); echo ERRCOUNT_DONE\r"
+await {ERRCOUNT_DONE} 60
+send -- "poweroff -f\r"
+await {reboot: Power down} 120
+expect eof
+exit 0
