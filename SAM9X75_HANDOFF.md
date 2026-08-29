@@ -632,6 +632,41 @@ The raw write and readback is the part that matters for the `hw/sd`
 change, since it drives full data phases through the SPI path that
 exposed the truncation bug in the first place.
 
+## In-flight migration gate re-run, and evidence lost doing it, 2026-08-29
+
+The whole-machine migration gate was re-run against `2628006691`, because
+today added vmstate to three devices: the TCB channel went to version 3 and
+its block state to version 2, the SSC is a new migrated device, and
+`hw/sd` gained a `data_size` subsection.  All six return codes are zero and
+the five validator lines pass: migration completes over QMP during active
+stress with frames outstanding, the source stops and the destination
+resumes before completion, the 10,000-frame bidirectional CAN gate passes
+across the migration, both source and destination `unimp,guest_errors` logs
+are exactly zero bytes and the backing overlay is byte-identical.
+Evidence: `t/linux4microchip-inflight-migration-20260829-postrework`.
+
+**Reference evidence was destroyed getting there, and it is not
+recoverable.**  This gate's runner hard-codes its run directory in *two*
+files, `run-host.sh` and `run-inflight-migration.exp`.  Repointing only the
+first left the expect script spawning QEMU with the old directory's
+`-drive`, `-qmp` and `-D` paths, which overwrote `console.log`,
+`source-qemu.log` and `results.ext4` inside
+`linux4microchip-inflight-migration-20260828/release-r4`.  `t/` is not in
+git, so there was no restore path.
+
+What survived there is the whole of `extracted/`, which is what the
+validator actually reads, plus `validation.txt`, `result.txt`,
+`destination-qemu.log`, `e2fsck.log` and `debugfs.log`.  The five PASS
+lines of that run therefore still stand on their supporting artifacts; the
+raw source console, the source diagnostic log and the results image behind
+those extracts are gone.
+
+Two rules follow.  Relocating a gate means auditing every file in the
+runner set for the run directory, not just the entry script -- `grep -rn`
+the old path and expect no hits before launching.  And the release
+directories under `t/` are now `chmod -R a-w`, so a mistake like this one
+fails loudly instead of silently overwriting the evidence.
+
 ## Immediate continuation order
 
 Do these steps before starting another device model or another operating
