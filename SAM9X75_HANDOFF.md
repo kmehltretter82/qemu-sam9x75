@@ -583,6 +583,25 @@ carries data only in loop mode, and an audio consumer would additionally
 need frame timing and the sync unit.  Evidence:
 `t/linux4microchip-ssc-probe-20260828`.
 
+## TCB rework boot check, 2026-08-29
+
+The TCB counting core was reworked several times in one sitting -- direction
+for UPDOWN, an edge-driven path for XC clocking, then the quadrature
+decoder -- and that core is what Linux's timer driver sits on, so it was
+checked against a real boot and not only qtests.
+
+The exact kernel boots to a shell, registers `timer@f8008000` alongside
+`pit64b` and `jiffies` in `available_clocksource`, counts zero
+clocksource or timer failures in `dmesg`, measures a five-second guest
+sleep as six seconds of wall time, and leaves QEMU's `unimp,guest_errors`
+log exactly empty.  Evidence: `t/linux4microchip-tcb-rework-boot-20260829`.
+
+Read that for what it is.  Linux selects `pit64b`, which outranks the TCB,
+so this shows the TCB clocksource registering and being readable rather
+than being the timebase under load.  Making the TCB the active clocksource
+would need the `pit64b` node disabled in an overlay, which is worth doing
+if the counting core is touched again.
+
 ## Immediate continuation order
 
 Do these steps before starting another device model or another operating
