@@ -21151,6 +21151,52 @@ static void test_ssc_registers_loopback_and_requests(void)
  * this pins them: a driver that gates on the IP revision must see what the
  * hardware would give it.
  */
+/*
+ * SDMMC1 is a second, independent controller on AIC source 26.  The device
+ * tree ships its node disabled, so no guest probes it by default and it had
+ * almost no coverage; this pins that it is really there and really separate
+ * from SDMMC0 rather than an alias of it.
+ */
+static void test_sdmmc1_independent_controller(void)
+{
+    const uint64_t s0 = SAM9X7_SDMMC0_BASE;
+    const uint64_t s1 = SAM9X7_SDMMC1_BASE;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t caps0;
+    uint32_t caps1;
+
+    /* Both controllers exist and report capabilities. */
+    caps0 = qtest_readl(qts, s0 + 0x40);
+    caps1 = qtest_readl(qts, s1 + 0x40);
+    g_assert_cmpuint(caps0, !=, 0);
+    g_assert_cmpuint(caps1, !=, 0);
+
+    /* The version word is the same silicon value on both slots. */
+    g_assert_cmphex(qtest_readl(qts, s0 + 0xfc), ==, 0x18020000);
+    g_assert_cmphex(qtest_readl(qts, s1 + 0xfc), ==, 0x18020000);
+
+    /* Writing one controller must not disturb the other. */
+    qtest_writel(qts, s1 + SDHCI_ARGUMENT, 0xa5a5a5a5);
+    qtest_writew(qts, s1 + SDHCI_BLKSIZE, 0x200);
+    g_assert_cmphex(qtest_readl(qts, s1 + SDHCI_ARGUMENT), ==, 0xa5a5a5a5);
+    g_assert_cmphex(qtest_readw(qts, s1 + SDHCI_BLKSIZE), ==, 0x200);
+    g_assert_cmphex(qtest_readl(qts, s0 + SDHCI_ARGUMENT), ==, 0);
+    g_assert_cmphex(qtest_readw(qts, s0 + SDHCI_BLKSIZE), ==, 0);
+
+    /* A software reset clears only the controller it is issued to. */
+    qtest_writel(qts, s0 + SDHCI_ARGUMENT, 0x5a5a5a5a);
+    qtest_writeb(qts, s1 + SDHCI_SWRST, 0x01);
+    g_assert_cmphex(qtest_readl(qts, s0 + SDHCI_ARGUMENT), ==, 0x5a5a5a5a);
+
+    /*
+     * Card presence differs: the board wires a card-detect GPIO to SDMMC0
+     * only, and this machine is started with no card on either slot.
+     */
+    g_assert_false(qtest_readl(qts, s1 + SDHCI_PRNSTS) & BIT(16));
+
+    qtest_quit(qts);
+}
+
 static void test_silicon_version_registers(void)
 {
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
@@ -28222,6 +28268,8 @@ int main(int argc, char **argv)
                    test_ssc_xdmac_requests);
     qtest_add_func("sam9x75/silicon-version-registers",
                    test_silicon_version_registers);
+    qtest_add_func("sam9x75/sdcard/sdmmc1-independent-controller",
+                   test_sdmmc1_independent_controller);
     qtest_add_func("sam9x75/ssc/migration",
                    test_ssc_migration);
     qtest_add_func("sam9x75/ssc/migration-request-level",
