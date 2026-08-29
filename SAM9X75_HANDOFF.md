@@ -694,6 +694,25 @@ the old path and expect no hits before launching.  And the release
 directories under `t/` are now `chmod -R a-w`, so a mistake like this one
 fails loudly instead of silently overwriting the evidence.
 
+## Silicon version registers corrected, 2026-08-29
+
+Hardware reads reported from the board give AES 0x606, SHA 0x604, TDES
+0x803 and a Cadence GEM module ID of 0x4107010c.  The models reported 0x700
+for all three crypto blocks and the Zynq module ID for the GEM, none of
+which any SAM9X7 part gives.  Corrected at `90ed9b2884`.
+
+The values are set from the SoC through the properties the models already
+had, not by changing the defaults.  `cadence_gem` is shared with the Zynq
+machines and the AT91 crypto models may serve other AT91 parts, so neither
+should inherit this part's identity -- the same reasoning as the earlier
+`SPI_VERSION` 0x410 fix.
+
+Three existing qtest assertions pinned the old defaults.  They were
+recording a model artifact as an expectation, which is worth noticing: a
+test that asserts whatever the model happens to return will pass forever
+and protect nothing.  They now carry the silicon values, and one new test
+pins all four together.
+
 ## Full ARM qtest suite, and a regression it found, 2026-08-29
 
 Only this board's own suites had been run against the tree.  Running the
@@ -1191,7 +1210,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 270/270 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 271/271 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two
 full Curiosity runs on 2026-08-28 aborted at QEMU startup; that was host
 memory pressure, not a model fault, and the rule it implies is below.
