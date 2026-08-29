@@ -729,7 +729,20 @@ driver binds and logs `Cadence GEM rev 0x4107010c at 0xf802c000 irq 28`,
 stays empty.  Evidence: `t/linux4microchip-gem-modid-boot-20260829`.
 
 That check was worth making rather than reasoning alone: a module ID is
-not always inert, and this one feeds a driver branch.  Worth keeping from how the readable two were taken:
+not always inert, and this one feeds a driver branch.
+
+The I2SMCC correction was checked the same way, and the contrast is the
+useful part.  `mchp-i2s-mcc` only *prints* its version -- there is no
+branch on it anywhere in the driver -- so the change could not alter
+behaviour, unlike the GEM.  A boot with `i2s@f001c000` enabled by overlay
+confirms the value reaches the driver intact: `mchp_i2s_mcc f001c000.i2s:
+hw version: 0x110`, the device binds under `mchp_i2s_mcc`, and the
+diagnostic log stays empty.  Evidence:
+`t/linux4microchip-i2s-version-boot-20260829`.
+
+So the rule for the remaining unverified IDs is: read the driver first.  If
+the register feeds a branch, a guest boot is required; if it is only
+logged, the qtest pin is enough and the boot merely confirms plumbing.  Worth keeping from how the readable two were taken:
 both peripherals had to be *runtime-clocked* first, because an ungated read
 returns zeros across the whole aperture, not just the version word -- the
 same trap as the earlier SPI probe.  A zero reading is therefore evidence
