@@ -789,8 +789,12 @@ Support matrix
        TD back to RD and is the only path that carries data, and the
        transmit and receive XDMAC requests 38 and 39 follow their status
        bits, and the configuration, an unread received word and the derived
-       request levels survive migration.  Frame timing, the sync and compare
-       units and the external TK/TF/RK/RF pins are not modeled.  The unmodified Linux
+       request levels survive migration.  A word is shifted over its real
+       duration of ``2 x DIV x DATLEN`` peripheral clock cycles rather than
+       instantly, so ``TXRDY`` is meaningful and a ``DIV`` of zero never
+       shifts at all.  The frame sync and compare units and the external
+       TK/TF/RK/RF pins are not modeled, and neither is ``DATNB``
+       multi-word framing.  The unmodified Linux
        ``atmel-ssc`` driver binds the device when the node is enabled by an
        overlay, reporting ``Atmel SSC device`` with its mapped aperture and
        interrupt and leaving QEMU's diagnostic log empty; the exact board

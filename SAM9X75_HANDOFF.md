@@ -694,6 +694,26 @@ the old path and expect no hits before launching.  And the release
 directories under `t/` are now `chmod -R a-w`, so a mistake like this one
 fails loudly instead of silently overwriting the evidence.
 
+## SSC word timing, 2026-08-29
+
+The SSC shipped this morning delivering a transmitted word instantly and
+storing `CMR.DIV` without using it, which meant `TXRDY` was never false and
+no driver could see a transfer in progress.  Corrected at `e4f827a4b6`: a word is
+shifted over `2 x DIV x DATLEN` peripheral clock cycles by a ptimer clocked
+from pclk, and the timer migrates.  `DIV` zero leaves the divider inactive,
+so the word sits in the holding register and is never shifted, which is
+what the hardware does.
+
+Two things this changed are worth knowing.  The existing tests asserted
+instant delivery and now wait, which is the stricter requirement.  And one
+of them had to stop polling the status register while waiting, because that
+read clears the overrun flag the test was about to check -- a read-to-clear
+register cannot be used as a poll for a condition it clears.
+
+What remains unmodeled in the SSC is now narrower: the frame sync and
+compare units, the external TK/TF/RK/RF pins, and `DATNB` multi-word
+framing.
+
 ## Migration with those four peripherals active, 2026-08-29
 
 The SSC gained vmstate today and was covered only by qtests, so the
@@ -1355,7 +1375,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 272/272 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 273/273 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two
 full Curiosity runs on 2026-08-28 aborted at QEMU startup; that was host
 memory pressure, not a model fault, and the rule it implies is below.
