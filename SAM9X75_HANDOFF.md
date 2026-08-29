@@ -726,9 +726,18 @@ stream, and this model works a word at a time, so the two agree exactly
 while the pattern is no wider than a word, which is how the start
 conditions use it.
 
-What remains unmodeled in the SSC: the frame sync *output* shape (`FSOS`,
-`FSEDGE`), the external TK/TF/RK/RF pins, and using a compare as a receive
-*start* condition rather than only reporting it.
+The compare *start* condition followed at `9d75064e50`.  The model previously
+started receiving as soon as the receiver was enabled whatever `START`
+said, so a driver using a delimiter would have taken the delimiter and
+everything before it as data.  Now nothing is stored until a word matches
+`RC0R`, that delimiter is not itself stored, and `STOP` chooses whether
+each word returns the receiver to waiting or it runs on to a compare 1.
+
+What remains unmodeled in the SSC is only what needs pins the board does
+not route: the frame sync *output* shape (`FSOS`, `FSEDGE`) and the
+external TK/TF/RK/RF signals, including the `START` conditions that trigger
+on RF levels and edges.  Everything a driver can reach through registers
+and loop mode is now modeled.
 
 ## Migration with those four peripherals active, 2026-08-29
 
@@ -1391,7 +1400,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 275/275 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 276/276 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two
 full Curiosity runs on 2026-08-28 aborted at QEMU startup; that was host
 memory pressure, not a model fault, and the rule it implies is below.

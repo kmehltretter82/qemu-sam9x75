@@ -799,8 +799,11 @@ Support matrix
        hardware samples a continuous bit stream instead, so the two agree
        while a pattern is no wider than a word.  The frame sync *output*
        shape (``FSOS``, ``FSEDGE``) and the external TK/TF/RK/RF pins are
-       not modeled, and neither is a compare as a receive *start*
-       condition.  The unmodified Linux
+       not modeled.  ``RCMR.START`` can select a compare 0 as the receive start
+       condition: until a word matches ``RC0R`` nothing is stored, the
+       matching delimiter is not itself stored, and ``STOP`` chooses whether
+       each word returns the receiver to waiting or it runs on to a compare
+       1.  The unmodified Linux
        ``atmel-ssc`` driver binds the device when the node is enabled by an
        overlay, reporting ``Atmel SSC device`` with its mapped aperture and
        interrupt and leaving QEMU's diagnostic log empty; the exact board
