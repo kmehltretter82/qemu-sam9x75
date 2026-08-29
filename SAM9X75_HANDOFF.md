@@ -718,6 +718,14 @@ That also explains why SDMMC1's version register could not be read on the
 board: the node is disabled there too, so reading it needs the same overlay
 on hardware, not just a `devmem2`.
 
+The same gap existed in the qtests, which is the part worth noticing: the
+suite had three references to SDMMC1 against a hundred and thirteen to
+SDMMC0.  A peripheral no guest probes tends to attract no unit coverage
+either, because nothing ever draws attention to it.  Closed at `b479499ba9`, which
+pins that SDMMC1 is a real second controller rather than an alias of the
+first: independent registers, a reset that clears only its own controller,
+and its own card-presence state.
+
 A caution for anyone reading a gate result: "Linux boots clean" says
 nothing about a peripheral whose node is disabled.  The first attempt at
 the GEM boot proved exactly nothing until the missing `eth0` gave it away.
@@ -1302,7 +1310,7 @@ active-stress migration is also green at `fcfbe1ae0e`: QMP migrated with 16
 peer sequences outstanding, the source exited, the destination resumed before
 either role completed, and both roles then passed the exact 10,000-frame
 semantic gate.  Preserve its separate in-flight-migration release-r4 evidence.
-The post-gate regressions pass 271/271 for Curiosity, 42/42 for chardev, 7/7
+The post-gate regressions pass 272/272 for Curiosity, 42/42 for chardev, 7/7
 for LAN8840 EEPROM, 9/9 for ADC and 25/25 for the CAN host fixture.  Two
 full Curiosity runs on 2026-08-28 aborted at QEMU startup; that was host
 memory pressure, not a model fault, and the rule it implies is below.
