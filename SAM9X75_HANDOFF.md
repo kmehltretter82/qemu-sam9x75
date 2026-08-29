@@ -611,6 +611,27 @@ So the reworked counting core has been exercised as the system timebase,
 not merely probed.  Rerun that second boot, not just the first, if the
 core is touched again.
 
+## mmc_spi gate re-run after the model changes, 2026-08-29
+
+Today's work touched things the qtests alone do not settle: `hw/sd` gained
+a migrated `data_size` and a narrower field type, the SoC gained an SSC and
+four newly wired XDMAC lines, and the TCB counting core was reworked three
+times.  The established mmc_spi consumer gate was therefore re-run
+unmodified against `fe5defb597`, using the same runner as the
+`release-r4` evidence it is compared with.
+
+All five return codes are zero and the four validator lines pass: the
+driver reads `SPI_VERSION` 0x410 over the FIFO and XDMAC path, an 8 MiB raw
+write and readback compare identical, FAT32 write plus host `fsck.fat` and
+the extracted manifest verify, no SPI timeout, DMA error or MMC I/O error
+appears, QEMU's `unimp,guest_errors` log is exactly zero bytes and the
+shared rootfs image is byte-identical before and after.  Evidence:
+`t/linux4microchip-mmc-spi-20260829-postrework`.
+
+The raw write and readback is the part that matters for the `hw/sd`
+change, since it drives full data phases through the SPI path that
+exposed the truncation bug in the first place.
+
 ## Immediate continuation order
 
 Do these steps before starting another device model or another operating
