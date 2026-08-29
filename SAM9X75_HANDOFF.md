@@ -715,7 +715,21 @@ That sweep was answered on the board:
 | OTPC | `0x00000202` | -- | no device-tree node, and safety-gated |
 
 Two of the four could not be read and stay unverified rather than being
-recorded as confirmed.  Worth keeping from how the readable two were taken:
+recorded as confirmed.
+
+The GEM module ID was checked in a guest as well as in a qtest, because
+Linux's `macb` driver derives `hw_is_gem()` from that register:
+`MACB_BFEXT(IDNUM, id) >= 2` with `MACB_IDNUM_OFFSET` 16.  Old and new
+values give 0x002 and 0x107, so both clear the threshold and the driver
+path is unchanged -- and the board matches `microchip,sam9x7-gem`, so its
+capabilities come from the device tree rather than the register.  A boot
+with the `ethernet@f802c000` node enabled by overlay confirms it: the
+driver binds and logs `Cadence GEM rev 0x4107010c at 0xf802c000 irq 28`,
+`eth0` appears with driver `macb`, the link comes up and the diagnostic log
+stays empty.  Evidence: `t/linux4microchip-gem-modid-boot-20260829`.
+
+That check was worth making rather than reasoning alone: a module ID is
+not always inert, and this one feeds a driver branch.  Worth keeping from how the readable two were taken:
 both peripherals had to be *runtime-clocked* first, because an ungated read
 returns zeros across the whole aperture, not just the version word -- the
 same trap as the earlier SPI probe.  A zero reading is therefore evidence
