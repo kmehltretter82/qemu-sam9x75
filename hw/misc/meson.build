@@ -1,3 +1,4 @@
+system_ss.add(files('dma-coherency.c'))
 system_ss.add(when: 'CONFIG_APPLESMC', if_true: files('applesmc.c'))
 
 system_ss.add(when: 'CONFIG_EDU', if_true: files('edu.c'))

@@ -33,6 +33,7 @@
 #include "semihosting/common-semi.h"
 #endif
 #include "cpregs.h"
+#include "hw/misc/dma-coherency.h"
 #include "target/arm/gtimer.h"
 #include "qemu/plugin.h"
 
@@ -474,6 +475,57 @@ static const ARMCPRegInfo cp_reginfo[] = {
       .resetvalue = 0, .writefn = contextidr_write, .raw_writefn = raw_write, },
 };
 
+/*
+ * DMA coherency checker: observe v5/v6 cache-maintenance ops so the
+ * emulator can enforce the DMA ownership protocol.  The ops themselves are
+ * still architecturally NOPs in QEMU (no cache model).
+ */
+static void dmacc_cachemaint_write(CPUARMState *env, const ARMCPRegInfo *ri,
+                                   uint64_t value)
+{
+    bool whole;
+    DmaccCacheOp op;
+    hwaddr paddr = 0;
+
+    if (!dmacc_enabled()) {
+        return;
+    }
+
+    /* c7,c6: invalidate D; c7,c10: clean D; c7,c14: clean+invalidate D. */
+    switch (ri->crm) {
+    case 6:
+        op = DMACC_OP_INVALIDATE;
+        break;
+    case 10:
+        op = DMACC_OP_CLEAN;
+        break;
+    case 7:     /* c7,c7,0: invalidate I+D */
+    case 14:
+        op = DMACC_OP_FLUSH;
+        break;
+    default:    /* I-cache, DSB, write-buffer drain: nothing to track */
+        return;
+    }
+    /* opc2 == 1 -> MVA;  opc2 == 0 -> entire cache;  4 = drain WB (skip). */
+    if (ri->opc2 == 4) {
+        return;
+    }
+    whole = (ri->opc2 == 0);
+
+    if (!whole) {
+        GetPhysAddrResult res = {};
+        ARMMMUFaultInfo fi = {};
+        ARMMMUIdx mmu_idx = arm_mmu_idx(env);
+
+        /* get_phys_addr() returns true on SUCCESS. */
+        if (!get_phys_addr(env, value, MMU_DATA_LOAD, 0, mmu_idx, &res, &fi)) {
+            return;   /* unmapped MVA: nothing to track */
+        }
+        paddr = res.f.phys_addr | (value & ((1u << res.f.lg_page_size) - 1));
+    }
+    dmacc_cache_op(op, paddr, whole);
+}
+
 static const ARMCPRegInfo not_v8_cp_reginfo[] = {
     /*
      * NB: Some of these registers exist in v8 but with more precise
@@ -501,7 +553,8 @@ static const ARMCPRegInfo not_v8_cp_reginfo[] = {
     /* Cache maintenance ops; some of this space may be overridden later. */
     { .name = "CACHEMAINT", .cp = 15, .crn = 7, .crm = CP_ANY,
       .opc1 = 0, .opc2 = CP_ANY, .access = PL1_W,
-      .type = ARM_CP_NOP | ARM_CP_OVERRIDE },
+      .type = ARM_CP_NO_RAW | ARM_CP_OVERRIDE,
+      .writefn = dmacc_cachemaint_write },
 };
 
 static const ARMCPRegInfo not_v6_cp_reginfo[] = {

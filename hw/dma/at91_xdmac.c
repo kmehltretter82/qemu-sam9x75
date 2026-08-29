@@ -10,6 +10,7 @@
 #include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/dma/at91_xdmac.h"
+#include "hw/misc/dma-coherency.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/bitops.h"
@@ -621,8 +622,10 @@ static bool at91_xdmac_fifo_read_one(AT91XDMACState *s,
     }
 
     ch->read_in_progress = true;
+    dmacc_set_requester(s->dmacc_label[index]);
     result = dma_memory_read(&s->dma_as, ch->csa, data, width,
                              MEMTXATTRS_UNSPECIFIED);
+    dmacc_set_requester(NULL);
     ch->read_in_progress = false;
     if (result != MEMTX_OK) {
         at91_xdmac_set_error(s, ch, index, XDMAC_CIS_RBEIS);
@@ -672,8 +675,10 @@ static bool at91_xdmac_fifo_write_one(AT91XDMACState *s,
 
     at91_xdmac_fifo_peek(ch, data, width);
     ch->write_in_progress = true;
+    dmacc_set_requester(s->dmacc_label[index]);
     result = dma_memory_write(&s->dma_as, ch->cda, data, width,
                               MEMTXATTRS_UNSPECIFIED);
+    dmacc_set_requester(NULL);
     ch->write_in_progress = false;
     if (result != MEMTX_OK) {
         at91_xdmac_set_error(s, ch, index, XDMAC_CIS_WBEIS);
@@ -1413,6 +1418,12 @@ static void at91_xdmac_reset(DeviceState *dev)
 static void at91_xdmac_init(Object *obj)
 {
     AT91XDMACState *s = AT91_XDMAC(obj);
+    int ch;
+
+    for (ch = 0; ch < AT91_XDMAC_NUM_CHANNELS; ch++) {
+        snprintf(s->dmacc_label[ch], sizeof(s->dmacc_label[ch]),
+                 "xdmac ch%d", ch);
+    }
     DeviceState *dev = DEVICE(obj);
 
     memory_region_init_io(&s->iomem, obj, &at91_xdmac_ops, s,

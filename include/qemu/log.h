@@ -37,6 +37,7 @@ bool qemu_log_separate(void);
 #define LOG_PER_THREAD     (1u << 20)
 #define CPU_LOG_TB_VPU     (1u << 21)
 #define LOG_TB_OP_PLUGIN   (1u << 22)
+#define LOG_DMA_COHERENCY  (1u << 23)
 #define LOG_INVALID_MEM    (1u << 23)
 
 /* Lock/unlock output. */
