@@ -59,6 +59,8 @@ enum {
 #define SSC_CMR_DIV_MASK    0x00000fff
 #define SSC_RFMR_LOOP       BIT(5)
 #define SSC_RFMR_DATLEN(v)  (((v) & 0x1f) + 1)
+/* DATNB gives the words per frame, which is DATNB + 1. */
+#define SSC_FMR_DATNB(v)    ((((v) >> 8) & 0xf) + 1)
 
 #define SSC_WPMR_WPEN       BIT(0)
 #define SSC_WPMR_KEY        0x53534300  /* "SSC" */
@@ -120,12 +122,27 @@ static uint64_t at91_ssc_word_ticks(const AT91SSCState *s)
  * Loop mode ties TD back to RD, so a word shifted out is received.  Without
  * it there is no modeled serial partner and the word is simply shifted out.
  */
+/*
+ * A frame carries DATNB + 1 words; the sync status is reported once the
+ * last of them has gone by, and is cleared by reading the status register.
+ */
+static void at91_ssc_advance_frame(uint8_t *word, unsigned int per_frame,
+                                   uint32_t *status, uint32_t flag)
+{
+    if (++*word >= per_frame) {
+        *word = 0;
+        *status |= flag;
+    }
+}
+
 static void at91_ssc_complete_word(AT91SSCState *s)
 {
     unsigned int bits = SSC_RFMR_DATLEN(s->rfmr);
     uint32_t data = s->thr & MAKE_64BIT_MASK(0, bits);
 
     s->thr_full = false;
+    at91_ssc_advance_frame(&s->tx_frame_word, SSC_FMR_DATNB(s->tfmr),
+                           &s->status, SSC_SR_TXSYN);
     if (!(s->rfmr & SSC_RFMR_LOOP) || !s->rx_enabled) {
         return;
     }
@@ -134,6 +151,8 @@ static void at91_ssc_complete_word(AT91SSCState *s)
     }
     s->rhr = data;
     s->rhr_full = true;
+    at91_ssc_advance_frame(&s->rx_frame_word, SSC_FMR_DATNB(s->rfmr),
+                           &s->status, SSC_SR_RXSYN);
 }
 
 static void at91_ssc_shift_done(void *opaque)
@@ -193,6 +212,8 @@ static void at91_ssc_soft_reset(AT91SSCState *s)
     s->tx_enabled = false;
     s->thr_full = false;
     s->rhr_full = false;
+    s->tx_frame_word = 0;
+    s->rx_frame_word = 0;
 }
 
 static bool at91_ssc_write_protected(AT91SSCState *s, hwaddr offset)
@@ -246,8 +267,8 @@ static uint64_t at91_ssc_read(void *opaque, hwaddr offset, unsigned int size)
         return s->rc1r;
     case SSC_SR:
         value = s->status;
-        /* OVRUN is cleared by reading the status register. */
-        s->status &= ~SSC_SR_OVRUN;
+        /* OVRUN and the sync reports are cleared by this read. */
+        s->status &= ~(SSC_SR_OVRUN | SSC_SR_TXSYN | SSC_SR_RXSYN);
         at91_ssc_update(s);
         return value;
     case SSC_IMR:
@@ -422,6 +443,8 @@ static const VMStateDescription at91_ssc_vmstate = {
         VMSTATE_BOOL(tx_enabled, AT91SSCState),
         VMSTATE_BOOL(thr_full, AT91SSCState),
         VMSTATE_BOOL(rhr_full, AT91SSCState),
+        VMSTATE_UINT8(tx_frame_word, AT91SSCState),
+        VMSTATE_UINT8(rx_frame_word, AT91SSCState),
         VMSTATE_PTIMER(shifter, AT91SSCState),
         VMSTATE_CLOCK(pclk, AT91SSCState),
         VMSTATE_CLOCK(gclk, AT91SSCState),

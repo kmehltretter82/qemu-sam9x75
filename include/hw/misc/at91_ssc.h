@@ -48,6 +48,9 @@ struct AT91SSCState {
     bool tx_enabled;
     bool thr_full;
     bool rhr_full;
+    /* Word position within the current frame, per DATNB. */
+    uint8_t tx_frame_word;
+    uint8_t rx_frame_word;
     bool tx_request_level;
     bool rx_request_level;
 };

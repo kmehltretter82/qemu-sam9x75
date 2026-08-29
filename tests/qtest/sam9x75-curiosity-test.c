@@ -1778,6 +1778,9 @@
 #define SSC_SR_RXEN             BIT(17)
 #define SSC_RFMR_LOOP           BIT(5)
 #define SSC_RFMR_DATLEN(n)      ((n) - 1)
+#define SSC_FMR_DATNB(n)        ((uint32_t)((n) - 1) << 8)
+#define SSC_SR_TXSYN            BIT(10)
+#define SSC_SR_RXSYN            BIT(11)
 #define SSC_WPMR_KEY            0x53534300
 #define QSPI_CR                 0x00
 #define QSPI_MR                 0x04
@@ -21313,6 +21316,79 @@ static void test_ssc_word_timing(void)
     qtest_quit(qts);
 }
 
+/*
+ * DATNB sets the words per frame, and the sync status is reported once the
+ * last word of a frame has gone by rather than after every word.
+ *
+ * This test steps the clock instead of polling: the status register is
+ * read-to-clear, so waiting by reading it would discard the very sync
+ * reports being checked.
+ */
+static void test_ssc_frame_sync(void)
+{
+    const uint64_t base = SAM9X7_SSC_BASE;
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int word;
+    uint32_t status;
+
+    pmc_write_pcr(qts, 28, PMC_PCR_EN);
+    /* Three words per frame in both directions. */
+    qtest_writel(qts, base + SSC_RFMR,
+                 SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8) | SSC_FMR_DATNB(3));
+    qtest_writel(qts, base + SSC_TFMR,
+                 SSC_RFMR_DATLEN(8) | SSC_FMR_DATNB(3));
+    qtest_writel(qts, base + SSC_CMR, 2);
+    qtest_writel(qts, base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
+    qtest_readl(qts, base + SSC_SR);
+
+    /* The first two words of the frame report no sync. */
+    for (word = 0; word < 2; word++) {
+        qtest_writel(qts, base + SSC_THR, 0x40 + word);
+        qtest_clock_step(qts, 2000000);
+        status = qtest_readl(qts, base + SSC_SR);
+        g_assert_cmphex(status & (SSC_SR_TXSYN | SSC_SR_RXSYN), ==, 0);
+        g_assert_cmphex(qtest_readl(qts, base + SSC_RHR), ==, 0x40 + word);
+    }
+
+    /* The third completes the frame and reports both syncs. */
+    qtest_writel(qts, base + SSC_THR, 0x42);
+    qtest_clock_step(qts, 2000000);
+    status = qtest_readl(qts, base + SSC_SR);
+    g_assert_cmphex(status & (SSC_SR_TXSYN | SSC_SR_RXSYN), ==,
+                    SSC_SR_TXSYN | SSC_SR_RXSYN);
+    /* The status read clears them. */
+    g_assert_cmphex(qtest_readl(qts, base + SSC_SR) &
+                    (SSC_SR_TXSYN | SSC_SR_RXSYN), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_RHR), ==, 0x42);
+
+    /* The count restarts, so the next frame syncs after three more. */
+    for (word = 0; word < 2; word++) {
+        qtest_writel(qts, base + SSC_THR, 0x50 + word);
+        qtest_clock_step(qts, 2000000);
+        qtest_readl(qts, base + SSC_RHR);
+    }
+    status = qtest_readl(qts, base + SSC_SR);
+    g_assert_cmphex(status & SSC_SR_TXSYN, ==, 0);
+    qtest_writel(qts, base + SSC_THR, 0x52);
+    qtest_clock_step(qts, 2000000);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_SR) & SSC_SR_TXSYN, ==,
+                    SSC_SR_TXSYN);
+
+    /* A software reset restarts the frame count. */
+    qtest_writel(qts, base + SSC_CR, SSC_CR_SWRST);
+    qtest_writel(qts, base + SSC_RFMR,
+                 SSC_RFMR_LOOP | SSC_RFMR_DATLEN(8) | SSC_FMR_DATNB(3));
+    qtest_writel(qts, base + SSC_TFMR,
+                 SSC_RFMR_DATLEN(8) | SSC_FMR_DATNB(3));
+    qtest_writel(qts, base + SSC_CMR, 2);
+    qtest_writel(qts, base + SSC_CR, SSC_CR_TXEN | SSC_CR_RXEN);
+    qtest_writel(qts, base + SSC_THR, 0x60);
+    qtest_clock_step(qts, 2000000);
+    g_assert_cmphex(qtest_readl(qts, base + SSC_SR) & SSC_SR_TXSYN, ==, 0);
+
+    qtest_quit(qts);
+}
+
 static void test_ssc_migration(void)
 {
     const uint64_t base = SAM9X7_SSC_BASE;
@@ -28374,6 +28450,8 @@ int main(int argc, char **argv)
                    test_sdmmc1_independent_controller);
     qtest_add_func("sam9x75/ssc/word-timing",
                    test_ssc_word_timing);
+    qtest_add_func("sam9x75/ssc/frame-sync",
+                   test_ssc_frame_sync);
     qtest_add_func("sam9x75/ssc/migration",
                    test_ssc_migration);
     qtest_add_func("sam9x75/ssc/migration-request-level",
