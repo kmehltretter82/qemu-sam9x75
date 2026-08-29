@@ -166,6 +166,7 @@ static bool at91_tcb_tiob_is_output(const AT91TCBChannel *ch)
 
 static void at91_tcb_xc_refresh(AT91TCBState *s);
 static void at91_tcb_qdec_update(AT91TCBState *s);
+static void at91_tcb_qdec_index(AT91TCBState *s);
 static void at91_tcb_external_event(AT91TCBChannel *ch, unsigned int source,
                                     bool rising);
 
@@ -600,6 +601,11 @@ static void at91_tcb_pin_input(AT91TCBState *s, unsigned int index,
     if (index == 0) {
         at91_tcb_qdec_update(s);
     }
+    /* Only the pin that currently carries the index re-evaluates it. */
+    if (!from_tioa &&
+        index == ((s->bmr & TCB_BMR_IDXPHB) ? 0 : 1)) {
+        at91_tcb_qdec_index(s);
+    }
     if (from_tioa) {
         at91_tcb_capture_edge(ch, value);
     }
@@ -882,8 +888,17 @@ static void at91_tcb_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case TCB_BMR:
         s->bmr = value & 0x03f3ff3f;
-        /* The XC sources may now carry different signals. */
+        /*
+         * The XC sources may now carry different signals, and IDXPHB may
+         * have moved the index to another pin: resync its level so the
+         * change of source is not mistaken for an index pulse.
+         */
         at91_tcb_xc_refresh(s);
+        s->qdec_idx = (s->bmr & TCB_BMR_IDXPHB) ? s->channel[0].tiob_in
+                                                : s->channel[1].tiob_in;
+        if (s->bmr & TCB_BMR_INVIDX) {
+            s->qdec_idx = !s->qdec_idx;
+        }
         break;
     case TCB_QIER:
         s->qimr |= value & TCB_QINT_MASK;
@@ -1039,6 +1054,41 @@ static bool at91_tcb_qdec_phase(AT91TCBState *s, bool want_pha)
     return want_pha ? pha : phb;
 }
 
+/*
+ * The index marks one full revolution.  DS60001813E 69.6.16: it arrives on
+ * TIOB1 and channel 1 accumulates it, so that channel counts revolutions
+ * while channel 0 counts position.  IDXPHB moves the index to PHB
+ * instead, and INVIDX inverts it.
+ */
+static void at91_tcb_qdec_index(AT91TCBState *s)
+{
+    bool idx = (s->bmr & TCB_BMR_IDXPHB) ? s->channel[0].tiob_in
+                                         : s->channel[1].tiob_in;
+
+    if (s->bmr & TCB_BMR_INVIDX) {
+        idx = !idx;
+    }
+    if (!(s->bmr & TCB_BMR_QDEN) || idx == s->qdec_idx) {
+        s->qdec_idx = idx;
+        return;
+    }
+    s->qdec_idx = idx;
+    if (!idx) {
+        /* Only the leading edge marks the revolution. */
+        return;
+    }
+    s->qisr |= TCB_QISR_IDX;
+    if (s->bmr & TCB_BMR_POSEN) {
+        AT91TCBChannel *rotation = &s->channel[1];
+
+        rotation->counting_down = false;
+        at91_tcb_edge_advance(rotation);
+        /* A revolution restarts the position count. */
+        s->channel[0].edge_counter = 0;
+    }
+    at91_tcb_update_irq(s);
+}
+
 static void at91_tcb_qdec_update(AT91TCBState *s)
 {
     bool pha = at91_tcb_qdec_phase(s, true);
@@ -1192,6 +1242,7 @@ static void at91_tcb_reset(DeviceState *dev)
     s->qdec_phb = false;
     s->qdec_dir = false;
     s->qdec_seen = false;
+    s->qdec_idx = false;
     memset(s->tclk_in, 0, sizeof(s->tclk_in));
     memset(s->xc_level, 0, sizeof(s->xc_level));
     s->bmr = 0;
@@ -1359,6 +1410,7 @@ static const VMStateDescription at91_tcb_vmstate = {
         VMSTATE_BOOL_V(qdec_phb, AT91TCBState, 2),
         VMSTATE_BOOL_V(qdec_dir, AT91TCBState, 2),
         VMSTATE_BOOL_V(qdec_seen, AT91TCBState, 2),
+        VMSTATE_BOOL_V(qdec_idx, AT91TCBState, 2),
         VMSTATE_END_OF_LIST()
     },
 };

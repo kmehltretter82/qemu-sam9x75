@@ -83,6 +83,7 @@ struct AT91TCBState {
     bool qdec_phb;
     bool qdec_dir;
     bool qdec_seen;
+    bool qdec_idx;
     qemu_irq capture_request[AT91_TCB_NUM_CHANNELS];
     qemu_irq etrg_request[AT91_TCB_NUM_CHANNELS];
     Clock *pclk;

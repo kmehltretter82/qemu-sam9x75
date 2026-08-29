@@ -1279,6 +1279,8 @@
 #define TCB_BMR_POSEN           BIT(9)
 #define TCB_BMR_EDGPHA          BIT(12)
 #define TCB_BMR_SWAP            BIT(16)
+#define TCB_BMR_IDXPHB          BIT(17)
+#define TCB_BMR_INVIDX          BIT(15)
 #define TCB_QISR                 0xd4
 #define TCB_QISR_IDX            BIT(0)
 #define TCB_QISR_DIRCHG         BIT(1)
@@ -7698,6 +7700,7 @@ static void qdec_step(QTestState *qts, const char *tcb, unsigned int step,
 static void test_tcb_quadrature_decoder(void)
 {
     const uint64_t ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
+    const uint64_t ch1 = SAM9X7_TCB_BASE + TCB_CHANNEL(1);
     const uint64_t bmr = SAM9X7_TCB_BASE + TCB_BMR;
     const uint64_t qisr = SAM9X7_TCB_BASE + TCB_QISR;
     const char *tcb = "/machine/soc/tcb";
@@ -7748,6 +7751,29 @@ static void test_tcb_quadrature_decoder(void)
     qtest_set_irq_in(qts, tcb, "tiob-in", 0, 1);
     g_assert_cmphex(qtest_readl(qts, qisr) & TCB_QISR_QERR, ==, 0);
 
+    /*
+     * The index marks a revolution: it arrives on TIOB1, channel 1
+     * accumulates it, and the position restarts.
+     */
+    qtest_writel(qts, ch1 + TCB_CMR, TCB_CMR_CLOCK_XC1);
+    qtest_writel(qts, ch1 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+    for (i = 0; i < 8; i++) {
+        qdec_step(qts, tcb, i, true);
+    }
+    g_assert_cmpuint(qtest_readl(qts, ch0 + TCB_CV), >, 0);
+    g_assert_cmphex(qtest_readl(qts, ch1 + TCB_CV), ==, 0);
+    qtest_readl(qts, qisr);
+
+    qtest_set_irq_in(qts, tcb, "tiob-in", 1, 1);
+    g_assert_cmphex(qtest_readl(qts, qisr) & TCB_QISR_IDX, ==, TCB_QISR_IDX);
+    g_assert_cmphex(qtest_readl(qts, ch1 + TCB_CV), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, ch0 + TCB_CV), ==, 0);
+
+    /* The trailing edge is not a second revolution. */
+    qtest_set_irq_in(qts, tcb, "tiob-in", 1, 0);
+    g_assert_cmphex(qtest_readl(qts, qisr) & TCB_QISR_IDX, ==, 0);
+    g_assert_cmphex(qtest_readl(qts, ch1 + TCB_CV), ==, 1);
+
     /* EDGPHA counts both phases, so a full turn advances further. */
     qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKDIS);
     qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
@@ -7756,6 +7782,13 @@ static void test_tcb_quadrature_decoder(void)
         qdec_step(qts, tcb, i, true);
     }
     g_assert_cmpuint(qtest_readl(qts, ch0 + TCB_CV), >, position);
+
+    /* IDXPHB moves the index to PHB, so TIOB1 no longer marks one. */
+    qtest_writel(qts, bmr,
+                 TCB_BMR_QDEN | TCB_BMR_POSEN | TCB_BMR_IDXPHB);
+    qtest_readl(qts, qisr);
+    qtest_set_irq_in(qts, tcb, "tiob-in", 1, 1);
+    g_assert_cmphex(qtest_readl(qts, qisr) & TCB_QISR_IDX, ==, 0);
 
     qtest_quit(qts);
 }
