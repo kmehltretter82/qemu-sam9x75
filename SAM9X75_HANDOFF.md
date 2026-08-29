@@ -694,6 +694,34 @@ the old path and expect no hits before launching.  And the release
 directories under `t/` are now `chmod -R a-w`, so a mistake like this one
 fails loudly instead of silently overwriting the evidence.
 
+## Which peripherals a stock guest never touches, 2026-08-29
+
+Every node needed for a peripheral gate today shipped `status =
+"disabled"` -- SSC, both CAN controllers, the GEM and the I2S -- so the
+shipped device tree was swept to find what else a stock boot never probes.
+It enables 48 nodes and disables 54.
+
+Most of the disabled half needs nothing: the display and camera blocks
+(`xlcdc`, `gfx2d`, `lvds`, `mipi-dsi`, `csi2dc`, `csi2host`, `xisc`) and
+`pwm` are not modeled at all, so a disabled node is consistent with an
+absent model.  The disabled FLEXCOM instances are reached by the mmc_spi
+gate's overlay.
+
+The one real gap was `mmc@90000000`, SDMMC1: modeled, wired to AIC source
+26, and never probed by any guest.  It is now, with the node enabled by
+overlay and a second card attached: `mmc1: SDHCI controller on 90000000.mmc
+using ADMA`, followed by `mmc1: new high speed SD card`, alongside the
+existing mmc0, and the diagnostic log stays empty.  Evidence:
+`t/linux4microchip-sdmmc1-probe-20260829`.
+
+That also explains why SDMMC1's version register could not be read on the
+board: the node is disabled there too, so reading it needs the same overlay
+on hardware, not just a `devmem2`.
+
+A caution for anyone reading a gate result: "Linux boots clean" says
+nothing about a peripheral whose node is disabled.  The first attempt at
+the GEM boot proved exactly nothing until the missing `eth0` gave it away.
+
 ## Version registers still unconfirmed -- one hardware request, 2026-08-29
 
 The AES, SHA, TDES and GEM divergences arrived one at a time, each costing
