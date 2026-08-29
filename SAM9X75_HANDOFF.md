@@ -694,6 +694,36 @@ the old path and expect no hits before launching.  And the release
 directories under `t/` are now `chmod -R a-w`, so a mistake like this one
 fails loudly instead of silently overwriting the evidence.
 
+## Version registers still unconfirmed -- one hardware request, 2026-08-29
+
+The AES, SHA, TDES and GEM divergences arrived one at a time, each costing
+a round trip.  The model was therefore swept for every non-zero word it
+reports at the conventional `+0xfc` version offset, so the remaining ones
+can be checked in a single pass on the board.
+
+Confirmed against silicon and already corrected: AES `0x606`, SHA `0x604`,
+TDES `0x803`, GEM module ID `0x4107010c`, and the earlier Atmel SPI
+`0x410`.
+
+Still the model's own guess, worth one `devmem2` read each:
+
+| peripheral | address | QEMU reports |
+| --- | --- | --- |
+| I2SMCC | `0xf001c0fc` | `0x00000100` |
+| OTPC | `0xeff000fc` | `0x00000202` |
+| SDMMC0 | `0x800000fc` | `0x18020000` |
+| SDMMC1 | `0x900000fc` | `0x18020000` |
+
+Two entries the sweep found are not version registers and need nothing:
+`QSPI_MEM` and `UHPHS_OHCI` read `0xffffffff` because nothing is mapped at
+that offset, and `ECC_ROM` is ROM content.  XDMAC returns 0 for its
+version register deliberately.
+
+The SDMMC value is the SDHCI host-controller version and capability word
+from the shared `hw/sd/sdhci` model, so if it diverges it must be set from
+the SoC as a property, exactly as the GEM module ID now is -- never by
+editing the shared default.
+
 ## Silicon version registers corrected, 2026-08-29
 
 Hardware reads reported from the board give AES 0x606, SHA 0x604, TDES
