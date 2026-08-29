@@ -764,8 +764,12 @@ Support matrix
        be observed because phase inputs arrive one GPIO event at a time.
        The index arrives on TIOB1, or on PHB with ``IDXPHB``, and channel 1
        accumulates it so that channel counts revolutions while channel 0
-       counts position.  ``SPEEDEN`` speed measurement, whose time base is
-       channel 2, remains.  The SAM9X7 ADC is
+       counts position.  With ``SPEEDEN`` the channel 2 time base is fed back
+       internally to channel 0's TIOA so each period latches the accumulated
+       edges into RA and RB and clears the counter; the decoder still reads
+       PHA from the pin, which is a different signal from the channel input
+       in that mode.  ``QERR``, the digital filter and its ``MAXFILT`` width,
+       and the badly-located-index detection are not modeled.  The SAM9X7 ADC is
        mapped at ``0xf804c000`` with its eight physical inputs, PID/AIC source
        19, peripheral and generic clocks, and XDMAC receive request 40.  It
        models numeric and programmable channel sequences, software, external,
