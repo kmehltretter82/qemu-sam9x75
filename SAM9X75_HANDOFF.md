@@ -694,6 +694,29 @@ the old path and expect no hits before launching.  And the release
 directories under `t/` are now `chmod -R a-w`, so a mistake like this one
 fails loudly instead of silently overwriting the evidence.
 
+## Migration with those four peripherals active, 2026-08-29
+
+The SSC gained vmstate today and was covered only by qtests, so the
+multi-peripheral configuration was migrated as well as booted.  A guest
+with the GEM, I2S, SSC and SDMMC1 all enabled runs an unbounded write loop
+to the second card, printing a counter, and is migrated to a file while
+that loop runs.
+
+The counter is what makes it evidence: the source's last line before the
+switchover is `TICK70`, and the destination's first line after resuming is
+`TICK71`, continuing to `TICK150`.  The workload did not restart, so guest
+state and the running transfer both survived.  Source and destination
+`unimp,guest_errors` logs are exactly zero bytes and the state file is
+32 MB.  Evidence: `t/linux4microchip-multi-migration-20260829`.
+
+Two earlier attempts at this were *not* evidence and are worth recording as
+a trap.  A bounded `dd` of 12 or 192 blocks finished before the switchover
+in both cases, so the guest was effectively idle at the moment of
+migration while the marker ordering still looked plausible.  Only an
+unbounded loop with a monotonic counter proves the work spanned the
+migration; a "work started / work done" pair around a migrate call proves
+nothing about when the work actually ran.
+
 ## Four peripherals at once under load, 2026-08-29
 
 Every guest check so far enabled exactly one disabled node at a time, so
