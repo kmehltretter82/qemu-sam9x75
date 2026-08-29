@@ -84,6 +84,12 @@ struct AT91TCBState {
     bool qdec_dir;
     bool qdec_seen;
     bool qdec_idx;
+    /*
+     * PHA as the pin carries it.  In speed mode the internal time base
+     * takes over channel 0's TIOA input, but the decoder still reads the
+     * pin, so the two levels are not the same signal.
+     */
+    bool pha_pin;
     qemu_irq capture_request[AT91_TCB_NUM_CHANNELS];
     qemu_irq etrg_request[AT91_TCB_NUM_CHANNELS];
     Clock *pclk;

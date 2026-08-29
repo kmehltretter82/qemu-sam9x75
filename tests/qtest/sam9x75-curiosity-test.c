@@ -1281,6 +1281,7 @@
 #define TCB_BMR_SWAP            BIT(16)
 #define TCB_BMR_IDXPHB          BIT(17)
 #define TCB_BMR_INVIDX          BIT(15)
+#define TCB_BMR_SPEEDEN         BIT(10)
 #define TCB_QISR                 0xd4
 #define TCB_QISR_IDX            BIT(0)
 #define TCB_QISR_DIRCHG         BIT(1)
@@ -7697,6 +7698,73 @@ static void qdec_step(QTestState *qts, const char *tcb, unsigned int step,
  * channel 0 counts because the block wires the decoder to XC0.  Turning
  * the encoder the other way makes the position fall and reports DIRCHG.
  */
+/*
+ * Speed measurement: channel 2 generates a time base whose TIOA is fed
+ * back internally to channel 0, so each period latches the edges
+ * accumulated since the last one into RA and clears the counter.  That
+ * differentiation is the speed.
+ */
+static void test_tcb_quadrature_speed(void)
+{
+    const uint64_t ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
+    const uint64_t ch2 = SAM9X7_TCB_BASE + TCB_CHANNEL(2);
+    const uint64_t bmr = SAM9X7_TCB_BASE + TCB_BMR;
+    const char *tcb = "/machine/soc/tcb";
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    unsigned int i;
+    uint32_t latched;
+
+    qtest_writel(qts, SAM9X7_PMC_BASE + PMC_MCKR, 1);
+    pmc_write_pcr(qts, 17, PMC_PCR_EN);
+
+    /* Channel 0 captures, triggered and loaded by a TIOA rising edge. */
+    qtest_writel(qts, ch0 + TCB_CMR,
+                 TCB_CMR_CLOCK_XC0 | TCB_CMR_ABETRG | TCB_CMR_ETRGEDG(1) |
+                 TCB_CMR_LDRA(1) | TCB_CMR_LDRB(1));
+    qtest_writel(qts, ch0 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+
+    /* Channel 2 is the time base, toggling TIOA2 on its RC compare. */
+    qtest_writel(qts, ch2 + TCB_CMR,
+                 TCB_CMR_CLOCK2 | TCB_CMR_WAVE | TCB_CMR_WAVESEL_UP_RC |
+                 TCB_CMR_ACPC(3));
+    qtest_writel(qts, ch2 + TCB_RC, 150);
+    qtest_writel(qts, bmr, TCB_BMR_QDEN | TCB_BMR_SPEEDEN);
+    qtest_writel(qts, ch2 + TCB_CCR, TCB_CCR_CLKEN | TCB_CCR_SWTRG);
+
+    /* Turn the encoder: the edges accumulate on channel 0. */
+    for (i = 0; i < 8; i++) {
+        qdec_step(qts, tcb, i, true);
+    }
+    g_assert_cmpuint(qtest_readl(qts, ch0 + TCB_CV), >, 0);
+
+    /* Let the time base come round; RA takes the count and CV restarts. */
+    for (i = 0; i < 400; i++) {
+        qtest_clock_step(qts, 4000);
+        if (qtest_readl(qts, ch0 + TCB_SR) & TCB_INT_LDRAS) {
+            break;
+        }
+    }
+    g_assert_cmpuint(i, <, 400);
+    latched = qtest_readl(qts, ch0 + TCB_RA);
+    g_assert_cmpuint(latched, >, 0);
+    g_assert_cmpuint(qtest_readl(qts, ch0 + TCB_CV), <, latched);
+
+    /* A faster turn latches a larger count over the next period. */
+    for (i = 0; i < 40; i++) {
+        qdec_step(qts, tcb, i, true);
+    }
+    for (i = 0; i < 400; i++) {
+        qtest_clock_step(qts, 4000);
+        if (qtest_readl(qts, ch0 + TCB_SR) & TCB_INT_LDRAS) {
+            break;
+        }
+    }
+    g_assert_cmpuint(i, <, 400);
+    g_assert_cmpuint(qtest_readl(qts, ch0 + TCB_RA), >, latched);
+
+    qtest_quit(qts);
+}
+
 static void test_tcb_quadrature_decoder(void)
 {
     const uint64_t ch0 = SAM9X7_TCB_BASE + TCB_CHANNEL(0);
@@ -27679,6 +27747,8 @@ int main(int argc, char **argv)
                    test_tcb_xc_edge_clocking);
     qtest_add_func("sam9x75/tcb/quadrature-decoder",
                    test_tcb_quadrature_decoder);
+    qtest_add_func("sam9x75/tcb/quadrature-speed",
+                   test_tcb_quadrature_speed);
     qtest_add_func("sam9x75/tcb1/reset-masks-and-independence",
                    test_tcb1_reset_masks_and_independence);
     qtest_add_func("sam9x75/tcb1/clock-gating-and-irq",

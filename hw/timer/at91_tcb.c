@@ -167,6 +167,20 @@ static bool at91_tcb_tiob_is_output(const AT91TCBChannel *ch)
 static void at91_tcb_xc_refresh(AT91TCBState *s);
 static void at91_tcb_qdec_update(AT91TCBState *s);
 static void at91_tcb_qdec_index(AT91TCBState *s);
+static void at91_tcb_pin_input(AT91TCBState *s, unsigned int index,
+                               bool from_tioa, int level);
+
+/*
+ * DS60001813E 69.6.16.5: with QDEN and SPEEDEN the channel 2 time base is
+ * fed back internally to channel 0's TIOA, so each period latches the
+ * accumulated edge count into RA and RB and clears the counter, which is
+ * the differentiation the speed measurement needs.  While that feedback is
+ * active the external TIOA0 pin is not the source.
+ */
+static bool at91_tcb_speed_feedback(const AT91TCBState *s)
+{
+    return (s->bmr & TCB_BMR_QDEN) && (s->bmr & TCB_BMR_SPEEDEN);
+}
 static void at91_tcb_external_event(AT91TCBChannel *ch, unsigned int source,
                                     bool rising);
 
@@ -205,6 +219,9 @@ static void at91_tcb_apply_pin_effect(AT91TCBChannel *ch, unsigned int shift,
         if (is_tioa) {
             /* TIOA can be another channel's XC source. */
             at91_tcb_xc_refresh(s);
+            if (index == 2 && at91_tcb_speed_feedback(s)) {
+                at91_tcb_pin_input(s, 0, true, level);
+            }
         }
     }
 }
@@ -598,9 +615,6 @@ static void at91_tcb_pin_input(AT91TCBState *s, unsigned int index,
     if (!ch->enabled || !ch->running) {
         return;
     }
-    if (index == 0) {
-        at91_tcb_qdec_update(s);
-    }
     /* Only the pin that currently carries the index re-evaluates it. */
     if (!from_tioa &&
         index == ((s->bmr & TCB_BMR_IDXPHB) ? 0 : 1)) {
@@ -618,12 +632,30 @@ static void at91_tcb_pin_input(AT91TCBState *s, unsigned int index,
 
 static void at91_tcb_tioa_input(void *opaque, int index, int level)
 {
-    at91_tcb_pin_input(opaque, index, true, level);
+    AT91TCBState *s = opaque;
+    bool value = level > 0;
+
+    if (index == 0 && value != s->pha_pin) {
+        /* The decoder reads PHA from the pin whatever owns the input. */
+        s->pha_pin = value;
+        at91_tcb_qdec_update(s);
+    }
+    if (index == 0 && at91_tcb_speed_feedback(s)) {
+        /* In speed mode the internal time base owns the channel input. */
+        return;
+    }
+    at91_tcb_pin_input(s, index, true, level);
 }
 
 static void at91_tcb_tiob_input(void *opaque, int index, int level)
 {
-    at91_tcb_pin_input(opaque, index, false, level);
+    AT91TCBState *s = opaque;
+
+    at91_tcb_pin_input(s, index, false, level);
+    if (index == 0) {
+        /* PHB, which no mode takes away from the decoder. */
+        at91_tcb_qdec_update(s);
+    }
 }
 
 static void at91_tcb_tclk_input(void *opaque, int index, int level)
@@ -1036,7 +1068,7 @@ static void at91_tcb_edge_advance(AT91TCBChannel *ch)
  */
 static bool at91_tcb_qdec_phase(AT91TCBState *s, bool want_pha)
 {
-    bool pha = s->channel[0].tioa_in;
+    bool pha = s->pha_pin;
     bool phb = s->channel[0].tiob_in;
 
     if (s->bmr & TCB_BMR_SWAP) {
@@ -1119,8 +1151,12 @@ static void at91_tcb_qdec_update(AT91TCBState *s)
     s->qdec_pha = pha;
     s->qdec_phb = phb;
 
-    /* EDGPHA clear counts PHA edges only. */
-    if ((s->bmr & TCB_BMR_POSEN) &&
+    /*
+     * EDGPHA clear counts PHA edges only.  Speed mode accumulates the same
+     * edges on channel 0; what differs is that the time base latches and
+     * clears them each period.
+     */
+    if ((s->bmr & (TCB_BMR_POSEN | TCB_BMR_SPEEDEN)) &&
         ((s->bmr & TCB_BMR_EDGPHA) || pha_changed)) {
         AT91TCBChannel *ch = &s->channel[0];
 
@@ -1243,6 +1279,7 @@ static void at91_tcb_reset(DeviceState *dev)
     s->qdec_dir = false;
     s->qdec_seen = false;
     s->qdec_idx = false;
+    s->pha_pin = false;
     memset(s->tclk_in, 0, sizeof(s->tclk_in));
     memset(s->xc_level, 0, sizeof(s->xc_level));
     s->bmr = 0;
@@ -1411,6 +1448,7 @@ static const VMStateDescription at91_tcb_vmstate = {
         VMSTATE_BOOL_V(qdec_dir, AT91TCBState, 2),
         VMSTATE_BOOL_V(qdec_seen, AT91TCBState, 2),
         VMSTATE_BOOL_V(qdec_idx, AT91TCBState, 2),
+        VMSTATE_BOOL_V(pha_pin, AT91TCBState, 2),
         VMSTATE_END_OF_LIST()
     },
 };
