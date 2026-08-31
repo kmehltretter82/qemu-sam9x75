@@ -7320,8 +7320,9 @@ static void test_pmc_migration_and_reset(void)
     g_assert_cmpuint(clock_period[PMC_MIG_INVALID_PCLK], ==, 0);
     g_assert_cmpuint(clock_period[PMC_MIG_INVALID_GCLK], ==, 0);
 
+    /* Bit 0 is the processor clock, which always reads back set. */
     g_assert_cmphex(qtest_readl(from, SAM9X7_PMC_BASE + PMC_SCSR), ==,
-                    BIT(8));
+                    BIT(8) | BIT(0));
     value = qtest_readl(from, SAM9X7_PMC_BASE + PMC_SR);
     g_assert_cmphex(value & (PMC_SR_PCKRDY0 | PMC_SR_PCKRDY1 |
                              PMC_SR_GCLKRDY | PMC_SR_PLL_INT), ==,
@@ -7368,7 +7369,7 @@ static void test_pmc_migration_and_reset(void)
     g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_MCKR), ==, 1);
     g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_SR), ==,
                     0x00030008);
-    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_SCSR), ==, 0);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_SCSR), ==, BIT(0));
     g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_PCK0), ==, 0);
     g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_PCK1), ==, 0);
     g_assert_cmphex(qtest_readl(to, SAM9X7_PMC_BASE + PMC_CSR0), ==, 0);

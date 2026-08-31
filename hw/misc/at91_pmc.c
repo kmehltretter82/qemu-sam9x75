@@ -938,7 +938,15 @@ static void at91_pmc_reset(DeviceState *dev)
     memset(s->pcr, 0, sizeof(s->pcr));
     memset(s->pck_reg, 0, sizeof(s->pck_reg));
 
-    s->scsr = 0;
+    /*
+     * Bit 0 is the processor clock, which is running whenever the machine is.
+     * The board reads 0x00000005 in SCSR at the U-Boot prompt, against the
+     * model's 0x00000004; bit 2 agrees, bit 0 is this.  It stays out of
+     * PMC_SCSR_MASK, so a guest cannot clear it: the model has no wait mode
+     * to enter, and reporting a stopped processor clock while the processor
+     * runs would be worse than refusing the write.
+     */
+    s->scsr = BIT(0);
     s->pll_updt = 3 << 16;
     s->mor = PMC_MOR_MOSCRCEN;
     s->mcfr = 0;
