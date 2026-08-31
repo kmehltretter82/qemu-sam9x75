@@ -98,6 +98,8 @@ struct AT91UDPHSState {
     uint32_t ien;
     uint32_t events;
     uint32_t tst;
+    uint32_t features;
+    uint32_t version;
     int32_t negotiated_speed;
 
     AT91UDPHSEndpoint endpoint[AT91_UDPHS_NUM_ENDPOINTS];

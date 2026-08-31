@@ -21503,6 +21503,16 @@ static void test_silicon_version_registers(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + 0xfc), ==, 0x604);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + 0xfc), ==, 0x803);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + 0xfc), ==, 0x307);
+    /*
+     * The UDPHS names itself in ASCII, "HUSB" "2DEV", and reports its feature
+     * set and version.  Read from a SAM9X75 Curiosity with the gadget node
+     * enabled in the device tree so atmel_usba_udc binds and the clock is on.
+     */
+    pmc_write_pcr(qts, 23, PMC_PCR_EN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + 0xf0), ==, 0x48555342);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + 0xf4), ==, 0x32444556);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + 0xf8), ==, 0x0079f467);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + 0xfc), ==, 0x00000150);
     pmc_write_pcr(qts, 20, PMC_PCR_EN);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + 0xffc), ==, 0x293);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + 0xfc), ==,

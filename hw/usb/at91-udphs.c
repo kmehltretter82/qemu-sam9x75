@@ -28,6 +28,17 @@
 #define UDPHS_CLRINT                0x018
 #define UDPHS_EPTRST                0x01c
 #define UDPHS_TST                   0x0e0
+#define UDPHS_IPNAME1               0x0f0
+#define UDPHS_IPNAME2               0x0f4
+#define UDPHS_IPFEATURES            0x0f8
+#define UDPHS_IPVERSION             0x0fc
+
+/*
+ * The block names itself in ASCII: "HUSB" "2DEV".  A SAM9X75 Curiosity reads
+ * these four with the gadget node enabled and atmel_usba_udc bound.
+ */
+#define UDPHS_IPNAME1_VALUE         0x48555342
+#define UDPHS_IPNAME2_VALUE         0x32444556
 
 #define UDPHS_CTRL_DEV_ADDR_MASK    0x0000007f
 #define UDPHS_CTRL_FADDR_EN         BIT(7)
@@ -1436,6 +1447,14 @@ static uint64_t at91_udphs_regs_read(void *opaque, hwaddr offset,
         return 0;
     case UDPHS_TST:
         return s->tst & UDPHS_TST_MASK;
+    case UDPHS_IPNAME1:
+        return UDPHS_IPNAME1_VALUE;
+    case UDPHS_IPNAME2:
+        return UDPHS_IPNAME2_VALUE;
+    case UDPHS_IPFEATURES:
+        return s->features;
+    case UDPHS_IPVERSION:
+        return s->version;
     default:
         /* The complete 0x400-byte register aperture is decoded. */
         return 0;
@@ -2785,6 +2804,8 @@ static void at91_udphs_unrealize(DeviceState *dev)
 }
 
 static const Property at91_udphs_properties[] = {
+    DEFINE_PROP_UINT32("features", AT91UDPHSState, features, 0x0079f467),
+    DEFINE_PROP_UINT32("version", AT91UDPHSState, version, 0x00000150),
     DEFINE_PROP_LINK("dma-memory", AT91UDPHSState, dma_mr,
                      TYPE_MEMORY_REGION, MemoryRegion *),
 };
