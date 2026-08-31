@@ -662,6 +662,7 @@
 #define GEM_SPADDR1LO           0x088
 #define GEM_SPADDR1HI           0x08c
 #define GEM_MODID               0x0fc
+#define GEM_DESCONF             0x280
 #define GEM_DESCONF6            0x294
 #define GEM_INT_Q1_STATUS       0x400
 #define GEM_TRANSMIT_Q1_PTR     0x440
@@ -5625,6 +5626,8 @@ static void test_gem_registers_mdio_dma_and_irqs(void)
      */
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_DESCONF6) &
                     (BIT(23) | 0x7f), ==, 0x3e);
+    /* USER_IO is set on the board, so the guest configures the USERIO reg. */
+    g_assert_true(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_DESCONF) & BIT(9));
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_SPADDR1LO), ==,
                     0x09000002);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_SPADDR1HI), ==,

@@ -290,6 +290,7 @@ REG32(PTPPRXNS, 0x1ec) /* PTP Peer Frame Received (ns) */
 
 /* Design Configuration Registers */
 REG32(DESCONF, 0x280)
+    FIELD(DESCONF, USER_IO, 9, 1)
 REG32(DESCONF2, 0x284)
 REG32(DESCONF3, 0x288)
 REG32(DESCONF4, 0x28c)
@@ -1836,7 +1837,15 @@ static void gem_reset(DeviceState *d)
     s->regs[R_TXPARTIALSF] = 0x000003ff;
     s->regs[R_RXPARTIALSF] = 0x000003ff;
     s->regs[R_MODID] = s->revision;
+    /*
+     * A SAM9X75 Curiosity reads 0x32d42311 in DESCONF, with USER_IO set;
+     * macb only writes the USERIO register when this bit says the block has
+     * one, so leaving it clear stops the guest configuring the interface.
+     */
     s->regs[R_DESCONF] = 0x02D00110;
+    if (s->user_io) {
+        s->regs[R_DESCONF] |= R_DESCONF_USER_IO_MASK;
+    }
     if (!s->pcs_enabled) {
         s->regs[R_DESCONF] |= 0x00000001;
     }
@@ -2338,6 +2347,7 @@ static const Property gem_properties[] = {
     DEFINE_PROP_UINT16("jumbo-max-len", CadenceGEMState,
                        jumbo_max_len, 10240),
     DEFINE_PROP_BOOL("dma-addr-64b", CadenceGEMState, dma_addr_64b, true),
+    DEFINE_PROP_BOOL("user-io", CadenceGEMState, user_io, false),
     DEFINE_PROP_BOOL("pcs-enabled", CadenceGEMState,
                        pcs_enabled, false),
     DEFINE_PROP_BOOL("phy-clocked", CadenceGEMState, phy_clocked, true),
