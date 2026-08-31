@@ -749,8 +749,8 @@ static void gem_init_register_masks(CadenceGEMState *s)
     }
     for (i = 0; i < s->num_priority_queues; i++) {
         s->regs_ro[R_INT_Q1_STATUS + i] = 0xFFFFFFFF;
-        s->regs_ro[R_INT_Q1_ENABLE + i] = 0xFFFFF319;
-        s->regs_ro[R_INT_Q1_DISABLE + i] = 0xFFFFF319;
+        s->regs_ro[R_INT_Q1_ENABLE + i] = 0xFFFFF719;
+        s->regs_ro[R_INT_Q1_DISABLE + i] = 0xFFFFF719;
         s->regs_ro[R_INT_Q1_MASK + i] = 0xFFFFFFFF;
     }
 
@@ -761,7 +761,7 @@ static void gem_init_register_masks(CadenceGEMState *s)
         s->regs_rtc[i] = gem_statistics_mask(i);
     }
     for (i = 0; i < s->num_priority_queues; i++) {
-        s->regs_rtc[R_INT_Q1_STATUS + i] = 0x00000CE6;
+        s->regs_rtc[R_INT_Q1_STATUS + i] = 0x000008E6;
     }
 
     /* Mask of register bits which are write 1 to clear */
@@ -775,8 +775,8 @@ static void gem_init_register_masks(CadenceGEMState *s)
     s->regs_wo[R_IER]      = 0x07FFFFFF;
     s->regs_wo[R_IDR]      = 0x07FFFFFF;
     for (i = 0; i < s->num_priority_queues; i++) {
-        s->regs_wo[R_INT_Q1_ENABLE + i] = 0x00000CE6;
-        s->regs_wo[R_INT_Q1_DISABLE + i] = 0x00000CE6;
+        s->regs_wo[R_INT_Q1_ENABLE + i] = 0x000008E6;
+        s->regs_wo[R_INT_Q1_DISABLE + i] = 0x000008E6;
     }
 }
 
@@ -2051,7 +2051,12 @@ static void gem_reset(DeviceState *d)
      */
     s->regs[R_DESCONF6] = s->dma_addr_64b ? R_DESCONF6_DMA_ADDR_64B_MASK : 0;
     for (i = 0; i < s->num_priority_queues; i++) {
-        s->regs[R_INT_Q1_MASK + i] = 0x00000CE6;
+        /*
+         * Measured on a SAM9X75 Curiosity: reading 0xf802c640 upwards from
+         * the U-Boot prompt, before Linux touches the block, gives 0x000008e6
+         * on every priority queue.
+         */
+        s->regs[R_INT_Q1_MASK + i] = 0x000008E6;
     }
     s->regs[R_JUMBO_MAX_LEN] = s->jumbo_max_len;
 
