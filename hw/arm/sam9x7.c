@@ -1148,6 +1148,7 @@ static void sam9x7_init(Object *obj)
                           qdev_get_clock_out(DEVICE(&s->sckc), "md-slck"));
 
     object_initialize_child(obj, "xdmac", &s->xdmac, TYPE_AT91_XDMAC);
+    qdev_prop_set_uint32(DEVICE(&s->xdmac), "version", 0x293);
     qdev_connect_clock_in(DEVICE(&s->xdmac), "pclk",
                           qdev_get_clock_out(DEVICE(&s->pmc), "pclk[20]"));
 

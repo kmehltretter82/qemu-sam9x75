@@ -1141,7 +1141,7 @@ static uint64_t at91_xdmac_read(void *opaque, hwaddr offset, unsigned size)
     case XDMAC_GSWS:
         return s->sw_requests;
     case XDMAC_VERSION:
-        return 0;
+        return s->version;
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
                       TYPE_AT91_XDMAC ": read from reserved offset 0x%"
@@ -1682,6 +1682,7 @@ static const VMStateDescription vmstate_at91_xdmac = {
 static const Property at91_xdmac_properties[] = {
     DEFINE_PROP_LINK("dma-memory", AT91XDMACState, dma_mr,
                      TYPE_MEMORY_REGION, MemoryRegion *),
+    DEFINE_PROP_UINT32("version", AT91XDMACState, version, 0x293),
 };
 
 static void at91_xdmac_class_init(ObjectClass *klass, const void *data)

@@ -21272,6 +21272,8 @@ static void test_silicon_version_registers(void)
     g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + 0xfc), ==, 0x604);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + 0xfc), ==, 0x803);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + 0xfc), ==, 0x307);
+    pmc_write_pcr(qts, 20, PMC_PCR_EN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + 0xffc), ==, 0x293);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + 0xfc), ==,
                     0x4107010c);
     pmc_write_pcr(qts, 34, PMC_PCR_EN);

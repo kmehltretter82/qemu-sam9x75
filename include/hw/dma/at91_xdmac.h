@@ -81,6 +81,7 @@ struct AT91XDMACState {
     QEMUBH *bh;
     QEMUBH *idle_bh;
 
+    uint32_t version;
     uint32_t gcfg;
     uint32_t gwac;
     uint32_t gim;
