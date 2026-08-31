@@ -314,6 +314,10 @@ REG32(RECEIVE_Q1_PTR, 0x480)
 REG32(RECEIVE_Q7_PTR, 0x498)
 
 REG32(TBQPH, 0x4c8)
+REG32(TXBDCTRL, 0x4cc)
+    FIELD(TXBDCTRL, TXTSMODE, 4, 2)
+REG32(RXBDCTRL, 0x4d0)
+    FIELD(RXBDCTRL, RXTSMODE, 4, 2)
 REG32(RBQPH, 0x4d4)
 
 REG32(INT_Q1_ENABLE, 0x600)
@@ -514,7 +518,14 @@ static inline void print_gem_tx_desc(uint32_t *desc, uint8_t queue)
 
 static inline uint64_t rx_desc_get_buffer(CadenceGEMState *s, uint32_t *desc)
 {
-    uint64_t ret = desc[0] & ~0x3UL;
+    /*
+     * Bits 0 and 1 are ownership and wrap.  With extended descriptors bit 2
+     * is the timestamp-valid flag, which hardware sets and a guest recycling
+     * the descriptor leaves behind, so it is not part of the address either.
+     */
+    uint64_t mask = s->regs[R_DMACFG] & R_DMACFG_RX_BD_EXT_MODE_EN_MASK ?
+                    ~0x7ULL : ~0x3ULL;
+    uint64_t ret = desc[0] & mask;
 
     if (FIELD_EX32(s->regs[R_DMACFG], DMACFG, DMA_ADDR_BUS_WIDTH)) {
         ret |= (uint64_t)desc[2] << 32;
@@ -722,7 +733,8 @@ static void gem_init_register_masks(CadenceGEMState *s)
     unsigned int i;
     /* Mask of register bits which are read only */
     memset(&s->regs_ro[0], 0, sizeof(s->regs_ro));
-    s->regs_ro[R_NWCTRL]   = 0xFFF80000;
+    /* Bit 20 enables PTP unicast; the board's driver writes it on link up. */
+    s->regs_ro[R_NWCTRL]   = 0xFFE80000;
     s->regs_ro[R_NWSTATUS] = 0xFFFFFFFF;
     s->regs_ro[R_DMACFG]   = 0x8E00F000;
     s->regs_ro[R_TXSTATUS] = 0xFFFFFE08;
@@ -1405,6 +1417,163 @@ static void gem_get_rx_desc(CadenceGEMState *s, int q)
  * gem_receive:
  * Fit a packet handed to us by QEMU into the receive descriptor ring.
  */
+/*
+ * The TSU counts in seconds and nanoseconds, advancing by the increment in
+ * 1588INC (whole nanoseconds) plus the fraction in 1588INCSUBN on every
+ * tsu_clk tick.  A SAM9X75 Curiosity runs it from a 266666667 Hz gclk with
+ * an increment of 3 ns and a sub-ns fraction of 0xbfffff/2^24, which is
+ * 3.75 ns a tick, exactly the clock period.
+ *
+ * Rather than tick, keep the value the guest last wrote together with the
+ * host time it was written at, and work out the rest on demand.
+ */
+#define GEM_TSU_SUBNS_BITS 24
+
+static uint64_t gem_tsu_increment_subns(CadenceGEMState *s)
+{
+    uint32_t subn = s->regs[R_1588INCSUBN];
+
+    /* Fraction is split: bits 15:0 are the high part, bits 31:24 the low. */
+    return ((uint64_t)s->regs[R_1588INC] << GEM_TSU_SUBNS_BITS) |
+           ((uint64_t)(subn & 0xffff) << 8) | ((subn >> 24) & 0xff);
+}
+
+static void gem_tsu_now(CadenceGEMState *s, uint64_t *sec, uint32_t *nsec)
+{
+    uint64_t incr = gem_tsu_increment_subns(s);
+    uint64_t freq = s->tsu_clk ? clock_get_hz(s->tsu_clk) : 0;
+    uint64_t elapsed_ns = 0;
+    uint64_t total_ns;
+    int64_t delta;
+
+    if (freq && incr) {
+        delta = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->tsu_base_host_ns;
+        if (delta > 0) {
+            uint64_t ticks = muldiv64(delta, freq, NANOSECONDS_PER_SECOND);
+            elapsed_ns = muldiv64(ticks, incr, 1ULL << GEM_TSU_SUBNS_BITS);
+        }
+    }
+
+    total_ns = s->tsu_base_nsec + elapsed_ns;
+    *sec = s->tsu_base_sec + total_ns / NANOSECONDS_PER_SECOND;
+    *nsec = total_ns % NANOSECONDS_PER_SECOND;
+}
+
+/*
+ * Timestamp insertion modes, as the TXBDCTRL and RXBDCTRL fields encode them:
+ * 0 off, 1 PTP event messages, 2 any PTP message, 3 every frame.
+ */
+enum {
+    GEM_TS_DISABLED = 0,
+    GEM_TS_PTP_EVENT = 1,
+    GEM_TS_PTP_ALL = 2,
+    GEM_TS_ALL_FRAMES = 3,
+};
+
+/* A PTP message over Ethernet, or over UDP on the two 1588 ports. */
+static bool gem_frame_is_ptp(const uint8_t *buf, size_t len, bool *is_event)
+{
+    size_t off = 12;
+    uint16_t ethertype;
+    const uint8_t *ptp = NULL;
+
+    *is_event = false;
+    if (len < 14) {
+        return false;
+    }
+    ethertype = lduw_be_p(buf + off);
+    while ((ethertype == 0x8100 || ethertype == 0x88a8) && len >= off + 8) {
+        off += 4;
+        ethertype = lduw_be_p(buf + off);
+    }
+    off += 2;
+
+    if (ethertype == 0x88f7) {
+        ptp = buf + off;
+    } else if (ethertype == 0x0800 && len > off + 20) {
+        const uint8_t *ip = buf + off;
+        size_t ihl = (ip[0] & 0xf) * 4;
+
+        if (ip[9] == 17 && len > off + ihl + 8) {
+            uint16_t dport = lduw_be_p(ip + ihl + 2);
+
+            if (dport == 319 || dport == 320) {
+                ptp = ip + ihl + 8;
+            }
+        }
+    }
+
+    if (!ptp || ptp + 1 > buf + len) {
+        return false;
+    }
+    /* Sync, Delay_Req, Pdelay_Req and Pdelay_Resp are the event messages. */
+    *is_event = (ptp[0] & 0x0f) <= 3;
+    return true;
+}
+
+static bool gem_tsu_should_stamp(uint32_t mode, const uint8_t *buf, size_t len)
+{
+    bool is_event;
+
+    switch (mode) {
+    case GEM_TS_ALL_FRAMES:
+        return true;
+    case GEM_TS_PTP_ALL:
+        return gem_frame_is_ptp(buf, len, &is_event);
+    case GEM_TS_PTP_EVENT:
+        return gem_frame_is_ptp(buf, len, &is_event) && is_event;
+    default:
+        return false;
+    }
+}
+
+/*
+ * The capture goes in the last two words of an extended descriptor: the first
+ * holds nanoseconds in bits 29:0 and seconds[1:0] above them, the second
+ * seconds[5:2].  Only six bits of seconds fit; a guest recovers the rest from
+ * the 1588 timer.
+ */
+static void gem_tsu_stamp_desc(CadenceGEMState *s, uint32_t *desc, int desc_len)
+{
+    uint64_t sec;
+    uint32_t nsec;
+
+    gem_tsu_now(s, &sec, &nsec);
+    desc[desc_len - 2] = (nsec & 0x3fffffff) | ((sec & 0x3) << 30);
+    desc[desc_len - 1] = (sec >> 2) & 0xf;
+}
+
+/* Fold the running value into the base so a new rate applies from here on. */
+static void gem_tsu_rebase(CadenceGEMState *s)
+{
+    uint64_t sec;
+    uint32_t nsec;
+
+    gem_tsu_now(s, &sec, &nsec);
+    s->tsu_base_sec = sec;
+    s->tsu_base_nsec = nsec;
+    s->tsu_base_host_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
+static void gem_tsu_adjust(CadenceGEMState *s, uint32_t val)
+{
+    uint64_t delta_ns = val & 0x3fffffff;
+    uint64_t sec;
+    uint32_t nsec;
+    uint64_t total;
+
+    gem_tsu_now(s, &sec, &nsec);
+    total = sec * NANOSECONDS_PER_SECOND + nsec;
+    if (val & 0x80000000) {
+        total = total > delta_ns ? total - delta_ns : 0;
+    } else {
+        total += delta_ns;
+    }
+    s->tsu_base_sec = total / NANOSECONDS_PER_SECOND;
+    s->tsu_base_nsec = total % NANOSECONDS_PER_SECOND;
+    s->tsu_base_host_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
 static ssize_t gem_receive(NetClientState *nc, const uint8_t *buf, size_t size)
 {
     CadenceGEMState *s = qemu_get_nic_opaque(nc);
@@ -1548,6 +1717,13 @@ static ssize_t gem_receive(NetClientState *nc, const uint8_t *buf, size_t size)
             abort();
         default: /* SAR */
             rx_desc_set_sar(s->rx_desc[q], maf);
+        }
+
+        if ((s->regs[R_DMACFG] & R_DMACFG_RX_BD_EXT_MODE_EN_MASK) &&
+            gem_tsu_should_stamp(FIELD_EX32(s->regs[R_RXBDCTRL], RXBDCTRL,
+                                            RXTSMODE), buf, size)) {
+            gem_tsu_stamp_desc(s, s->rx_desc[q], gem_get_desc_len(s, true));
+            s->rx_desc[q][0] |= 1u << 2; /* timestamp valid */
         }
 
         /* Descriptor write-back.  */
@@ -1708,6 +1884,14 @@ static void gem_transmit(CadenceGEMState *s)
                                    MEMTXATTRS_UNSPECIFIED, desc_first,
                                    sizeof(desc_first));
                 tx_desc_set_used(desc_first);
+                if ((s->regs[R_DMACFG] & R_DMACFG_TX_BD_EXT_MODE_EN_MASK) &&
+                    gem_tsu_should_stamp(FIELD_EX32(s->regs[R_TXBDCTRL],
+                                                    TXBDCTRL, TXTSMODE),
+                                         s->tx_packet, total_bytes)) {
+                    gem_tsu_stamp_desc(s, desc_first,
+                                       gem_get_desc_len(s, false));
+                    desc_first[1] |= 1u << 23; /* timestamp valid */
+                }
                 address_space_write(&s->dma_as, desc_addr,
                                     MEMTXATTRS_UNSPECIFIED, desc_first,
                                     sizeof(desc_first));
@@ -1856,6 +2040,10 @@ static void gem_reset(DeviceState *d)
     }
     s->regs[R_DESCONF2] = 0x2ab10000 | s->jumbo_max_len;
     s->regs[R_DESCONF5] = 0x002f2045;
+    if (s->tsu) {
+        /* DCFG5 bit 8 is TSU; the board reads 0x102e6344 with it set. */
+        s->regs[R_DESCONF5] |= 1u << 8;
+    }
     /*
      * Only advertise 64-bit addressing where the part has it: a SAM9X75
      * Curiosity reads 0x0303003e in DESCONF6, with DMA_ADDR_64B clear, and
@@ -1997,79 +2185,6 @@ static void gem_handle_phy_access(CadenceGEMState *s)
  * gem_read32:
  * Read a GEM register.
  */
-/*
- * The TSU counts in seconds and nanoseconds, advancing by the increment in
- * 1588INC (whole nanoseconds) plus the fraction in 1588INCSUBN on every
- * tsu_clk tick.  A SAM9X75 Curiosity runs it from a 266666667 Hz gclk with
- * an increment of 3 ns and a sub-ns fraction of 0xbfffff/2^24, which is
- * 3.75 ns a tick, exactly the clock period.
- *
- * Rather than tick, keep the value the guest last wrote together with the
- * host time it was written at, and work out the rest on demand.
- */
-#define GEM_TSU_SUBNS_BITS 24
-
-static uint64_t gem_tsu_increment_subns(CadenceGEMState *s)
-{
-    uint32_t subn = s->regs[R_1588INCSUBN];
-
-    /* Fraction is split: bits 15:0 are the high part, bits 31:24 the low. */
-    return ((uint64_t)s->regs[R_1588INC] << GEM_TSU_SUBNS_BITS) |
-           ((uint64_t)(subn & 0xffff) << 8) | ((subn >> 24) & 0xff);
-}
-
-static void gem_tsu_now(CadenceGEMState *s, uint64_t *sec, uint32_t *nsec)
-{
-    uint64_t incr = gem_tsu_increment_subns(s);
-    uint64_t freq = s->tsu_clk ? clock_get_hz(s->tsu_clk) : 0;
-    uint64_t elapsed_ns = 0;
-    uint64_t total_ns;
-    int64_t delta;
-
-    if (freq && incr) {
-        delta = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->tsu_base_host_ns;
-        if (delta > 0) {
-            uint64_t ticks = muldiv64(delta, freq, NANOSECONDS_PER_SECOND);
-            elapsed_ns = muldiv64(ticks, incr, 1ULL << GEM_TSU_SUBNS_BITS);
-        }
-    }
-
-    total_ns = s->tsu_base_nsec + elapsed_ns;
-    *sec = s->tsu_base_sec + total_ns / NANOSECONDS_PER_SECOND;
-    *nsec = total_ns % NANOSECONDS_PER_SECOND;
-}
-
-/* Fold the running value into the base so a new rate applies from here on. */
-static void gem_tsu_rebase(CadenceGEMState *s)
-{
-    uint64_t sec;
-    uint32_t nsec;
-
-    gem_tsu_now(s, &sec, &nsec);
-    s->tsu_base_sec = sec;
-    s->tsu_base_nsec = nsec;
-    s->tsu_base_host_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-}
-
-static void gem_tsu_adjust(CadenceGEMState *s, uint32_t val)
-{
-    uint64_t delta_ns = val & 0x3fffffff;
-    uint64_t sec;
-    uint32_t nsec;
-    uint64_t total;
-
-    gem_tsu_now(s, &sec, &nsec);
-    total = sec * NANOSECONDS_PER_SECOND + nsec;
-    if (val & 0x80000000) {
-        total = total > delta_ns ? total - delta_ns : 0;
-    } else {
-        total += delta_ns;
-    }
-    s->tsu_base_sec = total / NANOSECONDS_PER_SECOND;
-    s->tsu_base_nsec = total % NANOSECONDS_PER_SECOND;
-    s->tsu_base_host_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-}
-
 static uint64_t gem_read(void *opaque, hwaddr offset, unsigned size)
 {
     CadenceGEMState *s;
@@ -2486,6 +2601,7 @@ static const Property gem_properties[] = {
                        jumbo_max_len, 10240),
     DEFINE_PROP_BOOL("dma-addr-64b", CadenceGEMState, dma_addr_64b, true),
     DEFINE_PROP_BOOL("user-io", CadenceGEMState, user_io, false),
+    DEFINE_PROP_BOOL("tsu", CadenceGEMState, tsu, false),
     DEFINE_PROP_BOOL("pcs-enabled", CadenceGEMState,
                        pcs_enabled, false),
     DEFINE_PROP_BOOL("phy-clocked", CadenceGEMState, phy_clocked, true),

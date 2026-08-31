@@ -662,6 +662,12 @@
 #define GEM_SPADDR1LO           0x088
 #define GEM_SPADDR1HI           0x08c
 #define GEM_MODID               0x0fc
+#define GEM_DMACFG              0x010
+#define GEM_TXBDCTRL            0x4cc
+#define GEM_RXBDCTRL            0x4d0
+#define GEM_DMACFG_RX_BD_EXT    BIT(28)
+#define GEM_DMACFG_TX_BD_EXT    BIT(29)
+#define GEM_TS_VALID_TX         BIT(23)
 #define GEM_1588INCSUBN         0x1bc
 #define GEM_1588SECHI           0x1c0
 #define GEM_1588S               0x1d0
@@ -6287,6 +6293,108 @@ static void test_gem_tsu_timer(void)
     sec = qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_1588SECHI);
     g_assert_cmphex(sec, ==, 0x1234);
     g_assert_cmpuint(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_1588S), ==, 5);
+
+    qtest_quit(qts);
+}
+
+/* Send one frame through an extended TX descriptor and return the two
+ * timestamp words plus the descriptor control word.
+ */
+static void gem_tx_ext_frame(QTestState *qts, const uint8_t *frame, size_t len,
+                             uint32_t *ctrl, uint32_t *ts1, uint32_t *ts2)
+{
+    const uint32_t descriptor = SAM9X7_SRAM0_BASE + 0x3000;
+    const uint32_t packet_addr = SAM9X7_SRAM0_BASE + 0x4000;
+
+    qtest_memwrite(qts, packet_addr, frame, len);
+    qtest_writel(qts, descriptor, packet_addr);
+    qtest_writel(qts, descriptor + 4,
+                 GEM_TX_DESC_WRAP | GEM_TX_DESC_LAST | len);
+    qtest_writel(qts, descriptor + 8, 0);
+    qtest_writel(qts, descriptor + 12, 0);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TXQBASE, descriptor);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_NWCTRL,
+                 GEM_NWCTRL_TXEN | GEM_NWCTRL_TSTART);
+    *ctrl = qtest_readl(qts, descriptor + 4);
+    *ts1 = qtest_readl(qts, descriptor + 8);
+    *ts2 = qtest_readl(qts, descriptor + 12);
+}
+
+/*
+ * With the timer frozen -- a zero increment -- a captured timestamp has to be
+ * exactly the value written, so the descriptor words can be checked outright.
+ * The layout is the one the guest driver decodes: nanoseconds in bits 29:0 of
+ * the first word, seconds[1:0] above them, seconds[5:2] in the second.
+ */
+static void test_gem_tsu_capture(void)
+{
+    static const uint8_t plain[64] = {
+        [0] = 0x02, [6] = 0x02, [11] = 0x01, [12] = 0x86, [13] = 0xdd,
+    };
+    /* PTP over Ethernet; byte 14 low nibble is the message type. */
+    static const uint8_t ptp_event[64] = {
+        [0] = 0x02, [6] = 0x02, [11] = 0x01, [12] = 0x88, [13] = 0xf7,
+        [14] = 0x00, /* Sync, an event message */
+    };
+    static const uint8_t ptp_general[64] = {
+        [0] = 0x02, [6] = 0x02, [11] = 0x01, [12] = 0x88, [13] = 0xf7,
+        [14] = 0x08, /* Follow_Up, not an event */
+    };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t ctrl, ts1, ts2;
+
+    gem_quiesce_unused_queues(qts);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_DMACFG, GEM_DMACFG_TX_BD_EXT);
+
+    /* Freeze the timer at 5.000123456 so the capture is deterministic. */
+    pmc_write_pcr(qts, 24, PMC_PCR_EN | (2U << 8) | (2U << 20) |
+                           PMC_PCR_GCKEN);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588INC, 0);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588INCSUBN, 0);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588S, 5);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588NS, 123456);
+
+    /* Mode 0 stamps nothing. */
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TXBDCTRL, 0U << 4);
+    gem_tx_ext_frame(qts, plain, sizeof(plain), &ctrl, &ts1, &ts2);
+    g_assert_true(ctrl & GEM_TX_DESC_USED);
+    g_assert_false(ctrl & GEM_TS_VALID_TX);
+    g_assert_cmphex(ts1, ==, 0);
+    g_assert_cmphex(ts2, ==, 0);
+
+    /* Mode 3 stamps every frame, PTP or not. */
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TXBDCTRL, 3U << 4);
+    gem_tx_ext_frame(qts, plain, sizeof(plain), &ctrl, &ts1, &ts2);
+    g_assert_true(ctrl & GEM_TS_VALID_TX);
+    g_assert_cmphex(ts1, ==, 123456 | ((5 & 3) << 30));
+    g_assert_cmphex(ts2, ==, (5 >> 2) & 0xf);
+
+    /* Mode 1 is event messages only. */
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TXBDCTRL, 1U << 4);
+    gem_tx_ext_frame(qts, plain, sizeof(plain), &ctrl, &ts1, &ts2);
+    g_assert_false(ctrl & GEM_TS_VALID_TX);
+    g_assert_cmphex(ts1, ==, 0);
+
+    gem_tx_ext_frame(qts, ptp_general, sizeof(ptp_general), &ctrl, &ts1, &ts2);
+    g_assert_false(ctrl & GEM_TS_VALID_TX);
+
+    gem_tx_ext_frame(qts, ptp_event, sizeof(ptp_event), &ctrl, &ts1, &ts2);
+    g_assert_true(ctrl & GEM_TS_VALID_TX);
+    g_assert_cmphex(ts1, ==, 123456 | ((5 & 3) << 30));
+
+    /* Mode 2 takes any PTP message, event or not. */
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TXBDCTRL, 2U << 4);
+    gem_tx_ext_frame(qts, ptp_general, sizeof(ptp_general), &ctrl, &ts1, &ts2);
+    g_assert_true(ctrl & GEM_TS_VALID_TX);
+    gem_tx_ext_frame(qts, plain, sizeof(plain), &ctrl, &ts1, &ts2);
+    g_assert_false(ctrl & GEM_TS_VALID_TX);
+
+    /* The seconds wrap at six bits, which is all the descriptor carries. */
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588S, 0x4d);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_TXBDCTRL, 3U << 4);
+    gem_tx_ext_frame(qts, plain, sizeof(plain), &ctrl, &ts1, &ts2);
+    g_assert_cmphex(ts1 >> 30, ==, 0x4d & 3);
+    g_assert_cmphex(ts2, ==, (0x4d >> 2) & 0xf);
 
     qtest_quit(qts);
 }
@@ -28273,6 +28381,7 @@ int main(int argc, char **argv)
     qtest_add_func("sam9x75/gem/lan8841-interrupt-migration",
                    test_gem_lan8841_interrupt_migration);
     qtest_add_func("sam9x75/gem/tsu-timer", test_gem_tsu_timer);
+    qtest_add_func("sam9x75/gem/tsu-capture", test_gem_tsu_capture);
     qtest_add_func("sam9x75/gem/tsu-migration", test_gem_tsu_migration);
     qtest_add_func("sam9x75/gem/statistics-generated-and-clear",
                    test_gem_statistics_generated_and_clear);
