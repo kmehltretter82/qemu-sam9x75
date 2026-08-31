@@ -30,6 +30,7 @@ struct AT91TRNGState {
     uint32_t odata;
     uint32_t wpmr;
     uint32_t wpsr;
+    uint32_t version;
 
     bool enabled;
     bool data_valid;

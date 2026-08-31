@@ -21266,10 +21266,12 @@ static void test_silicon_version_registers(void)
     pmc_write_pcr(qts, 39, PMC_PCR_EN);
     pmc_write_pcr(qts, 41, PMC_PCR_EN);
     pmc_write_pcr(qts, 40, PMC_PCR_EN);
+    pmc_write_pcr(qts, 38, PMC_PCR_EN);
 
     g_assert_cmphex(qtest_readl(qts, SAM9X7_AES_BASE + 0xfc), ==, 0x606);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + 0xfc), ==, 0x604);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_TDES_BASE + 0xfc), ==, 0x803);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + 0xfc), ==, 0x307);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + 0xfc), ==,
                     0x4107010c);
     pmc_write_pcr(qts, 34, PMC_PCR_EN);

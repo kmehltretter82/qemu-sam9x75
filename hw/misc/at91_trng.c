@@ -14,6 +14,7 @@
 #include "qemu/guest-random.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "hw/core/qdev-properties.h"
 
 #define TRNG_CR                 0x00
 #define TRNG_MR                 0x04
@@ -25,6 +26,7 @@
 #define TRNG_ODATA              0x50
 #define TRNG_WPMR               0xe4
 #define TRNG_WPSR               0xe8
+#define TRNG_VERSION            0xfc
 #define TRNG_MMIO_SIZE          0x100
 
 #define TRNG_CR_KEY_MASK        0xffffff00
@@ -187,6 +189,8 @@ static uint64_t at91_trng_read(void *opaque, hwaddr offset,
             at91_trng_raise_swe(s, offset, TRNG_SWE_READ_WO, false);
         }
         return 0;
+    case TRNG_VERSION:
+        return s->version;
     default:
         at91_trng_raise_swe(s, offset, TRNG_SWE_UNDEF_RW, false);
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -270,6 +274,7 @@ static void at91_trng_write(void *opaque, hwaddr offset, uint64_t value,
     case TRNG_ISR:
     case TRNG_ODATA:
     case TRNG_WPSR:
+    case TRNG_VERSION:
         if (s->enabled) {
             at91_trng_raise_swe(s, offset, TRNG_SWE_WRITE_RO, false);
         }
@@ -383,6 +388,10 @@ static const VMStateDescription vmstate_at91_trng = {
     },
 };
 
+static const Property at91_trng_properties[] = {
+    DEFINE_PROP_UINT32("version", AT91TRNGState, version, 0x307),
+};
+
 static void at91_trng_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -391,6 +400,7 @@ static void at91_trng_class_init(ObjectClass *klass, const void *data)
     dc->realize = at91_trng_realize;
     dc->vmsd = &vmstate_at91_trng;
     device_class_set_legacy_reset(dc, at91_trng_reset);
+    device_class_set_props(dc, at91_trng_properties);
 }
 
 static const TypeInfo at91_trng_info = {

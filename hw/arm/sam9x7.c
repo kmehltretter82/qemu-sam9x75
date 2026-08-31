@@ -1152,6 +1152,7 @@ static void sam9x7_init(Object *obj)
                           qdev_get_clock_out(DEVICE(&s->pmc), "pclk[20]"));
 
     object_initialize_child(obj, "trng", &s->trng, TYPE_AT91_TRNG);
+    qdev_prop_set_uint32(DEVICE(&s->trng), "version", 0x307);
     qdev_connect_clock_in(DEVICE(&s->trng), "pclk",
                           qdev_get_clock_out(DEVICE(&s->pmc), "pclk[38]"));
 
