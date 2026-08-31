@@ -22324,8 +22324,13 @@ static void test_uhphs_registers_reset_and_companions(void)
                                 UHPFS_HC_FM_INTERVAL), ==, 0x2edf);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
                                 UHPFS_HC_LS_THRESHOLD), ==, 0x628);
+    /*
+     * NPS clear and POTPGT 2, as measured on a SAM9X75 Curiosity: the board
+     * reads back 0x02000803 once ohci_run() has forced OCPM on and NOCP off,
+     * which leaves every other bit at its reset state.
+     */
     g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
-                                UHPFS_HC_RH_DESC_A), ==, 0x0a001203);
+                                UHPFS_HC_RH_DESC_A), ==, 0x02001003);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
                                 UHPFS_HC_RH_DESC_B), ==, 0);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
@@ -22335,7 +22340,11 @@ static void test_uhphs_registers_reset_and_companions(void)
                                     UHPFS_HC_RH_PORT(i)), ==,
                         UHPFS_PORT_PPS);
 
-        /* NPS makes both global and per-port power controls read-only. */
+        /*
+         * Reset leaves NPS and PSM clear, so the ports come up ganged: a
+         * per-port power control is ignored and only the hub-status globals
+         * take effect.
+         */
         qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE +
                      UHPFS_HC_RH_PORT(i), UHPFS_PORT_LSDA);
         g_assert_cmphex(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
@@ -22344,6 +22353,12 @@ static void test_uhphs_registers_reset_and_companions(void)
     }
     qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_RH_STATUS,
                  UHPFS_RHS_LPS);
+    for (i = 0; i < 3; i++) {
+        g_assert_false(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
+                                   UHPFS_HC_RH_PORT(i)) & UHPFS_PORT_PPS);
+    }
+    qtest_writel(qts, SAM9X7_UHPHS_OHCI_BASE + UHPFS_HC_RH_STATUS,
+                 UHPFS_RHS_LPSC);
     for (i = 0; i < 3; i++) {
         g_assert_true(qtest_readl(qts, SAM9X7_UHPHS_OHCI_BASE +
                                   UHPFS_HC_RH_PORT(i)) & UHPFS_PORT_PPS);

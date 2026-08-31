@@ -128,7 +128,16 @@ static void at91_uhphs_ohci_init(Object *obj)
     ohci->custom_reset_values = true;
     ohci->reset_intr = 0;
     ohci->reset_fsmps = 0;
-    ohci->reset_rhdesc_a = 0x0a001203;
+    /*
+     * NPS is clear and POTPGT is 2 (4ms) on a SAM9X75 Curiosity: ohci-at91
+     * never writes HcRhDescriptorA, and ohci_run() only forces OCPM on and
+     * NOCP off, so the remaining bits of the value Linux reads back are the
+     * reset value.  The board reports 0x02000803 there and 0x000e0000 in
+     * HcRhDescriptorB, the latter only because a clear NPS makes ohci_run()
+     * write RH_B_PPCM.  NOCP is left as it was: ohci_run() clears it before
+     * anything can observe it, so hardware cannot confirm its reset state.
+     */
+    ohci->reset_rhdesc_a = 0x02001003;
     ohci->reset_port_ctrl = 0x00000100;
     ohci->clocked_cb = at91_uhphs_ohci_clocked;
     ohci->clocked_opaque = s;
