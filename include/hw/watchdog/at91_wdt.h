@@ -35,6 +35,8 @@ struct AT91WDTState {
     uint32_t isr;
     int64_t cr_guard_deadline;
     bool locked;
+    /* WDT_MR takes the first write after reset and ignores the rest. */
+    bool mode_written;
     bool running;
     bool level_running;
     bool clock_suspended;

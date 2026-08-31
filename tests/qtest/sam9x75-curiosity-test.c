@@ -16244,6 +16244,22 @@ static void test_wdt_reset_disable_and_lock(void)
 
     g_assert_cmphex(qtest_readl(qts, SAM9X7_WDT_BASE + WDT_MR), ==,
                     WDT_MR_PERIODRST | WDT_MR_RPTHRST);
+    /*
+     * WDT_MR takes the first write after reset and ignores every later one,
+     * with no lock command needed.  The board's boot chain shows it:
+     * AT91Bootstrap writes 0x1030, U-Boot writes 0x1010, and the board still
+     * reads 0x1030 at the U-Boot prompt.
+     */
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR,
+                 WDT_MR_PERIODRST | WDT_MR_WDDIS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_WDT_BASE + WDT_MR), ==,
+                    WDT_MR_PERIODRST | WDT_MR_WDDIS);
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, WDT_MR_RPTHRST);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_WDT_BASE + WDT_MR), ==,
+                    WDT_MR_PERIODRST | WDT_MR_WDDIS);
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_WDT_BASE + WDT_MR), ==,
+                    WDT_MR_PERIODRST | WDT_MR_RPTHRST);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_WDT_BASE + WDT_WLR), ==,
                     0x00000fff);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_WDT_BASE + WDT_ILR), ==,
@@ -16333,10 +16349,14 @@ static void test_wdt_events_and_system_irq(void)
                  WDT_CR_KEY | WDT_CR_WDRSTT);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_WDT_BASE + WDT_ISR), ==, 0);
 
-    /* CR/MR writes inside the three-SLCK synchronization guard end early. */
-    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_MR, 0);
+    /*
+     * CR/MR writes inside the three-SLCK synchronization guard end early.
+     * MR takes only its first write after reset, so drive the guard with CR.
+     */
+    qtest_writel(qts, SAM9X7_WDT_BASE + WDT_CR,
+                 WDT_CR_KEY | WDT_CR_WDRSTT);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_WDT_BASE + WDT_ISR), ==,
-                    WDT_INT_PER);
+                    WDT_INT_PER | WDT_INT_RPTH);
 
     qtest_writel(qts, SAM9X7_WDT_BASE + WDT_IDR, all_events);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_WDT_BASE + WDT_IMR), ==, 0);

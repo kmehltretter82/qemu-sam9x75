@@ -262,13 +262,14 @@ static void at91_wdt_write(void *opaque, hwaddr offset, uint64_t value,
         }
         break;
     case WDT_MR:
-        if (s->locked) {
+        if (s->locked || s->mode_written) {
             return;
         }
         if (at91_sysc_write_protected(s->sysc, WDT_MR, false, false)) {
             return;
         }
         sequence_failure = at91_wdt_in_cr_guard(s);
+        s->mode_written = true;
         s->mode = value & WDT_MR_MASK;
         at91_wdt_restart(s);
         if (sequence_failure) {
@@ -369,6 +370,7 @@ static void at91_wdt_reset_enter(Object *obj, ResetType type)
     s->imr = 0;
     s->isr = 0;
     s->locked = false;
+    s->mode_written = false;
     s->cr_guard_deadline = -1;
     s->running = false;
     s->level_running = false;
@@ -474,6 +476,7 @@ static const VMStateDescription at91_wdt_vmstate = {
         VMSTATE_UINT32(isr, AT91WDTState),
         VMSTATE_INT64(cr_guard_deadline, AT91WDTState),
         VMSTATE_BOOL(locked, AT91WDTState),
+        VMSTATE_BOOL(mode_written, AT91WDTState),
         VMSTATE_BOOL(running, AT91WDTState),
         VMSTATE_BOOL(level_running, AT91WDTState),
         VMSTATE_BOOL(clock_suspended, AT91WDTState),
