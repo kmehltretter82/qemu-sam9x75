@@ -213,16 +213,29 @@ static const MemoryRegionOps at91_matrix_ops = {
     },
 };
 
+static const uint32_t matrix_scfg_reset[AT91_MATRIX_NUM_CLIENTS] = {
+    0x00010001, 0x000101ff, 0x000101ff, 0x000101ff,
+    0x000101ff, 0x000101ff, 0x000101ff, 0x000d01ff,
+    0x000101ff, 0x000101ff, 0x000101ff, 0x003101ff,
+};
+
 static void at91_matrix_reset(DeviceState *dev)
 {
     AT91MatrixState *s = AT91_MATRIX(dev);
     unsigned int i;
 
+    /*
+     * Reset values as read on a SAM9X75 Curiosity.  Every host configuration
+     * register is zero, and the client ones are not uniform: client 0 gets a
+     * single slot cycle, and clients 7 and 11 come up with a default host
+     * selected.  AT91Bootstrap and U-Boot leave all of them alone, so what
+     * the board reads there is what it came out of reset with.
+     */
     for (i = 0; i < ARRAY_SIZE(s->mcfg); i++) {
-        s->mcfg[i] = 0x00000004;
+        s->mcfg[i] = 0x00000000;
     }
     for (i = 0; i < ARRAY_SIZE(s->scfg); i++) {
-        s->scfg[i] = 0x000001ff;
+        s->scfg[i] = matrix_scfg_reset[i];
     }
     memcpy(s->pras, matrix_pras_reset, sizeof(s->pras));
     memcpy(s->prbs, matrix_prbs_reset, sizeof(s->prbs));

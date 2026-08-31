@@ -2120,9 +2120,10 @@ static void test_matrix_registers_and_protection(void)
     QTestState *qts = qtest_init(SAM9X75_MACHINE);
     unsigned int i;
 
+    /* Reset values as read on the board; see at91_matrix_reset(). */
     for (i = 0; i < 14; i++) {
         g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE +
-                                    MATRIX_MCFG(i)), ==, 4);
+                                    MATRIX_MCFG(i)), ==, 0);
         g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE +
                                     MATRIX_MEAR(i)), ==, 0);
         qtest_writel(qts, SAM9X7_MATRIX_BASE + MATRIX_MCFG(i),
@@ -2131,8 +2132,14 @@ static void test_matrix_registers_and_protection(void)
                                     MATRIX_MCFG(i)), ==, 7);
     }
     for (i = 0; i < 12; i++) {
+        static const uint32_t scfg_reset[12] = {
+            0x00010001, 0x000101ff, 0x000101ff, 0x000101ff,
+            0x000101ff, 0x000101ff, 0x000101ff, 0x000d01ff,
+            0x000101ff, 0x000101ff, 0x000101ff, 0x003101ff,
+        };
+
         g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE +
-                                    MATRIX_SCFG(i)), ==, 0x000001ff);
+                                    MATRIX_SCFG(i)), ==, scfg_reset[i]);
         g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE +
                                     MATRIX_PRAS(i)), ==, pras_reset[i]);
         g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE +
@@ -2203,9 +2210,9 @@ static void test_matrix_registers_and_protection(void)
 
     qtest_system_reset(qts);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_MCFG(0)),
-                    ==, 4);
+                    ==, 0);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_SCFG(3)),
-                    ==, 0x000001ff);
+                    ==, 0x000101ff);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_MEIMR),
                     ==, 0);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_MATRIX_BASE + MATRIX_WPMR),
