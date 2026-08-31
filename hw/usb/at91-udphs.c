@@ -28,6 +28,7 @@
 #define UDPHS_CLRINT                0x018
 #define UDPHS_EPTRST                0x01c
 #define UDPHS_TST                   0x0e0
+#define UDPHS_IPPADDRSIZE           0x0ec
 #define UDPHS_IPNAME1               0x0f0
 #define UDPHS_IPNAME2               0x0f4
 #define UDPHS_IPFEATURES            0x0f8
@@ -1447,6 +1448,8 @@ static uint64_t at91_udphs_regs_read(void *opaque, hwaddr offset,
         return 0;
     case UDPHS_TST:
         return s->tst & UDPHS_TST_MASK;
+    case UDPHS_IPPADDRSIZE:
+        return s->paddrsize;
     case UDPHS_IPNAME1:
         return UDPHS_IPNAME1_VALUE;
     case UDPHS_IPNAME2:
@@ -2804,6 +2807,7 @@ static void at91_udphs_unrealize(DeviceState *dev)
 }
 
 static const Property at91_udphs_properties[] = {
+    DEFINE_PROP_UINT32("paddrsize", AT91UDPHSState, paddrsize, 0x00004000),
     DEFINE_PROP_UINT32("features", AT91UDPHSState, features, 0x0079f467),
     DEFINE_PROP_UINT32("version", AT91UDPHSState, version, 0x00000150),
     DEFINE_PROP_LINK("dma-memory", AT91UDPHSState, dma_mr,

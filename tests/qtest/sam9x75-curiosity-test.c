@@ -21509,6 +21509,7 @@ static void test_silicon_version_registers(void)
      * enabled in the device tree so atmel_usba_udc binds and the clock is on.
      */
     pmc_write_pcr(qts, 23, PMC_PCR_EN);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + 0xec), ==, 0x00004000);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + 0xf0), ==, 0x48555342);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + 0xf4), ==, 0x32444556);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_UDPHS_BASE + 0xf8), ==, 0x0079f467);
