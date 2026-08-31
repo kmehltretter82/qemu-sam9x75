@@ -77,6 +77,15 @@ abi_ulong get_elf_hwcap(CPUState *cs)
 
     /* EDSP is in v5TE and above, but all our v5 CPUs are v5TE */
     GET_FEATURE(ARM_FEATURE_V5, ARM_HWCAP_ARM_EDSP);
+    /*
+     * Linux advertises HWCAP_JAVA only for pre-v7 cores with Jazelle
+     * (arch/arm/mm/proc-arm926.S, proc-arm1026.S and proc-v6.S set it;
+     * proc-v7.S does not, even though v7 requires a trivial Jazelle
+     * implementation). Match that so guests see what real hardware reports.
+     */
+    if (!arm_feature(&cpu->env, ARM_FEATURE_V7)) {
+        GET_FEATURE_ID(aa32_jazelle, ARM_HWCAP_ARM_JAVA);
+    }
     GET_FEATURE(ARM_FEATURE_THUMB2EE, ARM_HWCAP_ARM_THUMBEE);
     GET_FEATURE(ARM_FEATURE_NEON, ARM_HWCAP_ARM_NEON);
     GET_FEATURE(ARM_FEATURE_V6K, ARM_HWCAP_ARM_TLS);
