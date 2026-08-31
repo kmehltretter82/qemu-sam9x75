@@ -69,6 +69,11 @@ struct CadenceGEMState {
     uint16_t jumbo_max_len;
     bool dma_addr_64b;
     bool user_io;
+
+    Clock *tsu_clk;
+    int64_t tsu_base_host_ns;
+    uint64_t tsu_base_sec;
+    uint32_t tsu_base_nsec;
     bool pcs_enabled;
     bool phy_clocked;
 

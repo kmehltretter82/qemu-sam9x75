@@ -25,12 +25,15 @@
 #include "qemu/osdep.h"
 #include <zlib.h> /* for crc32 */
 
+#include "hw/core/clock.h"
 #include "hw/core/irq.h"
 #include "hw/net/cadence_gem.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/registerfields.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
+#include "qemu/host-utils.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "system/dma.h"
@@ -275,6 +278,8 @@ REG32(RXUDPCCNT, 0x1b0) /* UDP Checksum Error Counter */
 #define GEM_STAT_LAST  R_RXUDPCCNT
 #define GEM_OCTETS_MAX UINT64_C(0x0000ffffffffffff)
 
+REG32(1588INCSUBN, 0x1bc) /* 1588 Timer Increment sub-ns */
+REG32(1588SECHI, 0x1c0) /* 1588 Timer Seconds High */
 REG32(1588S, 0x1d0) /* 1588 Timer Seconds */
 REG32(1588NS, 0x1d4) /* 1588 Timer Nanoseconds */
 REG32(1588ADJ, 0x1d8) /* 1588 Timer Adjust */
@@ -1992,6 +1997,79 @@ static void gem_handle_phy_access(CadenceGEMState *s)
  * gem_read32:
  * Read a GEM register.
  */
+/*
+ * The TSU counts in seconds and nanoseconds, advancing by the increment in
+ * 1588INC (whole nanoseconds) plus the fraction in 1588INCSUBN on every
+ * tsu_clk tick.  A SAM9X75 Curiosity runs it from a 266666667 Hz gclk with
+ * an increment of 3 ns and a sub-ns fraction of 0xbfffff/2^24, which is
+ * 3.75 ns a tick, exactly the clock period.
+ *
+ * Rather than tick, keep the value the guest last wrote together with the
+ * host time it was written at, and work out the rest on demand.
+ */
+#define GEM_TSU_SUBNS_BITS 24
+
+static uint64_t gem_tsu_increment_subns(CadenceGEMState *s)
+{
+    uint32_t subn = s->regs[R_1588INCSUBN];
+
+    /* Fraction is split: bits 15:0 are the high part, bits 31:24 the low. */
+    return ((uint64_t)s->regs[R_1588INC] << GEM_TSU_SUBNS_BITS) |
+           ((uint64_t)(subn & 0xffff) << 8) | ((subn >> 24) & 0xff);
+}
+
+static void gem_tsu_now(CadenceGEMState *s, uint64_t *sec, uint32_t *nsec)
+{
+    uint64_t incr = gem_tsu_increment_subns(s);
+    uint64_t freq = s->tsu_clk ? clock_get_hz(s->tsu_clk) : 0;
+    uint64_t elapsed_ns = 0;
+    uint64_t total_ns;
+    int64_t delta;
+
+    if (freq && incr) {
+        delta = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->tsu_base_host_ns;
+        if (delta > 0) {
+            uint64_t ticks = muldiv64(delta, freq, NANOSECONDS_PER_SECOND);
+            elapsed_ns = muldiv64(ticks, incr, 1ULL << GEM_TSU_SUBNS_BITS);
+        }
+    }
+
+    total_ns = s->tsu_base_nsec + elapsed_ns;
+    *sec = s->tsu_base_sec + total_ns / NANOSECONDS_PER_SECOND;
+    *nsec = total_ns % NANOSECONDS_PER_SECOND;
+}
+
+/* Fold the running value into the base so a new rate applies from here on. */
+static void gem_tsu_rebase(CadenceGEMState *s)
+{
+    uint64_t sec;
+    uint32_t nsec;
+
+    gem_tsu_now(s, &sec, &nsec);
+    s->tsu_base_sec = sec;
+    s->tsu_base_nsec = nsec;
+    s->tsu_base_host_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
+static void gem_tsu_adjust(CadenceGEMState *s, uint32_t val)
+{
+    uint64_t delta_ns = val & 0x3fffffff;
+    uint64_t sec;
+    uint32_t nsec;
+    uint64_t total;
+
+    gem_tsu_now(s, &sec, &nsec);
+    total = sec * NANOSECONDS_PER_SECOND + nsec;
+    if (val & 0x80000000) {
+        total = total > delta_ns ? total - delta_ns : 0;
+    } else {
+        total += delta_ns;
+    }
+    s->tsu_base_sec = total / NANOSECONDS_PER_SECOND;
+    s->tsu_base_nsec = total % NANOSECONDS_PER_SECOND;
+    s->tsu_base_host_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
 static uint64_t gem_read(void *opaque, hwaddr offset, unsigned size)
 {
     CadenceGEMState *s;
@@ -2024,6 +2102,22 @@ static uint64_t gem_read(void *opaque, hwaddr offset, unsigned size)
         DB_PRINT("lowering irqs on ISR read\n");
         /* The interrupts get updated at the end of the function. */
         break;
+    case R_1588S:
+    case R_1588SECHI:
+    case R_1588NS: {
+        uint64_t sec;
+        uint32_t nsec;
+
+        gem_tsu_now(s, &sec, &nsec);
+        if (offset == R_1588NS) {
+            retval = nsec;
+        } else if (offset == R_1588S) {
+            retval = sec;
+        } else {
+            retval = sec >> 32;
+        }
+        break;
+    }
     }
 
     /* Squash read to clear bits */
@@ -2072,6 +2166,26 @@ static void gem_write(void *opaque, hwaddr offset, uint64_t val,
 
     /* Handle register write side effects */
     switch (offset) {
+    case R_1588INC:
+    case R_1588INCSUBN:
+        /* A new rate applies from now on, not retroactively. */
+        gem_tsu_rebase(s);
+        break;
+    case R_1588S:
+        gem_tsu_rebase(s);
+        s->tsu_base_sec = deposit64(s->tsu_base_sec, 0, 32, val);
+        break;
+    case R_1588SECHI:
+        gem_tsu_rebase(s);
+        s->tsu_base_sec = deposit64(s->tsu_base_sec, 32, 32, val);
+        break;
+    case R_1588NS:
+        gem_tsu_rebase(s);
+        s->tsu_base_nsec = val % NANOSECONDS_PER_SECOND;
+        break;
+    case R_1588ADJ:
+        gem_tsu_adjust(s, val);
+        break;
     case R_NWCTRL:
         if (FIELD_EX32(val, NWCTRL, CLEAR_ALL_STATS_REGS)) {
             gem_clear_statistics(s);
@@ -2237,6 +2351,8 @@ static void gem_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->iomem);
     /* Logical assertion; board wiring supplies the PHY interrupt polarity. */
     qdev_init_gpio_out_named(dev, &s->phy_irq, CADENCE_GEM_PHY_IRQ, 1);
+    /* Drives the 1588 timer; boards that have no TSU leave it unconnected. */
+    s->tsu_clk = qdev_init_clock_in(dev, "tsu_clk", NULL, NULL, 0);
 }
 
 static int gem_pre_load(void *opaque)
@@ -2309,6 +2425,27 @@ static const VMStateDescription vmstate_cadence_gem_lan8841_mmd = {
     },
 };
 
+static bool gem_tsu_needed(void *opaque)
+{
+    CadenceGEMState *s = opaque;
+
+    /* Only send it once a guest has actually set the 1588 timer going. */
+    return s->tsu_base_sec || s->tsu_base_nsec || s->tsu_base_host_ns;
+}
+
+static const VMStateDescription vmstate_cadence_gem_tsu = {
+    .name = "cadence_gem/tsu",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = gem_tsu_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT64(tsu_base_host_ns, CadenceGEMState),
+        VMSTATE_UINT64(tsu_base_sec, CadenceGEMState),
+        VMSTATE_UINT32(tsu_base_nsec, CadenceGEMState),
+        VMSTATE_END_OF_LIST(),
+    },
+};
+
 static const VMStateDescription vmstate_cadence_gem = {
     .name = "cadence_gem",
     .version_id = 5,
@@ -2328,6 +2465,7 @@ static const VMStateDescription vmstate_cadence_gem = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_cadence_gem_lan8841_mmd,
+        &vmstate_cadence_gem_tsu,
         NULL,
     },
 };

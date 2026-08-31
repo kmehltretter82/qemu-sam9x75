@@ -1244,6 +1244,9 @@ static void sam9x7_init(Object *obj)
     object_property_set_bool(OBJECT(&s->gmac), "dma-addr-64b", false,
                              &error_abort);
     object_property_set_bool(OBJECT(&s->gmac), "user-io", true, &error_abort);
+    /* Drives the 1588 timer; the board runs this gclk at 266666667 Hz. */
+    qdev_connect_clock_in(DEVICE(&s->gmac), "tsu_clk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "gclk[24]"));
     qdev_prop_set_uint8(DEVICE(&s->gmac), "phy-addr", 1);
     qdev_prop_set_uint32(DEVICE(&s->gmac), "phy-id", 0x00221650);
     qdev_prop_set_uint8(DEVICE(&s->gmac), "num-priority-queues",

@@ -662,6 +662,12 @@
 #define GEM_SPADDR1LO           0x088
 #define GEM_SPADDR1HI           0x08c
 #define GEM_MODID               0x0fc
+#define GEM_1588INCSUBN         0x1bc
+#define GEM_1588SECHI           0x1c0
+#define GEM_1588S               0x1d0
+#define GEM_1588NS              0x1d4
+#define GEM_1588ADJ             0x1d8
+#define GEM_1588INC             0x1dc
 #define GEM_DESCONF             0x280
 #define GEM_DESCONF6            0x294
 #define GEM_INT_Q1_STATUS       0x400
@@ -6220,6 +6226,71 @@ static void gem_assert_stat_rtc(QTestState *qts, uint32_t offset,
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + offset), ==, 0);
 }
 
+/*
+ * The 1588 timer advances by GEM_1588INC nanoseconds plus the GEM_1588INCSUBN
+ * fraction on every tsu_clk tick.  A SAM9X75 Curiosity programs 3 ns and
+ * 0xff00bfff, which is 0xbfffff/2^24 = 0.75 ns, for a 266666667 Hz gclk --
+ * 3.75 ns a tick, exactly the clock period.  The rate a bare qtest gets from
+ * the PMC is not that, so assert the semantics rather than an absolute value.
+ */
+static void test_gem_tsu_timer(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint32_t first, second, sec;
+
+    /* Without a running tsu_clk the timer must stand still. */
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588INC, 3);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588INCSUBN, 0xff00bfff);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588NS, 0);
+    qtest_clock_step(qts, 1000000000);
+    g_assert_cmpuint(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_1588NS), ==, 0);
+
+    pmc_write_pcr(qts, 24, PMC_PCR_EN | (2U << 8) | (2U << 20) |
+                           PMC_PCR_GCKEN);
+    g_assert_cmpuint(get_clock_period(qts, "/machine/soc/pmc/gclk[24]"),
+                     >, 0);
+
+    /* A write lands exactly, and the timer runs from there. */
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588S, 0);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588NS, 0);
+    g_assert_cmpuint(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_1588S), ==, 0);
+
+    qtest_clock_step(qts, 1000000000);
+    first = qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_1588NS);
+    g_assert_cmpuint(first, >, 0);
+
+    /* Twice the time is twice the advance, within a tick of rounding. */
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588NS, 0);
+    qtest_clock_step(qts, 2000000000);
+    second = qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_1588NS);
+    g_assert_cmpuint(second, >=, 2 * first - 4);
+    g_assert_cmpuint(second, <=, 2 * first + 4);
+
+    /* A zero increment stops it, which is how the register comes out of reset. */
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588INC, 0);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588INCSUBN, 0);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588NS, 0);
+    qtest_clock_step(qts, 1000000000);
+    g_assert_cmpuint(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_1588NS), ==, 0);
+
+    /* Adjust moves the timer without disturbing the rate. */
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588S, 5);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588NS, 0);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588ADJ, 1000);
+    g_assert_cmpuint(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_1588NS), ==, 1000);
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588ADJ, 0x80000000 | 500);
+    g_assert_cmpuint(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_1588NS), ==, 500);
+    g_assert_cmpuint(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_1588S), ==, 5);
+
+    /* The seconds field is 48 bits, split across two registers. */
+    qtest_writel(qts, SAM9X7_GMAC_BASE + GEM_1588SECHI, 0x1234);
+    sec = qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_1588SECHI);
+    g_assert_cmphex(sec, ==, 0x1234);
+    g_assert_cmpuint(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_1588S), ==, 5);
+
+    qtest_quit(qts);
+}
+
 static void test_gem_statistics_generated_and_clear(void)
 {
     static const uint8_t ipv6_multicast[6] = {
@@ -6514,6 +6585,41 @@ static void test_gem_statistics_migration(void)
     g_assert_true(qtest_readl(to, SAM9X7_GMAC_BASE + GEM_ISR) &
                   GEM_INT_XMIT_COMPLETE);
     g_assert_false(qtest_get_irq(to, 0));
+
+    qtest_quit(from);
+    qtest_quit(to);
+}
+
+/*
+ * The 1588 timer base has to survive migration.  Stop the timer first, so the
+ * value is fixed and the comparison cannot race the clock on either side.
+ */
+static void test_gem_tsu_migration(void)
+{
+    const char *source_env = g_getenv("QTEST_QEMU_BINARY_OLD") ?
+                             "QTEST_QEMU_BINARY_OLD" :
+                             "QTEST_QEMU_BINARY";
+    QTestState *from = qtest_init_ext(source_env, SAM9X75_MACHINE,
+                                      NULL, true);
+    QTestState *to = qtest_init(SAM9X75_MACHINE " -incoming defer");
+
+    qtest_writel(from, SAM9X7_GMAC_BASE + GEM_1588INC, 0);
+    qtest_writel(from, SAM9X7_GMAC_BASE + GEM_1588INCSUBN, 0);
+    qtest_writel(from, SAM9X7_GMAC_BASE + GEM_1588SECHI, 0x1234);
+    qtest_writel(from, SAM9X7_GMAC_BASE + GEM_1588S, 0x9abcdef0);
+    qtest_writel(from, SAM9X7_GMAC_BASE + GEM_1588NS, 123456789);
+
+    migrate_incoming_qmp(to, "tcp:127.0.0.1:0", NULL, "{}");
+    migrate_qmp(from, to, NULL, NULL, "{}");
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    g_assert_cmphex(qtest_readl(to, SAM9X7_GMAC_BASE + GEM_1588SECHI), ==,
+                    0x1234);
+    g_assert_cmphex(qtest_readl(to, SAM9X7_GMAC_BASE + GEM_1588S), ==,
+                    0x9abcdef0);
+    g_assert_cmpuint(qtest_readl(to, SAM9X7_GMAC_BASE + GEM_1588NS), ==,
+                     123456789);
 
     qtest_quit(from);
     qtest_quit(to);
@@ -28166,6 +28272,8 @@ int main(int argc, char **argv)
                    test_gem_lan8841_interrupt_line);
     qtest_add_func("sam9x75/gem/lan8841-interrupt-migration",
                    test_gem_lan8841_interrupt_migration);
+    qtest_add_func("sam9x75/gem/tsu-timer", test_gem_tsu_timer);
+    qtest_add_func("sam9x75/gem/tsu-migration", test_gem_tsu_migration);
     qtest_add_func("sam9x75/gem/statistics-generated-and-clear",
                    test_gem_statistics_generated_and_clear);
     qtest_add_func("sam9x75/gem/statistics-test-controls",
