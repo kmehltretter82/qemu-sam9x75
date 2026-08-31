@@ -10265,8 +10265,9 @@ static void test_xdmac_registers_memcpy_and_descriptors(void)
     unsigned int i;
 
     ebi_enable_ddr(qts);
+    /* As the board reports it, read from the U-Boot prompt. */
     g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GTYPE),
-                    ==, 0x0032200f);
+                    ==, 0x0033200f);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GCFG),
                     ==, 0);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_XDMAC_BASE + XDMAC_GWAC),
@@ -13356,7 +13357,8 @@ static void test_trng_timing_irq_and_protection(void)
     uint32_t second;
     uint32_t status;
 
-    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_MR), ==, 0);
+    /* HALFR is set out of reset, as the board reads it before Linux runs. */
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_MR), ==, 1);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_IMR), ==, 0);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_ISR), ==, 0);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_TRNG_BASE + TRNG_WPMR), ==, 0);

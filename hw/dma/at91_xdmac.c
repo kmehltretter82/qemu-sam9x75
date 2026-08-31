@@ -60,9 +60,19 @@
 #define XDMAC_CHANNEL_MASK      MAKE_64BIT_MASK(0, AT91_XDMAC_NUM_CHANNELS)
 #define XDMAC_REQUEST_MASK      MAKE_64BIT_MASK(0, AT91_XDMAC_NUM_REQUESTS)
 
-/* The 4 KiB multiport FIFO provides 256 bytes to each of 16 channels. */
+/*
+ * The 4 KiB multiport FIFO provides 256 bytes to each of 16 channels.
+ *
+ * A SAM9X75 Curiosity reads 0x0033200f in GTYPE from the U-Boot prompt, so
+ * the request field holds 51 where this used to report NUM_REQUESTS - 1, or
+ * 50.  Whether the field is a plain count or a count minus one is not settled
+ * by that reading -- the channel field alongside it clearly is minus one, 15
+ * for 16 channels -- so report the value the part reports and leave
+ * AT91_XDMAC_NUM_REQUESTS, which is what the model actually wires, alone.
+ */
+#define XDMAC_GTYPE_NB_REQ_FIELD 51
 #define XDMAC_GTYPE_VALUE \
-    (((AT91_XDMAC_NUM_REQUESTS - 1) << 16) | \
+    ((XDMAC_GTYPE_NB_REQ_FIELD << 16) | \
      (AT91_XDMAC_FIFO_BYTES_PER_CHANNEL << 5) | \
      (AT91_XDMAC_NUM_CHANNELS - 1))
 

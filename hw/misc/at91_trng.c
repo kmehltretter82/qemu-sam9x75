@@ -312,7 +312,9 @@ static void at91_trng_reset(DeviceState *dev)
     AT91TRNGState *s = AT91_TRNG(dev);
 
     timer_del(s->generation_timer);
-    s->mr = 0;
+    /* HALFR is set out of reset: a SAM9X75 Curiosity reads 1 in TRNG_MR
+     * from the U-Boot prompt, before Linux touches the block. */
+    s->mr = TRNG_MR_HALFR;
     s->imr = 0;
     s->isr = 0;
     s->odata = 0;
