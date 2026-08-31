@@ -5618,8 +5618,13 @@ static void test_gem_registers_mdio_dma_and_irqs(void)
     /* Module ID as measured on silicon, not the shared model's default. */
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_MODID), ==,
                     0x4107010c);
+    /*
+     * Six queues and no 64-bit addressing: the board reads 0x0303003e in
+     * DESCONF6, so DMA_ADDR_64B is clear and the guest driver keeps the
+     * 32-bit descriptor layout.
+     */
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_DESCONF6) &
-                    (BIT(23) | 0x7f), ==, BIT(23) | 0x3e);
+                    (BIT(23) | 0x7f), ==, 0x3e);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_SPADDR1LO), ==,
                     0x09000002);
     g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + GEM_SPADDR1HI), ==,

@@ -1241,6 +1241,8 @@ static void sam9x7_init(Object *obj)
     object_initialize_child(obj, "gmac", &s->gmac, TYPE_CADENCE_GEM);
     /* Module ID measured on silicon; the model default is the Zynq value. */
     qdev_prop_set_uint32(DEVICE(&s->gmac), "revision", 0x4107010c);
+    object_property_set_bool(OBJECT(&s->gmac), "dma-addr-64b", false,
+                             &error_abort);
     qdev_prop_set_uint8(DEVICE(&s->gmac), "phy-addr", 1);
     qdev_prop_set_uint32(DEVICE(&s->gmac), "phy-id", 0x00221650);
     qdev_prop_set_uint8(DEVICE(&s->gmac), "num-priority-queues",

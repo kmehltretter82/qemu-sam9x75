@@ -1842,7 +1842,12 @@ static void gem_reset(DeviceState *d)
     }
     s->regs[R_DESCONF2] = 0x2ab10000 | s->jumbo_max_len;
     s->regs[R_DESCONF5] = 0x002f2045;
-    s->regs[R_DESCONF6] = R_DESCONF6_DMA_ADDR_64B_MASK;
+    /*
+     * Only advertise 64-bit addressing where the part has it: a SAM9X75
+     * Curiosity reads 0x0303003e in DESCONF6, with DMA_ADDR_64B clear, and
+     * the guest driver picks its descriptor layout from this bit.
+     */
+    s->regs[R_DESCONF6] = s->dma_addr_64b ? R_DESCONF6_DMA_ADDR_64B_MASK : 0;
     for (i = 0; i < s->num_priority_queues; i++) {
         s->regs[R_INT_Q1_MASK + i] = 0x00000CE6;
     }
@@ -2332,6 +2337,7 @@ static const Property gem_properties[] = {
                       num_type2_screeners, 4),
     DEFINE_PROP_UINT16("jumbo-max-len", CadenceGEMState,
                        jumbo_max_len, 10240),
+    DEFINE_PROP_BOOL("dma-addr-64b", CadenceGEMState, dma_addr_64b, true),
     DEFINE_PROP_BOOL("pcs-enabled", CadenceGEMState,
                        pcs_enabled, false),
     DEFINE_PROP_BOOL("phy-clocked", CadenceGEMState, phy_clocked, true),
