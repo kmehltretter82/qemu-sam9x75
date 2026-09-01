@@ -33,7 +33,9 @@
 #include "semihosting/common-semi.h"
 #endif
 #include "cpregs.h"
+#ifndef CONFIG_USER_ONLY
 #include "hw/misc/dma-coherency.h"
+#endif
 #include "target/arm/gtimer.h"
 #include "qemu/plugin.h"
 
@@ -475,6 +477,7 @@ static const ARMCPRegInfo cp_reginfo[] = {
       .resetvalue = 0, .writefn = contextidr_write, .raw_writefn = raw_write, },
 };
 
+#ifndef CONFIG_USER_ONLY
 /*
  * DMA coherency checker: observe v5/v6 cache-maintenance ops so the
  * emulator can enforce the DMA ownership protocol.  The ops themselves are
@@ -525,6 +528,7 @@ static void dmacc_cachemaint_write(CPUARMState *env, const ARMCPRegInfo *ri,
     }
     dmacc_cache_op(op, paddr, whole);
 }
+#endif /* !CONFIG_USER_ONLY */
 
 static const ARMCPRegInfo not_v8_cp_reginfo[] = {
     /*
@@ -553,8 +557,12 @@ static const ARMCPRegInfo not_v8_cp_reginfo[] = {
     /* Cache maintenance ops; some of this space may be overridden later. */
     { .name = "CACHEMAINT", .cp = 15, .crn = 7, .crm = CP_ANY,
       .opc1 = 0, .opc2 = CP_ANY, .access = PL1_W,
+#ifdef CONFIG_USER_ONLY
+      .type = ARM_CP_NOP | ARM_CP_OVERRIDE },
+#else
       .type = ARM_CP_NO_RAW | ARM_CP_OVERRIDE,
       .writefn = dmacc_cachemaint_write },
+#endif
 };
 
 static const ARMCPRegInfo not_v6_cp_reginfo[] = {
