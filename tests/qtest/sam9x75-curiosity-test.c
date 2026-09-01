@@ -2642,6 +2642,201 @@ static void test_direct_linux_ddr_assignment(void)
     unlink(kernel_path);
 }
 
+/*
+ * End-to-end test for -d dma_coherency: run a real guest payload that does
+ * two one-word XDMAC mem-to-mem transfers.  The first follows the DMA
+ * ownership protocol (clean the source line, invalidate the destination
+ * line) and must be silent.  The second dirties the source again after its
+ * clean and starts the DMA without a new clean -- the exact shape of the
+ * atmel-tdes bounce-buffer bug the checker was written for -- and must be
+ * reported as exactly one missing dma_sync_single_for_device(DMA_TO_DEVICE).
+ *
+ * The payload semihosting-exits 0 only if both transfers moved the right
+ * data, so the DMA path itself is verified independently of the checker.
+ */
+static void test_dma_coherency_missing_clean(void)
+{
+    /*
+     * Assembled from (arm-linux-gnueabi-as -march=armv5te; objcopy -O binary):
+     *
+     *     .arm
+     *     .text
+     * _start:
+     *     ldr   r0, =0xf8050004          /* SFR CCFG_EBICSA */
+     *     ldr   r1, =0x00000302          /* reset value plus CS1A: EBI CS1 -> DDR */
+     *     str   r1, [r0]
+     *     ldr   r0, =0xfffffc88          /* PMC_PCR */
+     *     ldr   r1, =0x90000014          /* CMD|EN|PID 20: XDMAC peripheral clock */
+     *     str   r1, [r0]
+     *     ldr   r4, =0x20100000          /* SRC line in DDR */
+     *     ldr   r5, =0x20100400          /* DST line in DDR */
+     *     ldr   r6, =0xf0008000          /* XDMAC */
+     *
+     *     /* phase 1: write SRC, clean SRC, invalidate DST, DMA, verify */
+     *     ldr   r0, =0xcafe0001
+     *     str   r0, [r4]
+     *     mcr   p15, 0, r4, c7, c10, 1   /* clean DCache line by MVA (SRC) */
+     *     mcr   p15, 0, r5, c7, c6, 1    /* invalidate DCache line by MVA (DST) */
+     *     bl    do_dma
+     *     ldr   r1, [r5]
+     *     ldr   r0, =0xcafe0001
+     *     cmp   r1, r0
+     *     bne   fail
+     *
+     *     /* phase 2: dirty SRC again, no clean; DST handled correctly */
+     *     ldr   r0, =0xbad0beef
+     *     str   r0, [r4]
+     *     mcr   p15, 0, r5, c7, c6, 1    /* invalidate DST for the new transfer */
+     *     bl    do_dma
+     *     ldr   r1, [r5]
+     *     ldr   r0, =0xbad0beef
+     *     cmp   r1, r0
+     *     bne   fail
+     *
+     *     mov   r0, #0x18                /* SYS_EXIT */
+     *     ldr   r1, =0x20026             /* ADP_Stopped_ApplicationExit -> exit 0 */
+     *     svc   0x123456
+     * 1:  b     1b
+     *
+     * fail:
+     *     mov   r0, #0x18
+     *     ldr   r1, =0x20024             /* ADP_Stopped_InternalError -> exit 1 */
+     *     svc   0x123456
+     * 1:  b     1b
+     *
+     * do_dma:                            /* ch0 mem-to-mem, one word SRC -> DST */
+     *     str   r4, [r6, #0x60]          /* CH0 CSA */
+     *     str   r5, [r6, #0x64]          /* CH0 CDA */
+     *     mov   r0, #1
+     *     str   r0, [r6, #0x70]          /* CH0 CUBC = 1 data unit */
+     *     ldr   r0, =0x00051000          /* CC: DAM=inc, SAM=inc, DWIDTH=word, mem2mem */
+     *     str   r0, [r6, #0x78]          /* CH0 CC */
+     *     mov   r0, #1
+     *     str   r0, [r6, #0x1c]          /* GE: enable ch0 */
+     * 2:  ldr   r0, [r6, #0x24]          /* GS */
+     *     tst   r0, #1
+     *     bne   2b
+     *     bx    lr
+     *     .ltorg
+     */
+    static const uint8_t dmacc_payload[] = {
+        0xb0, 0x00, 0x9f, 0xe5, /* 0x000: ldr r0, [pc, #176] */
+        0xb0, 0x10, 0x9f, 0xe5, /* 0x004: ldr r1, [pc, #176] */
+        0x00, 0x10, 0x80, 0xe5, /* 0x008: str r1, [r0] */
+        0xac, 0x00, 0x9f, 0xe5, /* 0x00c: ldr r0, [pc, #172] */
+        0xac, 0x10, 0x9f, 0xe5, /* 0x010: ldr r1, [pc, #172] */
+        0x00, 0x10, 0x80, 0xe5, /* 0x014: str r1, [r0] */
+        0xa8, 0x40, 0x9f, 0xe5, /* 0x018: ldr r4, [pc, #168] */
+        0xa8, 0x50, 0x9f, 0xe5, /* 0x01c: ldr r5, [pc, #168] */
+        0xa8, 0x60, 0x9f, 0xe5, /* 0x020: ldr r6, [pc, #168] */
+        0xa8, 0x00, 0x9f, 0xe5, /* 0x024: ldr r0, [pc, #168] */
+        0x00, 0x00, 0x84, 0xe5, /* 0x028: str r0, [r4] */
+        0x3a, 0x4f, 0x07, 0xee, /* 0x02c: mcr 15, 0, r4, cr7, cr10, {1} */
+        0x36, 0x5f, 0x07, 0xee, /* 0x030: mcr 15, 0, r5, cr7, cr6, {1} */
+        0x13, 0x00, 0x00, 0xeb, /* 0x034: bl 88 <do_dma> */
+        0x00, 0x10, 0x95, 0xe5, /* 0x038: ldr r1, [r5] */
+        0x90, 0x00, 0x9f, 0xe5, /* 0x03c: ldr r0, [pc, #144] */
+        0x00, 0x00, 0x51, 0xe1, /* 0x040: cmp r1, r0 */
+        0x0b, 0x00, 0x00, 0x1a, /* 0x044: bne 78 <fail> */
+        0x88, 0x00, 0x9f, 0xe5, /* 0x048: ldr r0, [pc, #136] */
+        0x00, 0x00, 0x84, 0xe5, /* 0x04c: str r0, [r4] */
+        0x36, 0x5f, 0x07, 0xee, /* 0x050: mcr 15, 0, r5, cr7, cr6, {1} */
+        0x0b, 0x00, 0x00, 0xeb, /* 0x054: bl 88 <do_dma> */
+        0x00, 0x10, 0x95, 0xe5, /* 0x058: ldr r1, [r5] */
+        0x74, 0x00, 0x9f, 0xe5, /* 0x05c: ldr r0, [pc, #116] */
+        0x00, 0x00, 0x51, 0xe1, /* 0x060: cmp r1, r0 */
+        0x03, 0x00, 0x00, 0x1a, /* 0x064: bne 78 <fail> */
+        0x18, 0x00, 0xa0, 0xe3, /* 0x068: mov r0, #24 */
+        0x68, 0x10, 0x9f, 0xe5, /* 0x06c: ldr r1, [pc, #104] */
+        0x56, 0x34, 0x12, 0xef, /* 0x070: svc 0x00123456 */
+        0xfe, 0xff, 0xff, 0xea, /* 0x074: b 74 <_start+0x74> */
+        0x18, 0x00, 0xa0, 0xe3, /* 0x078: mov r0, #24 */
+        0x5c, 0x10, 0x9f, 0xe5, /* 0x07c: ldr r1, [pc, #92] */
+        0x56, 0x34, 0x12, 0xef, /* 0x080: svc 0x00123456 */
+        0xfe, 0xff, 0xff, 0xea, /* 0x084: b 84 <fail+0xc> */
+        0x60, 0x40, 0x86, 0xe5, /* 0x088: str r4, [r6, #96] */
+        0x64, 0x50, 0x86, 0xe5, /* 0x08c: str r5, [r6, #100] */
+        0x01, 0x00, 0xa0, 0xe3, /* 0x090: mov r0, #1 */
+        0x70, 0x00, 0x86, 0xe5, /* 0x094: str r0, [r6, #112] */
+        0x51, 0x0a, 0xa0, 0xe3, /* 0x098: mov r0, #331776 */
+        0x78, 0x00, 0x86, 0xe5, /* 0x09c: str r0, [r6, #120] */
+        0x01, 0x00, 0xa0, 0xe3, /* 0x0a0: mov r0, #1 */
+        0x1c, 0x00, 0x86, 0xe5, /* 0x0a4: str r0, [r6, #28] */
+        0x24, 0x00, 0x96, 0xe5, /* 0x0a8: ldr r0, [r6, #36] */
+        0x01, 0x00, 0x10, 0xe3, /* 0x0ac: tst r0, #1 */
+        0xfc, 0xff, 0xff, 0x1a, /* 0x0b0: bne a8 <do_dma+0x20> */
+        0x1e, 0xff, 0x2f, 0xe1, /* 0x0b4: bx lr */
+        0x04, 0x00, 0x05, 0xf8, /* 0x0b8: .word 0xf8050004 */
+        0x02, 0x03, 0x00, 0x00, /* 0x0bc: .word 0x00000302 */
+        0x88, 0xfc, 0xff, 0xff, /* 0x0c0: .word 0xfffffc88 */
+        0x14, 0x00, 0x00, 0x90, /* 0x0c4: .word 0x90000014 */
+        0x00, 0x00, 0x10, 0x20, /* 0x0c8: .word 0x20100000 */
+        0x00, 0x04, 0x10, 0x20, /* 0x0cc: .word 0x20100400 */
+        0x00, 0x80, 0x00, 0xf0, /* 0x0d0: .word 0xf0008000 */
+        0x01, 0x00, 0xfe, 0xca, /* 0x0d4: .word 0xcafe0001 */
+        0xef, 0xbe, 0xd0, 0xba, /* 0x0d8: .word 0xbad0beef */
+        0x26, 0x00, 0x02, 0x00, /* 0x0dc: .word 0x00020026 */
+        0x24, 0x00, 0x02, 0x00, /* 0x0e0: .word 0x00020024 */
+    };
+    g_autofree char *rom_path = NULL;
+    g_autofree char *log_path = NULL;
+    g_autofree char *log_text = NULL;
+    GError *error = NULL;
+    const char *args[] = {
+        "-machine", "sam9x75-curiosity",
+        "-bios", rom_path,
+        "-display", "none",
+        "-serial", "none",
+        "-monitor", "none",
+        "-nic", "none",
+        "-run-with", "exit-with-parent=on",
+        "-semihosting-config", "enable=on,target=native",
+        "-d", "dma_coherency",
+        "-D", log_path,
+        NULL,
+    };
+    int wait_status;
+    int fd;
+    int ret;
+
+    if (!g_test_subprocess()) {
+        g_test_trap_subprocess(NULL, 10 * G_USEC_PER_SEC, 0);
+        g_test_trap_assert_passed();
+        return;
+    }
+
+    fd = g_file_open_tmp("sam9x75-dmacc-rom-XXXXXX", &rom_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    ret = ftruncate(fd, SAM9X7_BOOT_ROM_SIZE);
+    g_assert_cmpint(ret, ==, 0);
+    ret = pwrite(fd, dmacc_payload, sizeof(dmacc_payload), 0);
+    g_assert_cmpint(ret, ==, sizeof(dmacc_payload));
+    close(fd);
+
+    fd = g_file_open_tmp("sam9x75-dmacc-log-XXXXXX", &log_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+
+    args[3] = rom_path;
+    args[19] = log_path;
+    spawn_qemu_and_wait(args, NULL, &wait_status);
+    g_assert_true(WIFEXITED(wait_status));
+    g_assert_cmpint(WEXITSTATUS(wait_status), ==, 0);
+
+    g_assert_true(g_file_get_contents(log_path, &log_text, NULL, &error));
+    g_assert_no_error(error);
+    g_assert_nonnull(g_strstr_len(log_text, -1, "dma-coherency: tracking RAM"));
+    g_assert_nonnull(g_strstr_len(log_text, -1,
+        "missing dma_sync_single_for_device(DMA_TO_DEVICE)"));
+    /* phase 1 must have been silent: exactly one violation in the summary */
+    g_assert_nonnull(g_strstr_len(log_text, -1, ", 1 violations"));
+
+    unlink(rom_path);
+    unlink(log_path);
+}
+
 static void test_firmware_elf_true_reset_assignment(void)
 {
     static const uint8_t check_ccfg_and_exit[] = {
@@ -28380,6 +28575,8 @@ int main(int argc, char **argv)
                    test_rom_default_pmecc_galois_tables);
     qtest_add_func("sam9x75/rom/supplied-image", test_rom_image_loading);
     qtest_add_func("sam9x75/rom/cpu-entry", test_rom_cpu_entry);
+    qtest_add_func("sam9x75/dma-coherency/missing-clean-detected",
+                   test_dma_coherency_missing_clean);
     qtest_add_func("sam9x75/rom/cpu-reset-entry",
                    test_rom_cpu_reset_entry);
     qtest_add_func("sam9x75/boot/direct-linux-ddr-assignment",
