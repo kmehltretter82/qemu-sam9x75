@@ -2663,10 +2663,10 @@ static void test_dma_coherency_missing_clean(void)
      *     .text
      * _start:
      *     ldr   r0, =0xf8050004          @ SFR CCFG_EBICSA
-     *     ldr   r1, =0x00000302          @ reset value plus CS1A: EBI CS1 -> DDR
+     *     ldr   r1, =0x00000302  @ reset value plus CS1A: EBI CS1 -> DDR
      *     str   r1, [r0]
      *     ldr   r0, =0xfffffc88          @ PMC_PCR
-     *     ldr   r1, =0x90000014          @ CMD|EN|PID 20: XDMAC peripheral clock
+     *     ldr   r1, =0x90000014  @ CMD|EN|PID 20: XDMAC peripheral clock
      *     str   r1, [r0]
      *     ldr   r4, =0x20100000          @ SRC line in DDR
      *     ldr   r5, =0x20100400          @ DST line in DDR
@@ -2694,7 +2694,7 @@ static void test_dma_coherency_missing_clean(void)
      *     bne   fail
      *
      *     mov   r0, #0x18                @ SYS_EXIT
-     *     ldr   r1, =0x20026             @ ADP_Stopped_ApplicationExit -> exit 0
+     *     ldr   r1, =0x20026  @ ADP_Stopped_ApplicationExit -> exit 0
      *     svc   0x123456
      * 1:  b     1b
      *
@@ -2709,7 +2709,7 @@ static void test_dma_coherency_missing_clean(void)
      *     str   r5, [r6, #0x64]          @ CH0 CDA
      *     mov   r0, #1
      *     str   r0, [r6, #0x70]          @ CH0 CUBC = 1 data unit
-     *     ldr   r0, =0x00051000          @ CC: DAM=inc, SAM=inc, DWIDTH=word, mem2mem
+     *     ldr   r0, =0x00051000  @ CC: DAM=inc, SAM=inc, DWIDTH=word, mem2mem
      *     str   r0, [r6, #0x78]          @ CH0 CC
      *     mov   r0, #1
      *     str   r0, [r6, #0x1c]          @ GE: enable ch0
