@@ -2439,6 +2439,38 @@ static void test_rom_image_loading(void)
     unlink(rom_path);
 }
 
+/*
+ * Spawn a one-shot QEMU, appending extra_argv (NULL-terminated) to the
+ * QTEST_QEMU_BINARY command.  QTEST_QEMU_BINARY may carry extra arguments
+ * of its own (the qtest harness proper launches it through a shell), so
+ * split it rather than handing the whole string to g_spawn_sync() as
+ * argv[0].
+ */
+static void spawn_qemu_and_wait(const char *const *extra_argv,
+                                char **stderr_text, int *wait_status)
+{
+    g_auto(GStrv) qemu_argv = NULL;
+    g_autoptr(GPtrArray) argv = NULL;
+    GError *error = NULL;
+    unsigned int i;
+
+    g_assert_true(g_shell_parse_argv(qtest_qemu_binary(NULL), NULL,
+                                     &qemu_argv, &error));
+    g_assert_no_error(error);
+    argv = g_ptr_array_new();
+    for (i = 0; qemu_argv[i]; i++) {
+        g_ptr_array_add(argv, qemu_argv[i]);
+    }
+    for (i = 0; extra_argv[i]; i++) {
+        g_ptr_array_add(argv, (gpointer)extra_argv[i]);
+    }
+    g_ptr_array_add(argv, NULL);
+    g_assert_true(g_spawn_sync(NULL, (gchar **)argv->pdata, NULL,
+                               G_SPAWN_SEARCH_PATH, NULL, NULL, NULL,
+                               stderr_text, wait_status, &error));
+    g_assert_no_error(error);
+}
+
 static void test_rom_cpu_entry(void)
 {
     static const uint8_t semihost_exit[] = {
@@ -2449,19 +2481,16 @@ static void test_rom_cpu_entry(void)
         0x26, 0x00, 0x02, 0x00, /* ADP_Stopped_ApplicationExit */
     };
     g_autofree char *rom_path = NULL;
-    const char *qemu = qtest_qemu_binary(NULL);
     GError *error = NULL;
-    gchar *argv[] = {
-        (gchar *)qemu,
-        (gchar *)"-machine", (gchar *)"sam9x75-curiosity",
-        (gchar *)"-bios", rom_path,
-        (gchar *)"-display", (gchar *)"none",
-        (gchar *)"-serial", (gchar *)"none",
-        (gchar *)"-monitor", (gchar *)"none",
-        (gchar *)"-nic", (gchar *)"none",
-        (gchar *)"-run-with", (gchar *)"exit-with-parent=on",
-        (gchar *)"-semihosting-config",
-        (gchar *)"enable=on,target=native",
+    const char *args[] = {
+        "-machine", "sam9x75-curiosity",
+        "-bios", rom_path,
+        "-display", "none",
+        "-serial", "none",
+        "-monitor", "none",
+        "-nic", "none",
+        "-run-with", "exit-with-parent=on",
+        "-semihosting-config", "enable=on,target=native",
         NULL,
     };
     int wait_status;
@@ -2483,11 +2512,8 @@ static void test_rom_cpu_entry(void)
     g_assert_cmpint(ret, ==, sizeof(semihost_exit));
     close(fd);
 
-    argv[4] = rom_path;
-    g_assert_true(g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
-                               NULL, NULL, NULL, NULL, &wait_status,
-                               &error));
-    g_assert_no_error(error);
+    args[3] = rom_path;
+    spawn_qemu_and_wait(args, NULL, &wait_status);
     g_assert_true(WIFEXITED(wait_status));
     g_assert_cmpint(WEXITSTATUS(wait_status), ==, 0);
 
@@ -2578,19 +2604,16 @@ static void test_direct_linux_ddr_assignment(void)
         0x26, 0x00, 0x02, 0x00, /* ADP_Stopped_ApplicationExit */
     };
     g_autofree char *kernel_path = NULL;
-    const char *qemu = qtest_qemu_binary(NULL);
     GError *error = NULL;
-    gchar *argv[] = {
-        (gchar *)qemu,
-        (gchar *)"-machine", (gchar *)"sam9x75-curiosity",
-        (gchar *)"-kernel", kernel_path,
-        (gchar *)"-display", (gchar *)"none",
-        (gchar *)"-serial", (gchar *)"none",
-        (gchar *)"-monitor", (gchar *)"none",
-        (gchar *)"-nic", (gchar *)"none",
-        (gchar *)"-run-with", (gchar *)"exit-with-parent=on",
-        (gchar *)"-semihosting-config",
-        (gchar *)"enable=on,target=native",
+    const char *args[] = {
+        "-machine", "sam9x75-curiosity",
+        "-kernel", kernel_path,
+        "-display", "none",
+        "-serial", "none",
+        "-monitor", "none",
+        "-nic", "none",
+        "-run-with", "exit-with-parent=on",
+        "-semihosting-config", "enable=on,target=native",
         NULL,
     };
     int wait_status;
@@ -2611,11 +2634,8 @@ static void test_direct_linux_ddr_assignment(void)
     g_assert_cmpint(ret, ==, sizeof(check_ccfg_and_exit));
     close(fd);
 
-    argv[4] = kernel_path;
-    g_assert_true(g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
-                               NULL, NULL, NULL, NULL, &wait_status,
-                               &error));
-    g_assert_no_error(error);
+    args[3] = kernel_path;
+    spawn_qemu_and_wait(args, NULL, &wait_status);
     g_assert_true(WIFEXITED(wait_status));
     g_assert_cmpint(WEXITSTATUS(wait_status), ==, 0);
 
@@ -2640,21 +2660,18 @@ static void test_firmware_elf_true_reset_assignment(void)
     };
     const off_t payload_offset = 0x100;
     g_autofree char *firmware_path = NULL;
-    const char *qemu = qtest_qemu_binary(NULL);
     Elf32_Ehdr ehdr = { 0 };
     Elf32_Phdr phdr = { 0 };
     GError *error = NULL;
-    gchar *argv[] = {
-        (gchar *)qemu,
-        (gchar *)"-machine", (gchar *)"sam9x75-curiosity",
-        (gchar *)"-kernel", firmware_path,
-        (gchar *)"-display", (gchar *)"none",
-        (gchar *)"-serial", (gchar *)"none",
-        (gchar *)"-monitor", (gchar *)"none",
-        (gchar *)"-nic", (gchar *)"none",
-        (gchar *)"-run-with", (gchar *)"exit-with-parent=on",
-        (gchar *)"-semihosting-config",
-        (gchar *)"enable=on,target=native",
+    const char *args[] = {
+        "-machine", "sam9x75-curiosity",
+        "-kernel", firmware_path,
+        "-display", "none",
+        "-serial", "none",
+        "-monitor", "none",
+        "-nic", "none",
+        "-run-with", "exit-with-parent=on",
+        "-semihosting-config", "enable=on,target=native",
         NULL,
     };
     int wait_status;
@@ -2702,11 +2719,8 @@ static void test_firmware_elf_true_reset_assignment(void)
     g_assert_cmpint(ret, ==, sizeof(check_ccfg_and_exit));
     close(fd);
 
-    argv[4] = firmware_path;
-    g_assert_true(g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
-                               NULL, NULL, NULL, NULL, &wait_status,
-                               &error));
-    g_assert_no_error(error);
+    args[3] = firmware_path;
+    spawn_qemu_and_wait(args, NULL, &wait_status);
     g_assert_true(WIFEXITED(wait_status));
     g_assert_cmpint(WEXITSTATUS(wait_status), ==, 0);
 
@@ -2717,16 +2731,14 @@ static void assert_rom_image_size_rejected(off_t size)
 {
     g_autofree char *rom_path = NULL;
     g_autofree char *stderr_text = NULL;
-    const char *qemu = qtest_qemu_binary(NULL);
     GError *error = NULL;
-    gchar *argv[] = {
-        (gchar *)qemu,
-        (gchar *)"-machine", (gchar *)"sam9x75-curiosity",
-        (gchar *)"-bios", rom_path,
-        (gchar *)"-display", (gchar *)"none",
-        (gchar *)"-serial", (gchar *)"none",
-        (gchar *)"-monitor", (gchar *)"none",
-        (gchar *)"-nic", (gchar *)"none",
+    const char *args[] = {
+        "-machine", "sam9x75-curiosity",
+        "-bios", rom_path,
+        "-display", "none",
+        "-serial", "none",
+        "-monitor", "none",
+        "-nic", "none",
         NULL,
     };
     int wait_status;
@@ -2740,11 +2752,8 @@ static void assert_rom_image_size_rejected(off_t size)
     g_assert_cmpint(ret, ==, 0);
     close(fd);
 
-    argv[4] = rom_path;
-    g_assert_true(g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
-                               NULL, NULL, NULL, &stderr_text,
-                               &wait_status, &error));
-    g_assert_no_error(error);
+    args[3] = rom_path;
+    spawn_qemu_and_wait(args, &stderr_text, &wait_status);
     g_assert_true(WIFEXITED(wait_status));
     g_assert_cmpint(WEXITSTATUS(wait_status), !=, 0);
     g_assert_nonnull(g_strstr_len(stderr_text, -1,
@@ -2763,17 +2772,15 @@ static void test_rom_boot_path_validation(void)
 {
     g_autofree char *image_path = NULL;
     g_autofree char *stderr_text = NULL;
-    const char *qemu = qtest_qemu_binary(NULL);
     GError *error = NULL;
-    gchar *argv[] = {
-        (gchar *)qemu,
-        (gchar *)"-machine", (gchar *)"sam9x75-curiosity",
-        (gchar *)"-bios", image_path,
-        (gchar *)"-kernel", image_path,
-        (gchar *)"-display", (gchar *)"none",
-        (gchar *)"-serial", (gchar *)"none",
-        (gchar *)"-monitor", (gchar *)"none",
-        (gchar *)"-nic", (gchar *)"none",
+    const char *args[] = {
+        "-machine", "sam9x75-curiosity",
+        "-bios", image_path,
+        "-kernel", image_path,
+        "-display", "none",
+        "-serial", "none",
+        "-monitor", "none",
+        "-nic", "none",
         NULL,
     };
     int wait_status;
@@ -2784,12 +2791,9 @@ static void test_rom_boot_path_validation(void)
     g_assert_cmpint(fd, >=, 0);
     close(fd);
 
-    argv[4] = image_path;
-    argv[6] = image_path;
-    g_assert_true(g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
-                               NULL, NULL, NULL, &stderr_text,
-                               &wait_status, &error));
-    g_assert_no_error(error);
+    args[3] = image_path;
+    args[5] = image_path;
+    spawn_qemu_and_wait(args, &stderr_text, &wait_status);
     g_assert_true(WIFEXITED(wait_status));
     g_assert_cmpint(WEXITSTATUS(wait_status), !=, 0);
     g_assert_nonnull(g_strstr_len(stderr_text, -1,
@@ -14844,17 +14848,15 @@ static void assert_otpc_backend_rejected(off_t image_size,
     g_autofree char *machine_arg = NULL;
     g_autofree char *otp_path = NULL;
     g_autofree char *stderr_text = NULL;
-    const char *qemu = qtest_qemu_binary(NULL);
     GError *error = NULL;
-    gchar *argv[] = {
-        (gchar *)qemu,
-        (gchar *)"-machine", machine_arg,
-        (gchar *)"-drive", drive_arg,
-        (gchar *)"-display", (gchar *)"none",
-        (gchar *)"-serial", (gchar *)"none",
-        (gchar *)"-monitor", (gchar *)"none",
-        (gchar *)"-nic", (gchar *)"none",
-        (gchar *)"-run-with", (gchar *)"exit-with-parent=on",
+    const char *args[] = {
+        "-machine", machine_arg,
+        "-drive", drive_arg,
+        "-display", "none",
+        "-serial", "none",
+        "-monitor", "none",
+        "-nic", "none",
+        "-run-with", "exit-with-parent=on",
         NULL,
     };
     int wait_status;
@@ -14872,12 +14874,9 @@ static void assert_otpc_backend_rejected(off_t image_size,
     drive_arg = g_strdup_printf(
         "if=none,id=otp0,file=%s,format=raw%s", otp_path,
         readonly ? ",readonly=on" : "");
-    argv[2] = machine_arg;
-    argv[4] = drive_arg;
-    g_assert_true(g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
-                               NULL, NULL, NULL, &stderr_text,
-                               &wait_status, &error));
-    g_assert_no_error(error);
+    args[1] = machine_arg;
+    args[3] = drive_arg;
+    spawn_qemu_and_wait(args, &stderr_text, &wait_status);
     g_assert_true(WIFEXITED(wait_status));
     g_assert_cmpint(WEXITSTATUS(wait_status), !=, 0);
     g_assert_nonnull(g_strstr_len(stderr_text, -1, message));
