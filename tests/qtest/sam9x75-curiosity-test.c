@@ -5652,7 +5652,7 @@ static void test_gem_registers_mdio_dma_and_irqs(void)
      * Read from the U-Boot prompt on a SAM9X75 Curiosity, before Linux
      * touches the block, 0xf802c640 upwards gives 0x000008e6 five times over.
      */
-    for (unsigned int q = 0; q < 5; q++) {
+    for (q = 0; q < 5; q++) {
         g_assert_cmphex(qtest_readl(qts, SAM9X7_GMAC_BASE + 0x640 + q * 4),
                         ==, 0x000008e6);
     }
