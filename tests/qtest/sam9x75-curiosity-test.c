@@ -2662,58 +2662,58 @@ static void test_dma_coherency_missing_clean(void)
      *     .arm
      *     .text
      * _start:
-     *     ldr   r0, =0xf8050004          /* SFR CCFG_EBICSA */
-     *     ldr   r1, =0x00000302          /* reset value plus CS1A: EBI CS1 -> DDR */
+     *     ldr   r0, =0xf8050004          @ SFR CCFG_EBICSA
+     *     ldr   r1, =0x00000302          @ reset value plus CS1A: EBI CS1 -> DDR
      *     str   r1, [r0]
-     *     ldr   r0, =0xfffffc88          /* PMC_PCR */
-     *     ldr   r1, =0x90000014          /* CMD|EN|PID 20: XDMAC peripheral clock */
+     *     ldr   r0, =0xfffffc88          @ PMC_PCR
+     *     ldr   r1, =0x90000014          @ CMD|EN|PID 20: XDMAC peripheral clock
      *     str   r1, [r0]
-     *     ldr   r4, =0x20100000          /* SRC line in DDR */
-     *     ldr   r5, =0x20100400          /* DST line in DDR */
-     *     ldr   r6, =0xf0008000          /* XDMAC */
+     *     ldr   r4, =0x20100000          @ SRC line in DDR
+     *     ldr   r5, =0x20100400          @ DST line in DDR
+     *     ldr   r6, =0xf0008000          @ XDMAC
      *
-     *     /* phase 1: write SRC, clean SRC, invalidate DST, DMA, verify */
+     *     @ phase 1: write SRC, clean SRC, invalidate DST, DMA, verify
      *     ldr   r0, =0xcafe0001
      *     str   r0, [r4]
-     *     mcr   p15, 0, r4, c7, c10, 1   /* clean DCache line by MVA (SRC) */
-     *     mcr   p15, 0, r5, c7, c6, 1    /* invalidate DCache line by MVA (DST) */
+     *     mcr   p15, 0, r4, c7, c10, 1   @ clean DCache line by MVA (SRC)
+     *     mcr   p15, 0, r5, c7, c6, 1    @ invalidate DCache line by MVA (DST)
      *     bl    do_dma
      *     ldr   r1, [r5]
      *     ldr   r0, =0xcafe0001
      *     cmp   r1, r0
      *     bne   fail
      *
-     *     /* phase 2: dirty SRC again, no clean; DST handled correctly */
+     *     @ phase 2: dirty SRC again, no clean; DST handled correctly
      *     ldr   r0, =0xbad0beef
      *     str   r0, [r4]
-     *     mcr   p15, 0, r5, c7, c6, 1    /* invalidate DST for the new transfer */
+     *     mcr   p15, 0, r5, c7, c6, 1    @ invalidate DST for the new transfer
      *     bl    do_dma
      *     ldr   r1, [r5]
      *     ldr   r0, =0xbad0beef
      *     cmp   r1, r0
      *     bne   fail
      *
-     *     mov   r0, #0x18                /* SYS_EXIT */
-     *     ldr   r1, =0x20026             /* ADP_Stopped_ApplicationExit -> exit 0 */
+     *     mov   r0, #0x18                @ SYS_EXIT
+     *     ldr   r1, =0x20026             @ ADP_Stopped_ApplicationExit -> exit 0
      *     svc   0x123456
      * 1:  b     1b
      *
      * fail:
      *     mov   r0, #0x18
-     *     ldr   r1, =0x20024             /* ADP_Stopped_InternalError -> exit 1 */
+     *     ldr   r1, =0x20024             @ ADP_Stopped_InternalError -> exit 1
      *     svc   0x123456
      * 1:  b     1b
      *
-     * do_dma:                            /* ch0 mem-to-mem, one word SRC -> DST */
-     *     str   r4, [r6, #0x60]          /* CH0 CSA */
-     *     str   r5, [r6, #0x64]          /* CH0 CDA */
+     * do_dma:                            @ ch0 mem-to-mem, one word SRC -> DST
+     *     str   r4, [r6, #0x60]          @ CH0 CSA
+     *     str   r5, [r6, #0x64]          @ CH0 CDA
      *     mov   r0, #1
-     *     str   r0, [r6, #0x70]          /* CH0 CUBC = 1 data unit */
-     *     ldr   r0, =0x00051000          /* CC: DAM=inc, SAM=inc, DWIDTH=word, mem2mem */
-     *     str   r0, [r6, #0x78]          /* CH0 CC */
+     *     str   r0, [r6, #0x70]          @ CH0 CUBC = 1 data unit
+     *     ldr   r0, =0x00051000          @ CC: DAM=inc, SAM=inc, DWIDTH=word, mem2mem
+     *     str   r0, [r6, #0x78]          @ CH0 CC
      *     mov   r0, #1
-     *     str   r0, [r6, #0x1c]          /* GE: enable ch0 */
-     * 2:  ldr   r0, [r6, #0x24]          /* GS */
+     *     str   r0, [r6, #0x1c]          @ GE: enable ch0
+     * 2:  ldr   r0, [r6, #0x24]          @ GS
      *     tst   r0, #1
      *     bne   2b
      *     bx    lr
