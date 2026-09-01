@@ -175,6 +175,11 @@ static CPUARMTBFlags rebuild_hflags_a32(CPUARMState *env, int fp_el,
         DP_TBFLAG_ANY(flags, ALIGN_MEM, 1);
     }
 
+    /* SCTLR.L4 is RAZ from v7; DDI 0100I Table 2-11 defines it up to v6. */
+    if (!arm_feature(env, ARM_FEATURE_V7) && (sctlr & SCTLR_L4)) {
+        DP_TBFLAG_A32(flags, L4, 1);
+    }
+
     if (arm_el_is_aa64(env, 1)) {
         DP_TBFLAG_A32(flags, VFPEN, 1);
     }

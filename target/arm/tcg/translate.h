@@ -150,6 +150,8 @@ typedef struct DisasContext {
     bool hstr_active;
     /* True if memory operations require alignment */
     bool align_mem;
+    /* True if SCTLR.L4 suppresses LoadWritePC() interworking (pre-v7) */
+    bool l4_no_interwork;
     /* True if PSTATE.IL is set */
     bool pstate_il;
     /* True if PSTATE.SM is set. */

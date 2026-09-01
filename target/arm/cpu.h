@@ -2499,6 +2499,11 @@ FIELD(TBFLAG_A32, NS, 10, 1)
  * This requires an SME trap from AArch32 mode when using NEON.
  */
 FIELD(TBFLAG_A32, SME_TRAP_NONSTREAMING, 11, 1)
+/*
+ * SCTLR.L4 (pre-v7 only, RAZ from v7): a load to PC does not follow
+ * LoadWritePC() interworking, ie does not update the T bit.
+ */
+FIELD(TBFLAG_A32, L4, 12, 1)
 
 /*
  * Bit usage when in AArch32 state, for M-profile only.

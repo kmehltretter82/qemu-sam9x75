@@ -879,7 +879,7 @@ static inline void store_reg_bx(DisasContext *s, int reg, TCGv_i32 var)
  * in the ARM ARM which use the LoadWritePC() pseudocode function. */
 static inline void store_reg_from_load(DisasContext *s, int reg, TCGv_i32 var)
 {
-    if (reg == 15 && ENABLE_ARCH_5) {
+    if (reg == 15 && ENABLE_ARCH_5 && !s->l4_no_interwork) {
         gen_bx_excret(s, var);
     } else {
         store_reg(s, reg, var);
@@ -6500,6 +6500,7 @@ static void arm_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
         dc->vec_stride = EX_TBFLAG_A32(tb_flags, VECSTRIDE);
         dc->sme_trap_nonstreaming =
             EX_TBFLAG_A32(tb_flags, SME_TRAP_NONSTREAMING);
+        dc->l4_no_interwork = EX_TBFLAG_A32(tb_flags, L4);
     }
     dc->lse2 = false; /* applies only to aarch64 */
     dc->cp_regs = cpu->cp_regs;
