@@ -57,6 +57,7 @@ struct AT91SHAState {
 
     bool first_pending;
     bool busy;
+    bool auto_padding_active;
     bool current_auto_final;
     bool locked;
     bool output_valid;

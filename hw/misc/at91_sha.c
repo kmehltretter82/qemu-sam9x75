@@ -569,7 +569,7 @@ static void at91_sha_set_request(AT91SHAState *s, bool level)
 
 static bool at91_sha_can_accept(const AT91SHAState *s)
 {
-    bool more_message = !s->msr || s->bcr;
+    bool more_message = !s->auto_padding_active || s->bcr;
 
     if (!clock_get_hz(s->pclk) || s->locked ||
         at91_sha_smod(s) != SHA_MR_SMOD_IDATAR0) {
@@ -681,7 +681,7 @@ static void at91_sha_reset_queued_input(AT91SHAState *s)
     memset(s->queued_block, 0, sizeof(s->queued_block));
     s->queued_input_words = 0;
     s->queued_input_bytes = 0;
-    s->queued_expected_bytes = s->msr ?
+    s->queued_expected_bytes = s->auto_padding_active ?
                                MIN((uint64_t)s->bcr, block_size) :
                                block_size;
 }
@@ -693,8 +693,8 @@ static void at91_sha_reset_input(AT91SHAState *s)
     memset(s->block, 0, sizeof(s->block));
     s->input_words = 0;
     s->input_bytes = 0;
-    s->expected_bytes = s->msr ? MIN((uint64_t)s->bcr, block_size) :
-                                 block_size;
+    s->expected_bytes = s->auto_padding_active ?
+                        MIN((uint64_t)s->bcr, block_size) : block_size;
     at91_sha_reset_queued_input(s);
 }
 
@@ -768,6 +768,7 @@ static void at91_sha_finish_result(AT91SHAState *s)
 {
     at91_sha_update_output(s);
     s->busy = false;
+    s->auto_padding_active = false;
     s->current_auto_final = false;
     s->output_valid = true;
     s->processing_stage = SHA_STAGE_INPUT;
@@ -907,7 +908,7 @@ static void at91_sha_processing_done(void *opaque)
         at91_sha_continue_queued_block(s);
         return;
     }
-    if (at91_sha_is_hmac(s) && !s->msr) {
+    if (at91_sha_is_hmac(s) && !s->auto_padding_active) {
         at91_sha_finish_inner(s);
     } else {
         at91_sha_finish_block(s);
@@ -931,7 +932,7 @@ static void at91_sha_start_block(AT91SHAState *s, bool automatic)
     s->output_valid = false;
     s->awaiting_check = false;
     s->busy = true;
-    s->current_auto_final = s->msr && !s->bcr;
+    s->current_auto_final = s->auto_padding_active && !s->bcr;
     s->processing_stage = SHA_STAGE_INPUT;
     at91_sha_reset_queued_input(s);
     qemu_set_irq(s->irq, !!(s->isr & s->imr & SHA_INT_MASK));
@@ -993,7 +994,7 @@ static void at91_sha_write_data(AT91SHAState *s, hwaddr offset,
         }
         stl_le_p(s->queued_block + position * 4, value);
         s->queued_input_words++;
-        if (s->msr) {
+        if (s->auto_padding_active) {
             valid = MIN(s->bcr, 4U);
             s->bcr -= valid;
         } else {
@@ -1022,7 +1023,7 @@ static void at91_sha_write_data(AT91SHAState *s, hwaddr offset,
     }
     stl_le_p(s->block + position * 4, value);
     s->input_words++;
-    if (s->msr) {
+    if (s->auto_padding_active) {
         valid = MIN(s->bcr, 4U);
         s->bcr -= valid;
     } else {
@@ -1121,6 +1122,7 @@ static void at91_sha_reset_registers(AT91SHAState *s, bool hardware)
     s->processing_stage = SHA_STAGE_INPUT;
     s->first_pending = false;
     s->busy = false;
+    s->auto_padding_active = false;
     s->current_auto_final = false;
     s->output_valid = false;
     s->awaiting_check = false;
@@ -1210,6 +1212,7 @@ static void at91_sha_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case SHA_BCR:
         s->bcr = val;
+        s->auto_padding_active = val != 0;
         at91_sha_reset_input(s);
         at91_sha_update_request(s);
         break;
@@ -1313,12 +1316,18 @@ static int at91_sha_post_load(void *opaque, int version_id)
                                 s->processing_stage == SHA_STAGE_INPUT &&
                                 s->msr && !s->bcr;
     }
+    if (version_id < 3) {
+        s->auto_padding_active = s->msr &&
+                                 (s->bcr || s->input_bytes ||
+                                  s->queued_input_bytes || s->busy);
+    }
 
     input_stage = s->processing_stage == SHA_STAGE_INPUT;
     queue_relevant = s->busy && input_stage &&
                      at91_sha_smod(s) == SHA_MR_SMOD_IDATAR0 &&
                      (s->mr & SHA_MR_DUALBUFF);
-    auto_final = s->busy && input_stage && s->msr && !s->bcr &&
+    auto_final = s->busy && input_stage && s->auto_padding_active &&
+                 !s->bcr &&
                  !s->queued_input_words;
     if (s->input_words > block_size / sizeof(uint32_t) ||
         s->input_bytes > block_size || s->expected_bytes > block_size ||
@@ -1331,7 +1340,7 @@ static int at91_sha_post_load(void *opaque, int version_id)
     }
 
     if (version_id >= 2) {
-        queued_expected = s->msr ?
+        queued_expected = s->auto_padding_active ?
                           MIN((uint64_t)s->bcr + s->queued_input_bytes,
                               block_size) : block_size;
         if (s->queued_input_words > block_size / sizeof(uint32_t) ||
@@ -1354,7 +1363,7 @@ static int at91_sha_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_at91_sha = {
     .name = TYPE_AT91_SHA,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = at91_sha_post_load,
     .fields = (const VMStateField[]) {
@@ -1384,6 +1393,7 @@ static const VMStateDescription vmstate_at91_sha = {
         VMSTATE_UINT8(processing_stage, AT91SHAState),
         VMSTATE_BOOL(first_pending, AT91SHAState),
         VMSTATE_BOOL(busy, AT91SHAState),
+        VMSTATE_BOOL_V(auto_padding_active, AT91SHAState, 3),
         VMSTATE_BOOL_V(current_auto_final, AT91SHAState, 2),
         VMSTATE_BOOL(locked, AT91SHAState),
         VMSTATE_BOOL(output_valid, AT91SHAState),

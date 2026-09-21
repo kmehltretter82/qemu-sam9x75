@@ -12943,6 +12943,21 @@ static void sha_write_bytes(QTestState *qts, uint64_t offset,
     }
 }
 
+static void sha_write_idatar0_bytes(QTestState *qts, const uint8_t *data,
+                                    size_t length)
+{
+    size_t i;
+
+    for (i = 0; i < length; i += sizeof(uint32_t)) {
+        uint8_t word[sizeof(uint32_t)] = { 0 };
+        size_t count = MIN(sizeof(word), length - i);
+
+        memcpy(word, data + i, count);
+        qtest_writel(qts, SAM9X7_SHA_BASE + SHA_IDATAR(0),
+                     ldl_le_p(word));
+    }
+}
+
 static void sha_read_digest(QTestState *qts, uint8_t *digest, size_t length)
 {
     size_t i;
@@ -13240,6 +13255,85 @@ static void test_sha_hmac_check_and_manual_padding(void)
     status = qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR);
     g_assert_cmphex(status & (SHA_INT_CHECKF | SHA_ISR_CHKST_OK), ==,
                     SHA_INT_CHECKF | SHA_ISR_CHKST_OK);
+
+    qtest_quit(qts);
+}
+
+static void test_sha_stale_auto_padding_registers(void)
+{
+    static const uint8_t hmac_sha256[32] = {
+        0x19, 0xb7, 0x57, 0x84, 0xb8, 0xcd, 0x10, 0xe6,
+        0x1c, 0xd4, 0xfb, 0x36, 0x37, 0x4d, 0x8a, 0x20,
+        0xaa, 0x89, 0x3b, 0xb0, 0x3f, 0x1d, 0x74, 0x15,
+        0xed, 0xa4, 0xa5, 0x57, 0x73, 0x43, 0x9e, 0xa8,
+    };
+    static const uint8_t sha256_abc[32] = {
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
+        0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
+        0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
+        0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+    };
+    uint8_t hmac_message[64];
+    uint8_t ipad[64];
+    uint8_t opad[64];
+    uint8_t padded[64] = { 'a', 'b', 'c', 0x80 };
+    uint8_t digest[32];
+    uint32_t ipad_state[8];
+    uint32_t opad_state[8];
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint64_t duration;
+    unsigned int i;
+
+    pmc_write_pcr(qts, 41, PMC_PCR_EN);
+    duration = sha_duration(qts, SHA_ALGO_SHA256);
+
+    memset(hmac_message, 'A', sizeof(hmac_message));
+    memset(ipad, 0x36, sizeof(ipad));
+    memset(opad, 0x5c, sizeof(opad));
+    for (i = 0; i < 20; i++) {
+        ipad[i] ^= 0x0b;
+        opad[i] ^= 0x0b;
+    }
+    sha_process_unpadded_sha256_block(qts, ipad, ipad_state);
+    sha_process_unpadded_sha256_block(qts, opad, opad_state);
+
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_SWRST);
+    sha_load_ir(qts, SHA_CR_WUIHV, ipad_state);
+    sha_load_ir(qts, SHA_CR_WUIEHV, opad_state);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MR,
+                 SHA_MR_SMOD_DMA | SHA_MR_DUALBUFF |
+                 SHA_MR_ALGO(SHA_ALGO_HMAC_SHA256));
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MSR, sizeof(hmac_message));
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_BCR, sizeof(hmac_message));
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_FIRST);
+    sha_write_idatar0_bytes(qts, hmac_message, sizeof(hmac_message));
+    qtest_clock_step(qts, 3 * duration);
+    sha_read_digest(qts, digest, sizeof(digest));
+    g_assert_cmpmem(digest, sizeof(digest), hmac_sha256,
+                    sizeof(hmac_sha256));
+
+    /* These registers remain stale on the SAM9X75 after completion. */
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_MR), ==,
+                    0x00010902);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_MSR), ==,
+                    sizeof(hmac_message));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_BCR), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_ISR), ==,
+                    SHA_ISR_WRDY);
+
+    /* Linux starts the next CPU request without resetting MSR or BCR. */
+    padded[63] = 24;
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_CR, SHA_CR_FIRST);
+    qtest_writel(qts, SAM9X7_SHA_BASE + SHA_MR,
+                 SHA_MR_SMOD_AUTO | SHA_MR_ALGO(SHA_ALGO_SHA256));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_MSR), ==,
+                    sizeof(hmac_message));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_SHA_BASE + SHA_BCR), ==, 0);
+    sha_write_bytes(qts, SHA_IDATAR(0), padded, sizeof(padded));
+    qtest_clock_step(qts, duration);
+    sha_read_digest(qts, digest, sizeof(digest));
+    g_assert_cmpmem(digest, sizeof(digest), sha256_abc,
+                    sizeof(sha256_abc));
 
     qtest_quit(qts);
 }
@@ -28791,6 +28885,8 @@ int main(int argc, char **argv)
                    test_sha_vectors_timing_irq_and_protection);
     qtest_add_func("sam9x75/sha/hmac-check-and-manual-padding",
                    test_sha_hmac_check_and_manual_padding);
+    qtest_add_func("sam9x75/sha/stale-auto-padding-registers",
+                   test_sha_stale_auto_padding_registers);
     qtest_add_func("sam9x75/sha/xdmac-auto-padding",
                    test_sha_xdmac_auto_padding);
     qtest_add_func("sam9x75/sha/xdmac-context-restore-and-linked-padding",
