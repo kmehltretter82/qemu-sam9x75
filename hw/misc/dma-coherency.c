@@ -189,7 +189,12 @@ void dmacc_cache_op(DmaccCacheOp op, hwaddr paddr, bool whole_cache)
         case DMACC_OP_INVALIDATE:
         case DMACC_OP_FLUSH:
             l->state = L_INVALID;
-            l->hash = 0;
+            /*
+             * Remember the contents here too: a CPU store after the
+             * invalidate, read by a device before any clean, is the same
+             * missing DMA_TO_DEVICE sync as a store after a clean.
+             */
+            l->hash = whole_cache ? 0 : line_hash(a);
             break;
         }
     }
@@ -290,14 +295,16 @@ void dmacc_dma_access(hwaddr paddr, hwaddr len, bool is_write,
              * Device reads RAM.  If the CPU wrote this line since its last
              * clean, the device sees stale data.
              */
-            if (l->state == L_CLEAN && l->hash && l->hash != line_hash(a)) {
+            if ((l->state == L_CLEAN || l->state == L_INVALID) &&
+                l->hash && l->hash != line_hash(a)) {
                 dmacc.n_reports++;
                 qemu_log_mask(LOG_DMA_COHERENCY,
                     "dma-coherency: %s DMA READ from 0x%" HWADDR_PRIx
                     " (line 0x%" HWADDR_PRIx ") but CPU modified it after the"
-                    " last clean: missing dma_sync_single_for_device"
+                    " last %s: missing dma_sync_single_for_device"
                     "(DMA_TO_DEVICE)\n",
-                    who, paddr, a);
+                    who, paddr, a,
+                    l->state == L_CLEAN ? "clean" : "invalidate");
             } else if (l->state == L_UNKNOWN) {
                 dmacc.n_reports++;
                 qemu_log_mask(LOG_DMA_COHERENCY,
