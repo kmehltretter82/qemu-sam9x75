@@ -728,6 +728,14 @@ static void mcp16502_init(Object *obj)
                                   mcp16502_push_timer_tick, s);
     s->sequence_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                      mcp16502_sequence_timer_tick, s);
+
+    /*
+     * GPIO inputs can be wired and driven before QEMU performs the first
+     * system reset.  Start in the same state as a cold reset so an early
+     * nSTART update cannot observe zero-initialized PWRHLD and spuriously
+     * assert nRSTO.
+     */
+    mcp16502_reset_enter(obj, RESET_TYPE_COLD);
 }
 
 static void mcp16502_finalize(Object *obj)
