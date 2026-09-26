@@ -3536,6 +3536,15 @@ static void exact_cachemaint_write(CPUARMState *env, const ARMCPRegInfo *ri,
     hwaddr offset;
     void *host;
 
+#ifndef CONFIG_USER_ONLY
+    /*
+     * The exact-model register definitions override CACHEMAINT, whose
+     * writefn feeds the standalone DMA coherency checker.  Preserve that
+     * observer when the two experimental facilities share a build.
+     */
+    dmacc_cachemaint_write(env, ri, value);
+#endif
+
     if (!arm_exact_icache_enabled && !arm_exact_dcache_enabled) {
         return;
     }
