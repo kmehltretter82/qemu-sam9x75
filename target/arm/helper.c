@@ -3558,7 +3558,14 @@ static void exact_cachemaint_write(CPUARMState *env, const ARMCPRegInfo *ri,
      * unwound. The operation itself would fault on an unmapped address; the
      * model simply has nothing to do in that case.
      */
-    if (probe_access_flags(env, value & ~(uint64_t)63, 64, MMU_DATA_LOAD,
+    /*
+     * Translate the operand itself, not a hard-coded 64-byte line base.
+     * The D-cache model may use 32-byte ARM926 lines (or 128-byte arm64
+     * lines), and each model performs its own line indexing.  Rounding here
+     * made two adjacent 32-byte ARM926 lines alias: the second invalidate in
+     * clear_user_highpage appeared to discard stores to the first one.
+     */
+    if (probe_access_flags(env, value, 1, MMU_DATA_LOAD,
                            arm_env_mmu_index(env), true, &host, 0)
         & TLB_INVALID_MASK) {
         return;
@@ -3671,6 +3678,37 @@ static const ARMCPRegInfo exact_cachemaint_cp_reginfo[] = {
       .writefn = exact_cachemaint_write },
     { .name = "DCCISW", .cp = 15, .opc1 = 0, .crn = 7, .crm = 14, .opc2 = 2,
       .type = ARM_CP_NO_RAW, .access = PL1_W, .accessfn = access_tsw,
+      .writefn = exact_cachemaint_write },
+};
+
+/*
+ * ARM926EJ-S uses the pre-v7 CP15 cache-maintenance encodings below.  Stock
+ * QEMU catches the whole c7 space with CACHEMAINT NOPs, which made the exact
+ * I/D-cache models see stores but none of the maintenance performed by an
+ * ARMv5 guest.  Keep this table to the operations implemented by ARM926 and
+ * used by Linux's proc-arm926.S; the v7 table above also contains later
+ * set/way and inner-shareable forms that do not belong on this CPU.
+ */
+static const ARMCPRegInfo exact_cachemaint_v5_cp_reginfo[] = {
+    { .name = "ICIALLU_v5", .cp = 15, .opc1 = 0,
+      .crn = 7, .crm = 5, .opc2 = 0,
+      .type = ARM_CP_NO_RAW, .access = PL1_W,
+      .writefn = exact_cachemaint_write },
+    { .name = "ICIMVAU_v5", .cp = 15, .opc1 = 0,
+      .crn = 7, .crm = 5, .opc2 = 1,
+      .type = ARM_CP_NO_RAW, .access = PL1_W,
+      .writefn = exact_cachemaint_write },
+    { .name = "DCIMVAC_v5", .cp = 15, .opc1 = 0,
+      .crn = 7, .crm = 6, .opc2 = 1,
+      .type = ARM_CP_NO_RAW, .access = PL1_W,
+      .writefn = exact_cachemaint_write },
+    { .name = "DCCMVAC_v5", .cp = 15, .opc1 = 0,
+      .crn = 7, .crm = 10, .opc2 = 1,
+      .type = ARM_CP_NO_RAW, .access = PL1_W,
+      .writefn = exact_cachemaint_write },
+    { .name = "DCCIMVAC_v5", .cp = 15, .opc1 = 0,
+      .crn = 7, .crm = 14, .opc2 = 1,
+      .type = ARM_CP_NO_RAW, .access = PL1_W,
       .writefn = exact_cachemaint_write },
 };
 
@@ -6670,6 +6708,9 @@ void register_cp_regs_for_features(ARMCPU *cpu)
                                          0, 0, ToleranceNotOnBothEnds);
     } else {
         define_arm_cp_regs(cpu, not_v7_cp_reginfo);
+        if (arm_feature(env, ARM_FEATURE_V5)) {
+            define_arm_cp_regs(cpu, exact_cachemaint_v5_cp_reginfo);
+        }
     }
     if (arm_feature(env, ARM_FEATURE_V8)) {
         /*

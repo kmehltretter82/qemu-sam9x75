@@ -1252,6 +1252,17 @@ static bool get_phys_addr_v5(CPUARMState *env, S1Translate *ptw,
         goto do_fault;
     }
     result->f.phys_addr = phys_addr;
+    /*
+     * ARMv5 short descriptors encode D-cacheability directly in C/B.  The
+     * Exact D-cache model only needs to distinguish cacheable Normal memory
+     * from uncached mappings: C=1 is WT or WB cacheable, while C=0 is not
+     * D-cacheable (B then only controls buffering).  Express cacheable
+     * mappings with the MAIR-style Normal-WB value used by the rest of the
+     * translation code so ARM926 DMA traffic is no longer invisible.
+     */
+    result->cacheattrs.is_s2_format = false;
+    result->cacheattrs.shareability = 0;
+    result->cacheattrs.attrs = (desc & BIT(3)) ? 0xff : 0x00;
     return true;
 do_fault:
     fi->domain = domain;

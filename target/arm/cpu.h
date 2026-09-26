@@ -1144,7 +1144,7 @@ struct ArchCPU {
     bool prop_exact_icache;
     bool prop_exact_icache_full;
     bool prop_exact_dcache;
-    uint8_t prop_dcache_line;   /* modelled cache line in bytes: 64 or 128 */
+    uint8_t prop_dcache_line;   /* modelled cache line in bytes: 32, 64 or 128 */
     bool prop_exact_exclusive;
     uint32_t prop_exclusive_rate;    /* spurious STXR failures per million */
     uint8_t prop_exclusive_maxrun;   /* consecutive forced failures per addr */
