@@ -71,6 +71,7 @@
 #define SAM9X7_TCB_BASE         0xf8008000
 #define SAM9X7_TCB1_BASE        0xf800c000
 #define SAM9X7_GMAC_BASE        0xf802c000
+#define SAM9X7_XLCDC_BASE       0xf8038000
 #define SAM9X7_UDPHS_BASE       0xf803c000
 #define SAM9X7_SFR_BASE         0xf8050000
 #define SAM9X7_MATRIX_BASE      0xffffde00
@@ -190,6 +191,28 @@
 #define AIC_DCR                 0x6c
 #define AIC_WPMR                0xe4
 #define AIC_WPSR                0xe8
+
+#define XLCDC_CFG(n)            ((n) * 4)
+#define XLCDC_EN                0x20
+#define XLCDC_DIS               0x24
+#define XLCDC_SR                0x28
+#define XLCDC_IER               0x2c
+#define XLCDC_IMR               0x34
+#define XLCDC_ISR               0x38
+#define XLCDC_EN_PIXEL_CLK      BIT(0)
+#define XLCDC_EN_SYNC           BIT(1)
+#define XLCDC_EN_DISP           BIT(2)
+#define XLCDC_EN_SD             BIT(5)
+#define XLCDC_ISR_SOF           BIT(0)
+#define XLCDC_BASE_LAYER        0x60
+#define XLCDC_LAYER_ENR         0x10
+#define XLCDC_LAYER_FBA0        0x18
+#define XLCDC_LAYER_CFG(n)      (0x1c + 4 * (n))
+#define XLCDC_BASE_CFG_FORMAT   1
+#define XLCDC_BASE_CFG_XSTRIDE  2
+#define XLCDC_BASE_CFG_GENERAL  4
+#define XLCDC_GENERAL_DMA       BIT(0)
+#define XLCDC_FRAME_NS          (20 * 1000 * 1000LL)
 
 #define UHPFS_HC_CONTROL        0x04
 #define UHPFS_HC_COMMAND_STATUS 0x08
@@ -3126,6 +3149,86 @@ static void aic_set_input(QTestState *qts, unsigned int source, int level)
 {
     qtest_set_irq_in(qts, "/machine/soc/aic", "unnamed-gpio-in",
                      source, level);
+}
+
+static void test_xlcdc_frame_dma_and_irq(void)
+{
+    static const uint64_t framebuffer = SAM9X7_DDR_BASE + 0x100000;
+    uint8_t pixels[4 * 2 * 4];
+    QTestState *qts;
+    uint32_t status;
+
+    qts = qtest_init(SAM9X75_MACHINE ",xlcdc=on");
+    g_assert_true(qom_has_property(qts, "/machine/soc", "xlcdc"));
+    aic_configure(qts, 25, AIC_SMR_LEVEL_HIGH | 4, 0x25252525);
+    ebi_enable_ddr(qts);
+
+    for (unsigned int i = 0; i < ARRAY_SIZE(pixels); i++) {
+        pixels[i] = i;
+    }
+    qtest_memwrite(qts, framebuffer, pixels, sizeof(pixels));
+
+    qtest_writel(qts, SAM9X7_XLCDC_BASE + XLCDC_CFG(4),
+                 (4 - 1) | ((2 - 1) << 16));
+    qtest_writel(qts, SAM9X7_XLCDC_BASE + XLCDC_BASE_LAYER +
+                 XLCDC_LAYER_FBA0, framebuffer);
+    qtest_writel(qts, SAM9X7_XLCDC_BASE + XLCDC_BASE_LAYER +
+                 XLCDC_LAYER_CFG(XLCDC_BASE_CFG_FORMAT), 0x90);
+    qtest_writel(qts, SAM9X7_XLCDC_BASE + XLCDC_BASE_LAYER +
+                 XLCDC_LAYER_CFG(XLCDC_BASE_CFG_XSTRIDE), 0);
+    qtest_writel(qts, SAM9X7_XLCDC_BASE + XLCDC_BASE_LAYER +
+                 XLCDC_LAYER_CFG(XLCDC_BASE_CFG_GENERAL),
+                 XLCDC_GENERAL_DMA);
+    qtest_writel(qts, SAM9X7_XLCDC_BASE + XLCDC_BASE_LAYER +
+                 XLCDC_LAYER_ENR, 1);
+
+    status = qtest_readl(qts, SAM9X7_XLCDC_BASE + XLCDC_SR);
+    g_assert_cmphex(status, ==, XLCDC_EN_SD);
+    qtest_writel(qts, SAM9X7_XLCDC_BASE + XLCDC_EN, XLCDC_EN_SD);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XLCDC_BASE + XLCDC_SR), ==, 0);
+
+    qtest_writel(qts, SAM9X7_XLCDC_BASE + XLCDC_EN,
+                 XLCDC_EN_PIXEL_CLK);
+    qtest_writel(qts, SAM9X7_XLCDC_BASE + XLCDC_EN, XLCDC_EN_SYNC);
+    status = XLCDC_EN_PIXEL_CLK | XLCDC_EN_SYNC;
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XLCDC_BASE + XLCDC_SR), ==,
+                    status);
+
+    qtest_writel(qts, SAM9X7_XLCDC_BASE + XLCDC_IER, XLCDC_ISR_SOF);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XLCDC_BASE + XLCDC_IMR), ==,
+                    XLCDC_ISR_SOF);
+    qtest_writel(qts, SAM9X7_XLCDC_BASE + XLCDC_EN, XLCDC_EN_DISP);
+    status |= XLCDC_EN_DISP;
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XLCDC_BASE + XLCDC_SR), ==,
+                    status);
+
+    qtest_clock_step(qts, XLCDC_FRAME_NS - 1);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(25));
+    qtest_clock_step(qts, 1);
+    g_assert_true(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(25));
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XLCDC_BASE + XLCDC_ISR), ==,
+                    XLCDC_ISR_SOF);
+    g_assert_false(qtest_readl(qts, SAM9X7_AIC_BASE + AIC_IPR0) & BIT(25));
+
+    qtest_writel(qts, SAM9X7_XLCDC_BASE + XLCDC_DIS, XLCDC_EN_DISP);
+    status &= ~XLCDC_EN_DISP;
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XLCDC_BASE + XLCDC_SR), ==,
+                    status);
+    qtest_clock_step(qts, XLCDC_FRAME_NS);
+    g_assert_cmphex(qtest_readl(qts, SAM9X7_XLCDC_BASE + XLCDC_ISR), ==, 0);
+    g_assert_cmpuint(qom_get_int(qts, "/machine/soc/xlcdc", "frame-count"),
+                     ==, 1);
+    g_assert_cmphex(qom_get_int(qts, "/machine/soc/xlcdc",
+                               "last-frame-checksum"), ==, 0x07d1e010);
+    qtest_quit(qts);
+}
+
+static void test_xlcdc_disabled_by_default(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+
+    g_assert_false(qom_has_property(qts, "/machine/soc", "xlcdc"));
+    qtest_quit(qts);
 }
 
 static uint16_t gem_mdio_read(QTestState *qts, unsigned int phy,
@@ -28671,6 +28774,10 @@ int main(int argc, char **argv)
     qtest_add_func("sam9x75/rom/cpu-entry", test_rom_cpu_entry);
     qtest_add_func("sam9x75/dma-coherency/missing-clean-detected",
                    test_dma_coherency_missing_clean);
+    qtest_add_func("sam9x75/xlcdc/frame-dma-and-irq",
+                   test_xlcdc_frame_dma_and_irq);
+    qtest_add_func("sam9x75/xlcdc/disabled-by-default",
+                   test_xlcdc_disabled_by_default);
     qtest_add_func("sam9x75/rom/cpu-reset-entry",
                    test_rom_cpu_reset_entry);
     qtest_add_func("sam9x75/boot/direct-linux-ddr-assignment",

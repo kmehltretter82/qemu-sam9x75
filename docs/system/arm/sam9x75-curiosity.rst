@@ -1041,8 +1041,12 @@ Support matrix
        hardware blocks: RomBOOT software reads BSC state and then configures
        OTPC.  PUF is missing.
    * - Display and camera
-     - Missing
-     - XLCDC, GFX2D, LVDS, DSI/CSI, MIPI PHY, CSI2DC and ISC backends.
+     - Initial
+     - A minimal, test-oriented XLCDC base-layer DMA model is available with
+       ``-machine sam9x75-curiosity,xlcdc=on``.  It is disabled by default,
+       does not attach a graphical panel, and records frame count/checksum for
+       DMA-coherency tests.  GFX2D, LVDS, DSI/CSI, MIPI PHY, CSI2DC and ISC
+       backends remain missing.
    * - Board controls and expansion
      - Initial
      - The populated LEDs and buttons are covered above.  The J9 NAND and J10
@@ -1113,8 +1117,8 @@ phase green merely by avoiding it in the device tree.
    the ``PSR.ACT`` field, timed bus-off recovery, timestamp synchronization
    and debug-message behavior; keep the Linux CAN-FD/QEMU-backend regression
    passing and compare it against the physical controllers.
-#. **Complete high-bandwidth and security blocks.**  Add XLCDC, GFX2D, ISC,
-   CSI2DC, MIPI CSI/DSI PHY and LVDS endpoints, complete the initial OTPC
+#. **Complete high-bandwidth and security blocks.**  Complete XLCDC and add
+   GFX2D, ISC, CSI2DC, MIPI CSI/DSI PHY and LVDS endpoints; complete the OTPC
    model, and add PUF.  Close documented crypto, TRNG, audio and GEM/PTP/TSN
    corner cases rather than treating successful driver probes as completion.
 #. **Differentially validate on hardware.**  Run the same bare-metal probes,

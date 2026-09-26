@@ -226,3 +226,7 @@ apple_gfx_iosfc_unmap_memory(void *a, void *b, void *c, void *d, void *e, void *
 apple_gfx_iosfc_unmap_memory_region(void* mem, void *region) "unmapping @ %p from memory region %p"
 apple_gfx_iosfc_raise_irq(uint32_t vector) "vector=0x%x"
 
+
+
+# at91_xlcdc.c
+at91_xlcdc_frame(uint64_t n, uint32_t fba, unsigned w, unsigned h, unsigned bpp, uint32_t sum) "frame %" PRIu64 " fba 0x%08x %ux%u bpp %u sum 0x%08x"

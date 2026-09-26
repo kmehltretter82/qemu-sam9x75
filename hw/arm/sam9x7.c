@@ -499,6 +499,20 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->xdmac), 0,
                        qdev_get_gpio_in(DEVICE(&s->aic), 20));
 
+    if (s->xlcdc_enabled) {
+        s->xlcdc = AT91_XLCDC(qdev_new(TYPE_AT91_XLCDC));
+        object_property_add_child(OBJECT(s), "xlcdc", OBJECT(s->xlcdc));
+        object_property_set_link(OBJECT(s->xlcdc), "dma-memory",
+                                 OBJECT(s->memory), &error_abort);
+        if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(s->xlcdc), errp)) {
+            return;
+        }
+        mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(s->xlcdc), 0);
+        memory_region_add_subregion(s->memory, SAM9X7_XLCDC_BASE, mr);
+        sysbus_connect_irq(SYS_BUS_DEVICE(s->xlcdc), 0,
+                           qdev_get_gpio_in(DEVICE(&s->aic), 25));
+    }
+
     if (!sysbus_realize(SYS_BUS_DEVICE(&s->trng), errp)) {
         return;
     }
@@ -1375,6 +1389,7 @@ static const Property sam9x7_properties[] = {
                      CanBusState *),
     DEFINE_PROP_LINK("canbus1", SAM9X7State, canbus[1], TYPE_CAN_BUS,
                      CanBusState *),
+    DEFINE_PROP_BOOL("enable-xlcdc", SAM9X7State, xlcdc_enabled, false),
 };
 
 static void sam9x7_class_init(ObjectClass *klass, const void *data)

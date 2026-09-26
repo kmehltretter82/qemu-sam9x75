@@ -18,6 +18,7 @@
 #include "hw/core/resetcontainer.h"
 #include "hw/core/sysbus.h"
 #include "hw/dma/at91_xdmac.h"
+#include "hw/display/at91_xlcdc.h"
 #include "hw/gpio/at91_pio.h"
 #include "hw/misc/at91_ssc.h"
 #include "hw/i2c/at91_twi.h"
@@ -114,6 +115,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_TCB1_BASE             0xf800c000
 #define SAM9X7_SFR_BASE              0xf8050000
 #define SAM9X7_GMAC_BASE             0xf802c000
+#define SAM9X7_XLCDC_BASE            0xf8038000
 #define SAM9X7_UDPHS_BASE            0xf803c000
 #define SAM9X7_UDPHS_SIZE            0x00000400
 #define SAM9X7_ADC_BASE              0xf804c000
@@ -175,6 +177,7 @@ struct SAM9X7State {
     AT91NANDState nand;
     AT91OSPIState qspi;
     AT91XDMACState xdmac;
+    AT91XLCDCState *xlcdc;
     AT91UDPHSState udphs;
     AT91UHPHSEHCIState uhphs_ehci;
     OHCISysBusState uhphs_ohci;
@@ -209,6 +212,7 @@ struct SAM9X7State {
     bool vddcore_reset_active;
     bool vddcore_reset_ready;
     bool vddcore_reset_asserted;
+    bool xlcdc_enabled;
     /* Derived from SFR outputs and reconstructed after migration. */
     bool nand_cs2_assigned;
     bool nand_d16_assigned;

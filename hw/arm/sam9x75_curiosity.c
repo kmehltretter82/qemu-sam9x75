@@ -59,6 +59,7 @@ struct SAM9X75CuriosityMachineState {
     bool nand_cs;
     bool qspi_cs;
     bool ethernet_25mhz;
+    bool xlcdc;
     bool otpc_write_enable;
     char *otpc_drive;
     SAM9X75PAC1934Route pac1934_route;
@@ -280,6 +281,7 @@ static void sam9x75_curiosity_init(MachineState *machine)
                              &error_abort);
     object_property_set_link(OBJECT(soc), "ddr-memory",
                              OBJECT(machine->ram), &error_abort);
+    qdev_prop_set_bit(DEVICE(soc), "enable-xlcdc", board->xlcdc);
     for (i = 0; i < ARRAY_SIZE(board->canbus); i++) {
         g_autofree char *name = g_strdup_printf("canbus%u", i);
 
@@ -459,6 +461,17 @@ static void sam9x75_curiosity_set_ethernet_25mhz(Object *obj, bool value,
     SAM9X75_CURIOSITY_MACHINE(obj)->ethernet_25mhz = value;
 }
 
+static bool sam9x75_curiosity_get_xlcdc(Object *obj, Error **errp)
+{
+    return SAM9X75_CURIOSITY_MACHINE(obj)->xlcdc;
+}
+
+static void sam9x75_curiosity_set_xlcdc(Object *obj, bool value,
+                                        Error **errp)
+{
+    SAM9X75_CURIOSITY_MACHINE(obj)->xlcdc = value;
+}
+
 static char *sam9x75_curiosity_get_pac1934_route(Object *obj, Error **errp)
 {
     SAM9X75CuriosityMachineState *board =
@@ -564,6 +577,7 @@ static void sam9x75_curiosity_machine_instance_init(Object *obj)
     board->nand_cs = true;
     board->qspi_cs = true;
     board->ethernet_25mhz = true;
+    board->xlcdc = false;
     board->pac1934_route = SAM9X75_PAC1934_ROUTE_SOC;
     board->m2_interface = SAM9X75_M2_INTERFACE_SDIO;
 
@@ -630,6 +644,11 @@ static void sam9x75_curiosity_machine_class_init(ObjectClass *oc,
                                    sam9x75_curiosity_set_ethernet_25mhz);
     object_class_property_set_description(oc, "ethernet-25mhz",
         "Connect the J12 25 MHz Ethernet reference-clock jumper");
+    object_class_property_add_bool(oc, "xlcdc",
+                                   sam9x75_curiosity_get_xlcdc,
+                                   sam9x75_curiosity_set_xlcdc);
+    object_class_property_set_description(oc, "xlcdc",
+        "Enable the experimental XLCDC scanout model");
     object_class_property_add_str(oc, "pac1934-route",
                                   sam9x75_curiosity_get_pac1934_route,
                                   sam9x75_curiosity_set_pac1934_route);
