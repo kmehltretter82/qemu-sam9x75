@@ -184,9 +184,13 @@ building an incomplete test. Additional cases may need extra guest setup;
 for example, socket tests need an enabled loopback interface.
 
 The runner mounts disposable tmpfs filesystems at ``/tmp`` and ``/dev/shm``
-and executes every case sequentially with upstream's 30-second timeout
-wrapper. An independent 600-second host deadline is configurable with
-``--timeout``. Every matching begin/end pair and its exit status is required
+and executes every case sequentially with upstream's timeout wrapper.
+The default per-case deadline is 30 guest seconds; ``--case-timeout`` accepts
+1 through 3600 seconds and records the selected value in the transcript and
+results. Allocation-exhaustion tests can need a longer deadline under system
+emulation; changing the deadline does not change their loops or assertions.
+An independent 600-second host deadline is configurable with ``--timeout``.
+Every matching begin/end pair and its exit status is required
 exactly once, in manifest order. Missing results, duplicates, inconsistent
 final markers, changed assets and QEMU diagnostics cannot produce a pass.
 
@@ -196,6 +200,67 @@ incomplete/invalid run or QEMU diagnostics. ``results.json`` preserves
 complete failing results and each case's output, or an incomplete-run error.
 It does not convert known library differences into successes. Keep generated
 metadata and logs private unless their host paths have been reviewed.
+
+Upstream regression characterization
+-----------------------------------
+
+``--suite regression`` selects all 68 executable programs in the pinned
+regression directory. The additional source file is the original TLS helper
+DSO, not a standalone test. Its upstream ``.mk`` selects a dynamic executable
+only: the fixture builds that test and DSO for both glibc variants and shared
+musl, with the original ``$ORIGIN`` search path, and records the static-musl
+exclusion separately. The complete matrix therefore has 271 executable
+outcomes, not 272. Other unsupported custom build rules are still refused.
+No upstream assertions or stress loops are edited.
+
+Build and run it using the same pinned source checkout and sysroots::
+
+    python3 "$fixture/build-upstream.py" \
+        --suite regression --source /tmp/libc-test \
+        --glibc /tmp/sam9x75-libc-sysroots/glibc-sysroot \
+        --musl /tmp/sam9x75-libc-sysroots/musl-sysroot \
+        --output /tmp/sam9x75-regression-build
+    python3 "$fixture/run-upstream.py" \
+        --qemu build/qemu-system-arm \
+        --kernel /path/to/zImage \
+        --dtb /path/to/at91-sam9x75_curiosity.dtb \
+        --initramfs /path/to/initramfs-armv5l.cpio.gz \
+        --assets /tmp/sam9x75-regression-build \
+        --output /tmp/sam9x75-regression-result \
+        --case-timeout 120 --timeout 2400
+
+Regression programs run as guest UID/GID 1000, without supplementary groups
+and with ``no_new_privs`` set. A small, hash-verified static launcher checks
+the identity and emits a required marker for every eligible case. Guest
+setup remains privileged; the RAM-only working directories have mode 1777.
+This is necessary for process-limit tests: root is exempt from Linux's
+``RLIMIT_NPROC`` enforcement. No host user database or credential is copied.
+The existing functional characterization keeps its original execution mode
+and schema-1 manifests remain supported.
+
+The full regression run covers allocation failure, cancellation, thread exit,
+signal/fork races, large offsets, stdio, conversion, regex and late-loaded TLS.
+Four outcomes from ``fpclassify-invalid-ld80`` return zero through its original
+x86-only architecture guard; they are not ARM floating-point coverage. The
+ARM EABI used here has 53-bit long-double precision, not x86's 64-bit precision.
+Success statuses and raw failures remain distinct from test applicability,
+fixture errors and incomplete runs. These tests are not a complete upstream
+libc API/math suite or a hardware-fidelity claim.
+Timeouts remain raw failed outcomes. Emulation speed, host load and guest
+address-space layout can affect exhaustion-test duration; a timeout alone
+does not establish a libc or QEMU correctness defect.
+
+On 2026-10-05 the full unprivileged matrix completed on the official
+Linux4Microchip ``6.18.17-linux4microchip-2026.04`` kernel with 260 zero-exit
+outcomes and 11 raw failures, using a 120-second per-case deadline and an
+empty QEMU diagnostic log. All 135 eligible musl outcomes and all three
+late-loaded TLS cases returned zero. Ten failures were the two glibc variants
+of ``daemon-failure``, ``dn_expand-empty``, ``dn_expand-ptr-0``,
+``regex-ere-backref`` and ``regex-escaped-high-byte``; these remain library/test
+contract mismatches, not automatically QEMU bugs. The remaining outcome was
+a ``glibc-time64/malloc-brk-fail`` timeout and remains unresolved. The 260
+zero-exit outcomes include the four x86-guarded no-ops noted above. No failing
+status is waived and this is not an all-passing conformance gate.
 
 Interpreting failures
 ~~~~~~~~~~~~~~~~~~~~

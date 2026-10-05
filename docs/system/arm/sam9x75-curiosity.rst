@@ -1619,6 +1619,13 @@ characterization runner: 62 selected cases across the four variants. It
 retains raw failures and their output, exits nonzero for failing cases, and
 distinguishes an incomplete run or QEMU diagnostics from ordinary test
 failures. Known library differences are documented, not silently waived.
+The separate upstream regression profile builds all 68 executable programs
+and the original late-loaded TLS helper DSO. It respects the dynamic-only
+upstream build rule, giving 271 eligible outcomes across the four variants,
+and checks unprivileged guest identity for each one so Linux process limits
+can be exercised. Configurable per-case deadlines retain the original loops
+and assertions; architecture-guarded no-op programs are not additional ARM
+coverage. See the fixture README for the commands and remaining limits.
 
 Connector and add-on devices
 ---------------------------

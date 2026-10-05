@@ -45,9 +45,12 @@ def gcc_runtime(args):
     return candidates[0].resolve(strict=True)
 
 
-def compile_command(args, variant, sources, output, *, strict=True, extra=()):
+def compile_command(args, variant, sources, output, *, strict=True, extra=(),
+                    shared=False):
     if variant not in VARIANTS:
         raise ValueError(f"Unknown libc variant: {variant}")
+    if shared and variant == "musl-static":
+        raise ValueError("A shared object is not a static executable")
     gcc = gcc_runtime(args)
     command = shlex.split(args.cc) + [
         "--target=arm-linux-gnueabi", "-march=armv5te", "-marm",
@@ -57,6 +60,8 @@ def compile_command(args, variant, sources, output, *, strict=True, extra=()):
     if strict:
         command += ["-Werror"]
     command += ["-fno-builtin", "-D_FILE_OFFSET_BITS=64", "-pthread", *extra]
+    if shared:
+        command += ["-shared", "-fPIC", "-DSHARED"]
     sources = [str(source) for source in sources]
     if variant.startswith("glibc"):
         command += [f"--sysroot={args.glibc}"]
@@ -66,11 +71,14 @@ def compile_command(args, variant, sources, output, *, strict=True, extra=()):
     else:
         lib = args.musl / "lib"
         command += ["-nostdinc", "-isystem", str(args.musl / "include"),
-                    "-nostdlib", str(lib / "crt1.o"), str(lib / "crti.o")]
+                    "-nostdlib"]
+        if not shared:
+            command += [str(lib / "crt1.o")]
+        command += [str(lib / "crti.o")]
         command += sources + ["-L", str(lib), "-L", str(gcc)]
         if variant == "musl-static":
             command += ["-static"]
-        else:
+        elif not shared:
             command += ["-no-pie", "-Wl,--dynamic-linker,/lib/ld-musl-arm.so.1"]
         command += ["-Wl,--start-group", "-lc", "-lgcc", "-lgcc_eh",
                     "-Wl,--end-group", str(lib / "crtn.o")]
