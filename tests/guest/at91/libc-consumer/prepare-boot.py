@@ -25,7 +25,7 @@ SOURCES = (
 )
 BUSYBOX_OPTIONS = (
     "STATIC", "LFS", "BUSYBOX", "FEATURE_INSTALLER", "ASH", "SH_IS_ASH", "ASH_ECHO", "ASH_TEST",
-    "ASH_OPTIMIZE_FOR_SIZE", "CAT", "ECHO", "FALSE", "MKDIR", "SLEEP", "TEST",
+    "ASH_OPTIMIZE_FOR_SIZE", "CAT", "ECHO", "FALSE", "KILL", "MKDIR", "SLEEP", "TEST",
     "FEATURE_TEST_64", "TRUE", "UNAME", "MOUNT", "FEATURE_MOUNT_FLAGS",
 )
 KERNEL_OPTIONS = (
@@ -101,7 +101,7 @@ def initramfs(busybox):
     return gzip.compress(archive + b"\0" * (-len(archive) % 512), mtime=0)
 
 
-def build_busybox(args, run, env):
+def build_busybox(args, run):
     busybox = args.output / "busybox-1.37.0"
     compiler = shlex.split(args.cc) + [
         "--target=arm-linux-musleabi", "-march=armv5te", "-marm", "-mfloat-abi=soft",
@@ -149,10 +149,11 @@ def prepare(args):
              *[flag for option in KERNEL_OPTIONS for flag in ("--enable", option)]], log=log)
         run(kernel_make + ["olddefconfig"], log=log)
         require_options(kernel_build / ".config", KERNEL_OPTIONS + (
-            "SOC_SAM9X7", "MICROCHIP_PIT64B", "SERIAL_ATMEL", "SERIAL_ATMEL_CONSOLE"))
+            "CPU_ARM926T", "SOC_SAM9X7", "MICROCHIP_PIT64B",
+            "SERIAL_ATMEL", "SERIAL_ATMEL_CONSOLE"))
         run(kernel_make + ["zImage", "microchip/at91-sam9x75_curiosity.dtb"], log=log)
 
-    busybox = build_busybox(args, run, env)
+    busybox = build_busybox(args, run)
     assets = args.output / "boot"
     assets.mkdir()
     shutil.copyfile(kernel_build / "arch/arm/boot/zImage", assets / "zImage")

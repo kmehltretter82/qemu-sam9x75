@@ -131,6 +131,11 @@ fail the job. Build logs and guest evidence are retained for 14 days, also
 on failure. Only CI-generated evidence is uploaded automatically; private
 local test directories remain local. The 248-case upstream characterization
 is separate and is not silently treated as an all-passing CI gate.
+The minimal initramfs also includes ``kill``, required by upstream ``popen``
+and ``vfork`` cases; missing shell utilities are test-environment failures,
+not evidence of libc or emulator defects. Local characterization with this
+initramfs reproduced all 248 per-case statuses from the earlier full-rootfs
+baseline, including the 25 raw failures described below.
 
 Initial validation on 2026-10-05 passed all 44 contracts with Linux
 ``7.3.0-rc1+`` on the SAM9X75 machine, using PIT64B as the guest clocksource,

@@ -64,7 +64,10 @@ jobs:
       - name: Boot Linux and run ARMv5 libc contracts on SAM9X75
         env:
           SAM9X75_GUEST_DIR: ${{ runner.temp }}/sam9x75-libc
-        run: sh scripts/ci/sam9x75-libc-test.sh
+        run: |
+          set -o pipefail
+          mkdir -p "$SAM9X75_GUEST_DIR"
+          sh scripts/ci/sam9x75-libc-test.sh 2>&1 | tee "$SAM9X75_GUEST_DIR/pipeline.log"
 
       - name: Preserve Linux libc guest evidence
         if: always()
@@ -74,6 +77,7 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
           path: |
+            ${{ runner.temp }}/sam9x75-libc/pipeline.log
             ${{ runner.temp }}/sam9x75-libc/results/
             ${{ runner.temp }}/sam9x75-libc/contracts/manifest.json
             ${{ runner.temp }}/sam9x75-libc/sysroots/assets.json

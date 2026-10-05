@@ -22,6 +22,18 @@ ASSETS = (
 )
 
 
+def debian_tar_command(members, destination):
+    """GNU tar cannot autodetect compression when the input is a pipe."""
+    flags = {"data.tar": ["-xf"], "data.tar.xz": ["-xJf"],
+             "data.tar.gz": ["-xzf"], "data.tar.bz2": ["-xjf"],
+             "data.tar.zst": ["--zstd", "-xf"]}
+    payloads = [name for name in members.splitlines() if name.startswith("data.tar")]
+    if len(payloads) != 1 or payloads[0] not in flags:
+        raise ValueError("Missing, ambiguous or unsupported Debian data archive")
+    member = payloads[0]
+    return member, ["tar", *flags[member], "-", "-C", str(destination)]
+
+
 def prepare(args):
     args.output.mkdir(parents=True, exist_ok=False)
     args.downloads.mkdir(parents=True, exist_ok=True)
@@ -47,10 +59,9 @@ def prepare(args):
         manifest.append({"name": name, "url": url, "sha256": actual})
         if directory:
             members = subprocess.check_output([args.ar, "t", str(path)], text=True)
-            member = next(line for line in members.splitlines() if line.startswith("data.tar"))
+            member, command = debian_tar_command(members, glibc)
             archive = subprocess.check_output([args.ar, "p", str(path), member])
-            subprocess.run(["tar", "-xf", "-", "-C", str(glibc)],
-                           input=archive, env=env, check=True)
+            subprocess.run(command, input=archive, env=env, check=True)
         else:
             subprocess.run(["tar", "-xf", str(path), "-C", str(args.output)],
                            env=env, check=True)
