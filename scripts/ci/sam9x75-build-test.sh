@@ -10,6 +10,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 \
 PYTHONDONTWRITEBYTECODE=1 python3 \
     "$source_dir/tests/guest/at91/libc-consumer/test-run-upstream.py"
 PYTHONDONTWRITEBYTECODE=1 python3 \
+    "$source_dir/tests/guest/at91/libc-consumer/test-run-math.py"
+PYTHONDONTWRITEBYTECODE=1 python3 \
     "$source_dir/tests/guest/at91/libc-consumer/test-prepare-boot.py"
 
 mkdir -p "$build_dir"

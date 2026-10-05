@@ -299,3 +299,70 @@ empty. These are characterization results, not a passing conformance gate.
 An independent focused run of ``strtod``, ``strtold``, ``strtod_simple`` and
 ``strtof`` passed all 16 cases with the known upstream musl rounding fix
 backported into a disposable sysroot, without changing QEMU or test assertions.
+
+Full upstream math characterization
+----------------------------------
+
+``build-math.py`` attempts every top-level math program at the same pinned
+libc-test revision. The upstream Makefile selects dynamic math executables
+only: glibc time32, glibc time64 and shared musl. Static musl is explicitly
+excluded by that build rule. Nested generator/template C files are not
+standalone tests. All original assertions and sanity/special/UCB vectors
+remain unchanged and are included in the source hash inventory.
+
+With the source and sysroots prepared as above::
+
+    python3 "$fixture/build-math.py" \
+        --source /tmp/sam9x75-libc-test \
+        --glibc /tmp/sam9x75-libc-sysroots/glibc-sysroot \
+        --musl /tmp/sam9x75-libc-sysroots/musl-sysroot \
+        --output /tmp/sam9x75-math-build
+    python3 "$fixture/run-math.py" \
+        --source /tmp/sam9x75-libc-test \
+        --qemu build/qemu-system-arm \
+        --kernel /path/to/zImage --dtb /path/to/board.dtb \
+        --initramfs /path/to/initramfs.cpio.gz \
+        --assets /tmp/sam9x75-math-build --output /tmp/sam9x75-math-results
+
+The builder records every attempted program, including build failures, and
+returns 1 if any math build failed; it does not stop at the first failure.
+Its complete manifest can still be supplied to the runner, which executes
+all successfully built cases and retains the failed builds separately.
+Do not treat a failed build as an exclusion or omit it from the report.
+Missing guest-support programs prevent a valid run.
+
+The runner uses RAM-only batches of 24 cases by default to bound serial
+output. ``--batch-size`` selects 1--32, ``--case-timeout`` is the unchanged
+runtest deadline (default 30 seconds), and ``--timeout`` is a finite host
+deadline per batch. Each case runs with the regression profile's verified
+unprivileged identity. Missing, duplicate, reordered or contradictory
+results fail validation. Source, vector and ELF checksums are verified
+before execution. Raw nonzero statuses, failed builds or QEMU diagnostics
+cannot produce a passing result. This remains a characterization, not an
+all-passing CI gate; CI runs its host validators alongside the other tests.
+
+An independent API probe records the available rounding modes, exception
+macros and actual API responses for all four libc variants. Probe success
+means complete observations, not floating-point conformance. On ARMv5
+soft-float, non-nearest rounding and exception flags may be unavailable;
+musl's unchanged upstream tests then omit unsupported vectors or flag
+assertions. Glibc may expose macros whose APIs are unsupported. Compiler
+rounding-math/FENV_ACCESS warnings remain in logs, and zero exits must not
+be described as strict floating-point-environment certification.
+
+The initial 199-program inventory yielded 597 build attempts: 591 built and
+six glibc ``pow10*`` build failures. The 591 guest executions produced 277
+zero exits and 314 retained raw failures, with empty QEMU diagnostic logs.
+These are program outcomes, not counts of individual vectors or proof of
+physical timing. Pinned musl 1.2.6 reproduces a known subnormal ``fmaf``
+double-rounding issue, addressed by the `upstream fix
+<https://git.musl-libc.org/cgit/musl/commit/?id=a97644025bad0fe2a25d2458769f922232880826>`_
+and subsequent rewrite. Neither the fixture's default sysroot nor the test
+assertions are silently patched to make this pass. Long-double tests can
+also enforce stricter tolerances than the double variants even though this
+ARM ABI uses 53-bit long double. Accuracy and unsupported-fenv failures
+require classification before they can be attributed to QEMU.
+
+Generated manifests, sysroots and raw local logs belong outside the source
+checkout and may contain private host paths. No local evidence is uploaded
+automatically by this fixture.
