@@ -90,13 +90,20 @@ Support matrix
      - Required coverage
    * - ARM926EJ-S
      - Initial
-     - VFP is disabled.  The Armv5 and Armv6 short-descriptor walkers fetch and
+     - VFP is disabled.  The SAM9X7-specific CP15 Cache Type Register is
+       ``0x1d192192``: separate 32 KiB instruction/data caches, four ways,
+       32-byte lines, and ARM926 write-back/Format C cache cleaning.  A TCG
+       bare-metal qtest reads MIDR, CTR and SCTLR at cold boot and again
+       after reset.  This reports the documented cache geometry; it does
+       not implement cache storage, eviction or timing.  The generic
+       ``arm926`` CPU defaults and other boards are unchanged.
+       The Armv5 and Armv6 short-descriptor walkers fetch and
        classify an L2 descriptor before applying the domain access control
        inherited from L1.  On the physical ARM926EJ-S, a valid coarse L1 entry
        in no-access domain 4 followed by an invalid L2 entry produced DFSR
        ``0x47`` (L2 translation fault), rather than the premature page-domain
        fault formerly returned by QEMU.  Bare-metal TCG tests also preserve
-       valid-page, section-domain and external-L2-walk priorities.  MIDR, CTR,
+       valid-page, section-domain and external-L2-walk priorities.  MIDR,
        the remaining CP15 reset state, cache/MMU corner cases, FCSE, Jazelle
        and unaligned-access behavior remain under audit.  Nested stage-2 walk
        fault-level preservation in the Armv6 walker is a separate generic

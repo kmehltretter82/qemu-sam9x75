@@ -2592,6 +2592,74 @@ static void test_rom_cpu_reset_entry(void)
     g_assert_cmpint(g_unlink(rom_path), ==, 0);
 }
 
+static void test_cpu_cache_type_and_reset(void)
+{
+    static const uint32_t read_cpu_registers[] = {
+        0xe59f0024, /* ldr r0, [pc, #36] (SRAM result address) */
+        0xee101f10, /* mrc p15, 0, r1, c0, c0, 0 (MIDR) */
+        0xe5801000, /* str r1, [r0] */
+        0xee101f30, /* mrc p15, 0, r1, c0, c0, 1 (CTR) */
+        0xe5801004, /* str r1, [r0, #4] */
+        0xee111f10, /* mrc p15, 0, r1, c1, c0, 0 (SCTLR) */
+        0xe5801008, /* str r1, [r0, #8] */
+        0xe590100c, /* ldr r1, [r0, #12] (boot count) */
+        0xe2811001, /* add r1, r1, #1 */
+        0xe580100c, /* str r1, [r0, #12] */
+        0xeafffffe, /* b . */
+        SAM9X7_SRAM0_BASE,
+    };
+    uint32_t image[G_N_ELEMENTS(read_cpu_registers)];
+    g_autofree char *rom_path = NULL;
+    GError *error = NULL;
+    QTestState *qts;
+    unsigned int i, boot;
+    int fd, ret;
+
+    /*
+     * DS60001813E 2.1 and ARM DDI 0198E 2.3.1: two 32 KiB,
+     * four-way, 32-byte-line caches, write-back/Format C cleaning.
+     * Read the real CP15 register with TCG rather than a QOM test hook.
+     */
+    for (i = 0; i < G_N_ELEMENTS(image); i++) {
+        image[i] = cpu_to_le32(read_cpu_registers[i]);
+    }
+    fd = g_file_open_tmp("sam9x75-cpu-cache-XXXXXX", &rom_path, &error);
+    g_assert_no_error(error);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(ftruncate(fd, SAM9X7_BOOT_ROM_SIZE), ==, 0);
+    ret = pwrite(fd, image, sizeof(image), 0);
+    g_assert_cmpint(ret, ==, sizeof(image));
+    close(fd);
+
+    qts = qtest_initf(
+        SAM9X75_MACHINE " -accel tcg,thread=single"
+        " -bios %s -serial none -nic none", rom_path);
+    for (boot = 1; boot <= 2; boot++) {
+        int64_t deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+        uint32_t count;
+
+        do {
+            count = qtest_readl(qts, SAM9X7_SRAM0_BASE + 12);
+            if (count == boot) {
+                break;
+            }
+            g_usleep(1000);
+        } while (g_get_monotonic_time() < deadline);
+        g_assert_cmphex(count, ==, boot);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE), ==,
+                       0x41069265);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + 4), ==,
+                       0x1d192192);
+        g_assert_cmphex(qtest_readl(qts, SAM9X7_SRAM0_BASE + 8), ==,
+                       0x00090078);
+        if (boot == 1) {
+            qtest_system_reset(qts);
+        }
+    }
+    qtest_quit(qts);
+    g_assert_cmpint(g_unlink(rom_path), ==, 0);
+}
+
 static void test_direct_linux_ddr_assignment(void)
 {
     static const uint8_t check_ccfg_and_exit[] = {
@@ -28665,6 +28733,8 @@ int main(int argc, char **argv)
 
     qtest_add_func("sam9x75/memory-and-identification",
                    test_memory_and_identification);
+    qtest_add_func("sam9x75/cpu/cache-type-and-reset",
+                   test_cpu_cache_type_and_reset);
     qtest_add_func("sam9x75/matrix/registers-and-protection",
                    test_matrix_registers_and_protection);
     qtest_add_func("sam9x75/matrix/boot-remap", test_matrix_boot_remap);

@@ -1079,6 +1079,13 @@ static void sam9x7_init(Object *obj)
     object_initialize_child(obj, "cpu", &s->cpu,
                             ARM_CPU_TYPE_NAME("arm926"));
     object_property_set_bool(OBJECT(&s->cpu), "vfp", false, &error_abort);
+    /*
+     * DS60001813E 2.1: 32 KiB instruction and data caches. ARM DDI 0198E
+     * 2.3.1 encodes each as 0x192 (32-byte lines, four ways, M=0), with
+     * separate-cache bit 24 and write-back/Format C Ctype=14. The generic
+     * arm926 default does not describe this SoC's cache implementation.
+     */
+    s->cpu.ctr = 0x1d192192;
 
     object_initialize_child(obj, "aic", &s->aic, TYPE_AT91_AIC5);
     object_initialize_child(obj, "dbgu", &s->dbgu, TYPE_AT91_DBGU);
