@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Include after the ordinary SAM9X75 Curiosity board DTS. This also applies
+// to physical hardware: GPIO LED consumers must release the two PWM pads.
+
+&led_blue {
+    status = "disabled";
+};
+
+&led_green {
+    status = "disabled";
+};
+
+&pinctrl {
+    pwm-leds {
+        pinctrl_pwm_leds: pwm-leds-default {
+            // PIOC, PC20/PC21, peripheral C, no pull-up.
+            atmel,pins = <2 20 3 0>, <2 21 3 0>;
+        };
+    };
+};
+
+&pwm0 {
+    pinctrl-names = "default";
+    pinctrl-0 = <&pinctrl_pwm_leds>;
+    status = "okay";
+};

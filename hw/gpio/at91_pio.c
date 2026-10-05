@@ -96,7 +96,17 @@ static void at91_pio_update_irq(AT91PIOState *s)
     qemu_set_irq(s->irq, clock_get_hz(s->pclk) && pending);
 }
 
-static uint32_t at91_pio_output_connected(AT91PIOState *s)
+static uint32_t at91_pio_peripheral_selected(AT91PIOState *s,
+                                            unsigned int function)
+{
+    uint32_t selected = ~s->pio_status & s->valid_mask;
+
+    selected &= function & 1 ? s->abcdsr[0] : ~s->abcdsr[0];
+    selected &= function & 2 ? s->abcdsr[1] : ~s->abcdsr[1];
+    return selected;
+}
+
+static uint32_t at91_pio_gpio_connected(AT91PIOState *s)
 {
     uint32_t enabled = s->pio_status & s->output_status & s->valid_mask;
 
@@ -104,10 +114,34 @@ static uint32_t at91_pio_output_connected(AT91PIOState *s)
     return enabled & ~(s->multidrive_status & s->output_data);
 }
 
+static uint32_t at91_pio_output_connected(AT91PIOState *s)
+{
+    uint32_t connected = at91_pio_gpio_connected(s);
+    unsigned int function;
+
+    for (function = 0; function < AT91_PIO_NUM_FUNCTIONS; function++) {
+        connected |= at91_pio_peripheral_selected(s, function) &
+                     s->peripheral_mask[function];
+    }
+    return connected;
+}
+
+static uint32_t at91_pio_output_levels(AT91PIOState *s)
+{
+    uint32_t levels = s->output_data & at91_pio_gpio_connected(s);
+    unsigned int function;
+
+    for (function = 0; function < AT91_PIO_NUM_FUNCTIONS; function++) {
+        levels |= at91_pio_peripheral_selected(s, function) &
+                  s->peripheral_mask[function] & s->peripheral_level[function];
+    }
+    return levels;
+}
+
 static void at91_pio_update_outputs(AT91PIOState *s)
 {
     uint32_t connected = at91_pio_output_connected(s);
-    uint32_t levels = s->output_data & connected;
+    uint32_t levels = at91_pio_output_levels(s);
     unsigned int pin;
 
     for (pin = 0; pin < AT91_PIO_NUM_PINS; pin++) {
@@ -138,7 +172,7 @@ static uint32_t at91_pio_raw_level(AT91PIOState *s)
     uint32_t undriven = floating & ~s->external_mask;
     uint32_t level;
 
-    level = connected & s->output_data;
+    level = at91_pio_output_levels(s);
     level |= externally_driven & s->external_level;
     level |= undriven & s->pullup_enable;
     return level & s->valid_mask;
@@ -482,9 +516,11 @@ static void at91_pio_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case PIO_ABCDSR0:
         s->abcdsr[0] = pins;
+        at91_pio_refresh_pins(s);
         break;
     case PIO_ABCDSR1:
         s->abcdsr[1] = pins;
+        at91_pio_refresh_pins(s);
         break;
     case PIO_IFSCDR:
         s->slow_filter_status &= ~pins;
@@ -604,6 +640,24 @@ static void at91_pio_set_input(void *opaque, int pin, int level)
     at91_pio_refresh_pins(s);
 }
 
+static void at91_pio_set_peripheral(void *opaque, int n, int level)
+{
+    AT91PIOState *s = AT91_PIO(opaque);
+    unsigned int function = n / AT91_PIO_NUM_PINS;
+    unsigned int pin = n % AT91_PIO_NUM_PINS;
+
+    if (!(s->valid_mask & BIT(pin))) {
+        return;
+    }
+    s->peripheral_mask[function] = deposit32(s->peripheral_mask[function],
+                                            pin, 1, level >= 0);
+    if (level >= 0) {
+        s->peripheral_level[function] = deposit32(s->peripheral_level[function],
+                                                  pin, 1, level != 0);
+    }
+    at91_pio_refresh_pins(s);
+}
+
 static void at91_pio_clock_changed(void *opaque, ClockEvent event)
 {
     AT91PIOState *s = AT91_PIO(opaque);
@@ -674,6 +728,8 @@ static void at91_pio_init(Object *obj)
     sysbus_init_mmio(sbd, &s->mmio);
     sysbus_init_irq(sbd, &s->irq);
     qdev_init_gpio_in(DEVICE(s), at91_pio_set_input, AT91_PIO_NUM_PINS);
+    qdev_init_gpio_in_named(DEVICE(s), at91_pio_set_peripheral, "peripheral",
+                            AT91_PIO_NUM_PINS * AT91_PIO_NUM_FUNCTIONS);
     qdev_init_gpio_out(DEVICE(s), s->output, AT91_PIO_NUM_PINS);
 
     s->pclk = qdev_init_clock_in(DEVICE(s), "pclk",
@@ -752,7 +808,7 @@ static int at91_pio_post_load(void *opaque, int version_id)
 
 static const VMStateDescription at91_pio_vmstate = {
     .name = TYPE_AT91_PIO,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = at91_pio_post_load,
     .fields = (const VMStateField[]) {
@@ -781,6 +837,10 @@ static const VMStateDescription at91_pio_vmstate = {
         VMSTATE_UINT32(driver, AT91PIOState),
         VMSTATE_UINT32(external_level, AT91PIOState),
         VMSTATE_UINT32(external_mask, AT91PIOState),
+        VMSTATE_UINT32_ARRAY_V(peripheral_level, AT91PIOState,
+                               AT91_PIO_NUM_FUNCTIONS, 2),
+        VMSTATE_UINT32_ARRAY_V(peripheral_mask, AT91PIOState,
+                               AT91_PIO_NUM_FUNCTIONS, 2),
         VMSTATE_UINT32(raw_level, AT91PIOState),
         VMSTATE_UINT32(sampled_level, AT91PIOState),
         VMSTATE_UINT32(filter_pending, AT91PIOState),

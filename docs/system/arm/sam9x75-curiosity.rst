@@ -10,6 +10,21 @@ This machine is under active development.  The support matrix below is a
 contract: an item is not considered complete merely because a guest happens
 to probe it.
 
+Build and automated baseline
+----------------------------
+
+From a checkout with submodules initialized, run::
+
+  sh scripts/ci/sam9x75-build-test.sh
+
+This configures an ARM-system build in ``build-sam9x75`` with warnings treated
+as errors, builds the emulator and runs the board, LAN8840 EEPROM/connector,
+ADC and PWM qtest suites.  ``SAM9X75_BUILD_DIR`` selects a different build
+directory; additional arguments are passed to ``configure``.  GitHub Actions
+runs the same script on Ubuntu 24.04 with ``--disable-download`` and the
+required Python build dependencies installed.  Guest-driver gates needing
+external kernel/rootfs assets remain separate from this asset-free baseline.
+
 Reference baseline
 ------------------
 
@@ -711,6 +726,9 @@ Support matrix
        enters the PMIC through nSTRT.  START implements both programmable
        SYS-TMG timeout stages, reset-on-read servicing and oscillator timing
        displacement.  LED intensity and every switch path have board qtests.
+       PC20/PC21 also follow PWM2/PWM3 when PIO selects peripheral C.  The
+       LED MOSFET gate pull-downs keep released pads off; GPIO ownership and
+       a different peripheral selection disconnect the PWM path.
    * - Timers, ADC, PWM and SSC
      - Initial
      - TC0 and TC1 each expose the modeled ``0x100``-byte, three-channel TCB
@@ -778,6 +796,22 @@ Support matrix
        resolution, comparison, result/overrun status, interrupts, halfword
        DMA, write protection, VDDCORE reset and migration.  Input and reference
        voltages are injectable in microvolts through QOM properties.
+       PWM at ``0xf8034000`` has four independent 32-bit channels, PID/AIC
+       source 18, MCK prescalers and shared CLKA/CLKB dividers.  It models
+       left/center-aligned counting, polarity, period interrupts, buffered
+       duty/period updates, end-of-period disable, clock freezing and rate
+       changes, VDDCORE reset and active/gated migration.  The counters are
+       deliberately wider than chapter 70 of DS60001813E states: preserved
+       SAM9X75 hardware measurements establish the 32-bit register path.
+       Outputs route through the PIO function mux on PB11--14/B, PC18--21/C
+       and PC10--11/C.  PWM2/PWM3 therefore drive the blue/green LEDs and
+       PWM3 also reaches the J25 mikroBUS PWM net.  The Linux ``pwm-atmel``
+       sysfs gate exercises both LED pads, polarity, buffered updates and a
+       20 s period; see ``tests/guest/at91/pwm-consumer/README.rst``.  Zero-period
+       operation uses a one-tick model convention; its silicon behavior,
+       shared-divider reprogramming details and invalid configurations still
+       require comparison.  This is an initial functional model, not complete
+       electrical/timing fidelity.
        The single SSC at ``0xf0010000`` on PID/AIC source 28 is modeled at
        the register level: enable, disable and software reset, the mode and
        format registers, the holding registers with ``TXRDY``, ``TXEMPTY``,
@@ -815,8 +849,8 @@ Support matrix
        routing still need implementation or hardware comparison.  The current
        Linux fallback compatible describes a SAMA5D2 ADC and exposes channels
        8--11 that do not exist on SAM9X7; QEMU deliberately keeps the physical
-       eight-channel register map.  PWM outputs and synchronous serial
-       operation also remain.
+       eight-channel register map.  External synchronous serial operation
+       also remains.
    * - Audio
      - Initial
      - I2SMCC register state, clocking, mono/compact/TDM framing, interrupts,
@@ -1052,8 +1086,12 @@ Support matrix
        presence at run time.  J12 controls the LAN8840
        daughterboard's required 25 MHz clock, with functional MDIO and traffic
        loss when open.  The remaining power, clock and interface-selection
-       jumpers, mikroBUS, Raspberry Pi header, non-storage M.2 peripherals and
-       official Microchip overlay attachments remain.
+       jumpers, full mikroBUS/Raspberry Pi header electrical behavior,
+       non-storage M.2 peripherals and official Microchip overlay attachments
+       remain.  Optional connector I2C devices can be attached to the shared
+       FLEXCOM7 bus; the explicit EEPROM configuration below has negative,
+       coexistence, reset and migration coverage without adding a hidden
+       base-board EEPROM.
 
 Execution roadmap
 -----------------
@@ -1544,7 +1582,45 @@ the following keys:
 The three LED objects are visible as ``/machine/rgb-led-red``,
 ``/machine/rgb-led-blue`` and ``/machine/rgb-led-green``.  Their read-only
 ``intensity-percent`` QOM property is either 0 or 100 for the GPIO-driven
-board LED.
+board LED.  PWM2/PWM3 reach the blue/green objects only while PIO assigns
+PC20/PC21 to peripheral C.  The observable intensity is the instantaneous
+digital pad level, not an averaged or calibrated analog brightness.
+
+Connector and add-on devices
+---------------------------
+
+The ordinary QEMU ``-device`` options can attach an optional I2C EEPROM to
+``i2c7``.  This is FLEXCOM7's shared PC0/PC1 bus: J25 mikroBUS pins 11/12 and
+J27 Raspberry Pi-compatible header pins 3/5 carry the same data/clock nets.
+It is not a separate electrical bus per connector.  The PAC1934 is normally
+at address ``0x10`` and the LAN8840 daughter-card EEPROM at ``0x54``; choose
+an unused address for the add-on.  The PMIC on ``i2c6`` is a different bus.
+User Guide DS60001859C Table 3-10 and the REV5 schematic establish this
+connector routing.
+
+For an erased 8 KiB EEPROM with two-byte addresses, 32-byte pages, a 5 ms
+write cycle and explicitly migrated contents, append::
+
+  -device at24c-eeprom,id=expansion-eeprom,bus=i2c7,address=0x50,rom-size=8192,address-size=2,page-size=32,write-cycle-ns=5000000,init-value=255,migrate-state=on
+
+No connector EEPROM is created by default.  Without a drive the contents
+are volatile across emulator invocations but survive a guest system reset.
+``migrate-state=on`` preserves both the array and a pending write cycle; the
+generic device defaults to the legacy no-state migration behavior otherwise.
+Both migration endpoints must use the same attachment and parameters.  The
+LAN8840 EEPROM qtest suite checks absence by default, independent addressing
+and busy state on the shared bus, reset persistence and migration in flight.
+
+The guest must describe the chosen device in its normal device tree, or
+instantiate an appropriate ``at24`` client through the I2C ``new_device``
+interface.  Attaching a device in QEMU does not automatically change a DTB.
+The remaining SPI, USART, analog, interrupt and power/reset wiring of a Click
+board is not implied by this memory-only attachment.  PWM3 already routes to
+PC21, the green LED and J25 pin 16; their shared net cannot be treated as
+independent outputs.
+
+Modeled jumper options
+----------------------
 
 The J9 NAND and J10 QSPI chip-select jumpers are closed by default, like the
 physical board.  Either memory remains populated but can be electrically

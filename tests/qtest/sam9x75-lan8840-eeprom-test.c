@@ -50,6 +50,11 @@
 #define FLEXCOM7_PID            10
 #define LAN8840_EEPROM_ADDR     0x54
 #define AT24C01_WRITE_CYCLE_NS  (5 * SCALE_MS)
+#define CONNECTOR_EEPROM_ADDR  0x50
+#define CONNECTOR_EEPROM_ARGS \
+    " -device at24c-eeprom,id=expansion-eeprom,bus=i2c7,address=0x50," \
+    "rom-size=8192,address-size=2,page-size=32,write-cycle-ns=5000000," \
+    "init-value=255,migrate-state=on"
 
 static uint32_t twi_wait_status(QTestState *qts, uint32_t mask)
 {
@@ -319,6 +324,78 @@ static void test_at24c_legacy_migration_opt_out(void)
     qtest_quit(from);
 }
 
+static void test_connector_eeprom_absent_by_default(void)
+{
+    QTestState *qts = qtest_init(SAM9X75_MACHINE);
+    uint8_t value;
+
+    twi7_enable_master(qts);
+    g_assert_false(eeprom_read_byte_at(qts, CONNECTOR_EEPROM_ADDR,
+                                       0, 2, &value));
+    g_assert_true(eeprom_read_byte(qts, LAN8840_EEPROM_ADDR, 0, &value));
+    g_assert_cmphex(value, ==, 0xff);
+    qtest_quit(qts);
+}
+
+static void test_connector_eeprom_shared_bus(void)
+{
+    static const uint8_t data[] = { 0xa5, 0x5a };
+    QTestState *qts = qtest_init(SAM9X75_MACHINE CONNECTOR_EEPROM_ARGS);
+    uint8_t value;
+
+    twi7_enable_master(qts);
+    g_assert_true(eeprom_read_byte_at(qts, CONNECTOR_EEPROM_ADDR,
+                                      0x1ffe, 2, &value));
+    g_assert_cmphex(value, ==, 0xff);
+    eeprom_write_at(qts, CONNECTOR_EEPROM_ADDR, 0x1ffe, 2,
+                    data, sizeof(data));
+    g_assert_false(eeprom_read_byte_at(qts, CONNECTOR_EEPROM_ADDR,
+                                       0x1ffe, 2, &value));
+    /* The connector EEPROM's write cycle does not busy the other slaves. */
+    g_assert_true(eeprom_read_byte(qts, LAN8840_EEPROM_ADDR, 0, &value));
+    g_assert_cmphex(value, ==, 0xff);
+    qtest_clock_step(qts, AT24C01_WRITE_CYCLE_NS);
+    g_assert_true(eeprom_read_byte_at(qts, CONNECTOR_EEPROM_ADDR,
+                                      0x1ffe, 2, &value));
+    g_assert_cmphex(value, ==, data[0]);
+    g_assert_true(eeprom_read_byte_at(qts, CONNECTOR_EEPROM_ADDR,
+                                      0x1fff, 2, &value));
+    g_assert_cmphex(value, ==, data[1]);
+    /* A system reset preserves programmed EEPROM contents. */
+    qtest_system_reset(qts);
+    twi7_enable_master(qts);
+    g_assert_true(eeprom_read_byte_at(qts, CONNECTOR_EEPROM_ADDR,
+                                      0x1fff, 2, &value));
+    g_assert_cmphex(value, ==, data[1]);
+    qtest_quit(qts);
+}
+
+static void test_connector_eeprom_migration(void)
+{
+    static const uint8_t data = 0x69;
+    QTestState *from = qtest_init(SAM9X75_MACHINE CONNECTOR_EEPROM_ARGS);
+    QTestState *to = qtest_init(SAM9X75_MACHINE CONNECTOR_EEPROM_ARGS
+                              " -incoming defer");
+    int64_t from_clock;
+    uint8_t value;
+
+    twi7_enable_master(from);
+    eeprom_write_at(from, CONNECTOR_EEPROM_ADDR, 0x1234, 2, &data, 1);
+    from_clock = qtest_clock_step(from, 1);
+    qtest_clock_set(to, from_clock);
+    sam9x75_migrate(from, to);
+    g_assert_false(eeprom_read_byte_at(to, CONNECTOR_EEPROM_ADDR,
+                                       0x1234, 2, &value));
+    qtest_clock_step(to, AT24C01_WRITE_CYCLE_NS);
+    g_assert_true(eeprom_read_byte_at(to, CONNECTOR_EEPROM_ADDR,
+                                      0x1234, 2, &value));
+    g_assert_cmphex(value, ==, data);
+    g_assert_true(eeprom_read_byte(to, LAN8840_EEPROM_ADDR, 0, &value));
+    g_assert_cmphex(value, ==, 0xff);
+    qtest_quit(to);
+    qtest_quit(from);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -337,6 +414,12 @@ int main(int argc, char **argv)
                    test_at24c_large_device_address_accumulator);
     qtest_add_func("sam9x75/at24c/legacy-migration-opt-out",
                    test_at24c_legacy_migration_opt_out);
+    qtest_add_func("sam9x75/connector-eeprom/absent-by-default",
+                   test_connector_eeprom_absent_by_default);
+    qtest_add_func("sam9x75/connector-eeprom/shared-bus",
+                   test_connector_eeprom_shared_bus);
+    qtest_add_func("sam9x75/connector-eeprom/migration",
+                   test_connector_eeprom_migration);
 
     return g_test_run();
 }

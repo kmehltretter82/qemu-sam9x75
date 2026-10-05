@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+/bin/busybox --install -s /bin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+if sh /pwm-sysfs-test.sh; then
+    echo PWM_PASS
+else
+    echo PWM_FAIL
+fi
+# The host runner terminates QEMU after collecting the result.
+while :; do sleep 3600; done

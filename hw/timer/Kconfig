@@ -43,6 +43,9 @@ config AT91_TCB
     bool
     select PTIMER
 
+config AT91_PWM
+    bool
+
 config PXA2XX_TIMER
     bool
 

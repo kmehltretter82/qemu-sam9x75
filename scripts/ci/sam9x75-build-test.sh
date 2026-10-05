@@ -19,7 +19,8 @@ ninja -C "$build_dir" \
     qemu-system-arm \
     tests/qtest/sam9x75-curiosity-test \
     tests/qtest/sam9x75-lan8840-eeprom-test \
-    tests/qtest/sam9x7-adc-test
+    tests/qtest/sam9x7-adc-test \
+    tests/qtest/sam9x7-pwm-test
 
 "$build_dir/pyvenv/bin/meson" test \
     -C "$build_dir" \
@@ -28,4 +29,5 @@ ninja -C "$build_dir" \
     --timeout-multiplier 4 \
     'qemu:qtest-arm/sam9x75-curiosity-test' \
     'qemu:qtest-arm/sam9x75-lan8840-eeprom-test' \
-    'qemu:qtest-arm/sam9x7-adc-test'
+    'qemu:qtest-arm/sam9x7-adc-test' \
+    'qemu:qtest-arm/sam9x7-pwm-test'

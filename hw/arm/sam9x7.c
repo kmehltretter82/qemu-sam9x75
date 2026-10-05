@@ -267,6 +267,21 @@ static void sam9x7_uhphs_ohci_dma_error(void *opaque, dma_addr_t addr)
     at91_uhphs_ehci_record_dma_error(opaque, addr);
 }
 
+static void sam9x7_pwm_pin(void *opaque, int n, int level)
+{
+    SAM9X7State *s = SAM9X7(opaque);
+
+    /* DS60001813E Table 8.1: PB11..14/B and PC18..21/C; PC10..11/C. */
+    qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&s->pio[1]), "peripheral",
+                   AT91_PIO_PERIPHERAL(1, 11 + n)), level);
+    qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&s->pio[2]), "peripheral",
+                   AT91_PIO_PERIPHERAL(2, 18 + n)), level);
+    if (n < 2) {
+        qemu_set_irq(qdev_get_gpio_in_named(DEVICE(&s->pio[2]), "peripheral",
+                       AT91_PIO_PERIPHERAL(2, 10 + n)), level);
+    }
+}
+
 static void sam9x7_realize(DeviceState *dev, Error **errp)
 {
     SAM9X7State *s = SAM9X7(dev);
@@ -458,6 +473,18 @@ static void sam9x7_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(s->memory, SAM9X7_TCB1_BASE, mr);
     sysbus_connect_irq(SYS_BUS_DEVICE(&s->tcb1), 0,
                        qdev_get_gpio_in(DEVICE(&s->aic), 45));
+
+    if (!sysbus_realize(SYS_BUS_DEVICE(&s->pwm), errp)) {
+        return;
+    }
+    mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->pwm), 0);
+    memory_region_add_subregion(s->memory, SAM9X7_PWM_BASE, mr);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->pwm), 0,
+                       qdev_get_gpio_in(DEVICE(&s->aic), 18));
+    for (i = 0; i < AT91_PWM_NUM_CHANNELS; i++) {
+        qdev_connect_gpio_out_named(DEVICE(&s->pwm), "pwm", i,
+            qdev_get_gpio_in_named(dev, "pwm-pin", i));
+    }
 
     /*
      * DS60001813E Table 16.1: requests 43-48 are the compare events of
@@ -954,6 +981,7 @@ static void sam9x7_init_vddcore_reset(SAM9X7State *s)
     sam9x7_vddcore_add(s, DEVICE(&s->pit));
     sam9x7_vddcore_add(s, DEVICE(&s->tcb));
     sam9x7_vddcore_add(s, DEVICE(&s->tcb1));
+    sam9x7_vddcore_add(s, DEVICE(&s->pwm));
     sam9x7_vddcore_add(s, DEVICE(&s->xdmac));
     sam9x7_vddcore_add(s, DEVICE(&s->trng));
     sam9x7_vddcore_add(s, DEVICE(&s->adc));
@@ -1033,6 +1061,8 @@ static void sam9x7_init(Object *obj)
 
     qdev_init_gpio_in_named(DEVICE(s), sam9x7_set_reset,
                             SAM9X7_GPIO_RESET, 2);
+    qdev_init_gpio_in_named(DEVICE(s), sam9x7_pwm_pin, "pwm-pin",
+                            AT91_PWM_NUM_CHANNELS);
     qdev_init_gpio_in_named(DEVICE(s), sam9x7_set_boot_remap,
                             "boot-remap", 1);
     qdev_init_gpio_in_named(DEVICE(s), sam9x7_set_ebi_assignment,
@@ -1146,6 +1176,10 @@ static void sam9x7_init(Object *obj)
                           qdev_get_clock_out(DEVICE(&s->pmc), "gclk[45]"));
     qdev_connect_clock_in(DEVICE(&s->tcb1), "slck",
                           qdev_get_clock_out(DEVICE(&s->sckc), "md-slck"));
+
+    object_initialize_child(obj, "pwm", &s->pwm, TYPE_AT91_PWM);
+    qdev_connect_clock_in(DEVICE(&s->pwm), "pclk",
+                          qdev_get_clock_out(DEVICE(&s->pmc), "pclk[18]"));
 
     object_initialize_child(obj, "xdmac", &s->xdmac, TYPE_AT91_XDMAC);
     qdev_prop_set_uint32(DEVICE(&s->xdmac), "version", 0x293);

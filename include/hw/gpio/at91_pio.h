@@ -16,6 +16,10 @@
 OBJECT_DECLARE_SIMPLE_TYPE(AT91PIOState, AT91_PIO)
 
 #define AT91_PIO_NUM_PINS 32
+#define AT91_PIO_NUM_FUNCTIONS 4
+/* Named input index: function A=0, B=1, C=2, D=3, followed by pin 0..31. */
+#define AT91_PIO_PERIPHERAL(function, pin) \
+    ((function) * AT91_PIO_NUM_PINS + (pin))
 
 typedef struct AT91PIOFilterTimer {
     AT91PIOState *pio;
@@ -63,6 +67,8 @@ struct AT91PIOState {
     /* Pin electrical state and the clocked/filter-visible state. */
     uint32_t external_level;
     uint32_t external_mask;
+    uint32_t peripheral_level[AT91_PIO_NUM_FUNCTIONS];
+    uint32_t peripheral_mask[AT91_PIO_NUM_FUNCTIONS];
     uint32_t raw_level;
     uint32_t sampled_level;
     uint32_t old_output_level;

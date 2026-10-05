@@ -199,6 +199,7 @@ config SAM9X7
     select AT91_PIO
     select AT91_PIT
     select AT91_PIT64B
+    select AT91_PWM
     select AT91_RTT
     select AT91_RTC
     select AT91_TCB

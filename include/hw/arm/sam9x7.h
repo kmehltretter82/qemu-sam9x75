@@ -48,6 +48,7 @@
 #include "hw/ssi/at91_spi.h"
 #include "hw/timer/at91_pit64b.h"
 #include "hw/timer/at91_pit.h"
+#include "hw/timer/at91_pwm.h"
 #include "hw/timer/at91_rtt.h"
 #include "hw/timer/at91_tcb.h"
 #include "hw/usb/at91-udphs.h"
@@ -114,6 +115,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(SAM9X7State, SAM9X7)
 #define SAM9X7_TCB1_BASE             0xf800c000
 #define SAM9X7_SFR_BASE              0xf8050000
 #define SAM9X7_GMAC_BASE             0xf802c000
+#define SAM9X7_PWM_BASE              0xf8034000
 #define SAM9X7_UDPHS_BASE            0xf803c000
 #define SAM9X7_UDPHS_SIZE            0x00000400
 #define SAM9X7_ADC_BASE              0xf804c000
@@ -192,6 +194,7 @@ struct SAM9X7State {
     AT91RTCState rtc;
     AT91TCBState tcb;
     AT91TCBState tcb1;
+    AT91PWMState pwm;
     AT91SSCState ssc;
     AT91WDTState wdt;
     OrIRQState sys_irq;

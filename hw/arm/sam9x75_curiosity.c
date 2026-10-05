@@ -171,6 +171,25 @@ static bool sam9x75_curiosity_attach_spi_sd(SAM9X7State *soc,
     return true;
 }
 
+static void sam9x75_curiosity_connect_led(MachineState *machine,
+                                          SAM9X7State *soc,
+                                          LEDColor color, const char *name,
+                                          unsigned int pin)
+{
+    LEDState *led = led_create_simple(OBJECT(machine),
+                                      GPIO_POLARITY_ACTIVE_HIGH, color, name);
+    DeviceState *pad = qdev_new(TYPE_AT91_PAD_MUX);
+    g_autofree char *pad_name = g_strdup_printf("rgb-led-pc%u-pad", pin);
+
+    /* The LED MOSFETs have gate pull-downs; a released PIO is not logic one. */
+    qdev_prop_set_bit(pad, "pullup", false);
+    object_property_add_child(OBJECT(machine), pad_name, OBJECT(pad));
+    qdev_realize_and_unref(pad, NULL, &error_fatal);
+    qdev_connect_gpio_out(DEVICE(&soc->pio[2]), pin,
+                          qdev_get_gpio_in_named(pad, AT91_PAD_MUX_PIO, 0));
+    qdev_connect_gpio_out(pad, 0, qdev_get_gpio_in(DEVICE(led), 0));
+}
+
 static void sam9x75_curiosity_create_controls(MachineState *machine,
                                                SAM9X7State *soc,
                                                I2CSlave *pmic)
@@ -181,22 +200,15 @@ static void sam9x75_curiosity_create_controls(MachineState *machine,
     QList *keycode_list = qlist_new();
     DeviceState *buttons;
     DeviceState *wake_sources;
-    LEDState *led;
     qemu_irq wkup;
     unsigned int i;
 
-    led = led_create_simple(OBJECT(machine), GPIO_POLARITY_ACTIVE_HIGH,
-                            LED_COLOR_RED, "RGB LED red");
-    qdev_connect_gpio_out(DEVICE(&soc->pio[2]), 14,
-                          qdev_get_gpio_in(DEVICE(led), 0));
-    led = led_create_simple(OBJECT(machine), GPIO_POLARITY_ACTIVE_HIGH,
-                            LED_COLOR_BLUE, "RGB LED blue");
-    qdev_connect_gpio_out(DEVICE(&soc->pio[2]), 20,
-                          qdev_get_gpio_in(DEVICE(led), 0));
-    led = led_create_simple(OBJECT(machine), GPIO_POLARITY_ACTIVE_HIGH,
-                            LED_COLOR_GREEN, "RGB LED green");
-    qdev_connect_gpio_out(DEVICE(&soc->pio[2]), 21,
-                          qdev_get_gpio_in(DEVICE(led), 0));
+    sam9x75_curiosity_connect_led(machine, soc, LED_COLOR_RED,
+                                   "RGB LED red", 14);
+    sam9x75_curiosity_connect_led(machine, soc, LED_COLOR_BLUE,
+                                   "RGB LED blue", 20);
+    sam9x75_curiosity_connect_led(machine, soc, LED_COLOR_GREEN,
+                                   "RGB LED green", 21);
 
     /*
      * Keyboard 0/W/R/S operate SW1 USER, SW2 WKUP, SW3 RESET and SW4
