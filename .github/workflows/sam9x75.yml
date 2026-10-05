@@ -32,6 +32,7 @@ jobs:
             build-essential \
             libglib2.0-dev \
             libpixman-1-dev \
+            libslirp-dev \
             ninja-build \
             pkg-config \
             python3-pip \
@@ -49,4 +50,4 @@ jobs:
             keycodemapdb dtc berkeley-softfloat-3 berkeley-testfloat-3
 
       - name: Build and test SAM9X75
-        run: sh scripts/ci/sam9x75-build-test.sh --disable-download --disable-rust
+        run: sh scripts/ci/sam9x75-build-test.sh --disable-download --disable-rust --enable-slirp
