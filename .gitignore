@@ -1,5 +1,6 @@
 /GNUmakefile
 /build/
+/build-sam9x75/
 /.cache/
 /.vscode/
 *.pyc

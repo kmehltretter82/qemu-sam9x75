@@ -19949,11 +19949,11 @@ static void test_nand_per_plane_status_migration(void)
 
     /* Migrate the nonzero plane latch and one of the three row cycles. */
     nand_command(middle, NAND_CMD_ENH_STATUS);
-    nand_address(middle, plane1_page);
+    nand_address(middle, plane1_page & 0xff);
     g_assert_cmphex(qtest_readb(middle, NAND_DATA), ==, 0xff);
     nand_migrate(middle, to);
-    nand_address(to, plane1_page >> 8);
-    nand_address(to, plane1_page >> 16);
+    nand_address(to, (plane1_page >> 8) & 0xff);
+    nand_address(to, (plane1_page >> 16) & 0xff);
     g_assert_cmphex(qtest_readb(to, NAND_DATA), ==,
                     NAND_STATUS_IDLE | NAND_STATUS_FAIL);
     g_assert_cmphex(nand_read_status(to), ==,

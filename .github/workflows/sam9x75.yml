@@ -1,0 +1,44 @@
+name: SAM9X75
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sam9x75-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  arm-qtests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SAM9X75_BUILD_DIR: ${{ github.workspace }}/build
+    steps:
+      - name: Check out QEMU
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            build-essential \
+            libglib2.0-dev \
+            libpixman-1-dev \
+            ninja-build \
+            pkg-config \
+            python3-pip \
+            python3-setuptools \
+            python3-venv \
+            python3-wheel \
+            zlib1g-dev
+
+      - name: Build and test SAM9X75
+        run: sh scripts/ci/sam9x75-build-test.sh --disable-download
