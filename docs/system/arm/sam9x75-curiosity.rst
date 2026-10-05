@@ -21,8 +21,10 @@ This configures an ARM-system build in ``build-sam9x75`` with warnings treated
 as errors, builds the emulator and runs the board, LAN8840 EEPROM/connector,
 ADC and PWM qtest suites.  ``SAM9X75_BUILD_DIR`` selects a different build
 directory; additional arguments are passed to ``configure``.  GitHub Actions
-runs the same script on Ubuntu 24.04 with ``--disable-download`` and the
-required Python build dependencies installed.  Guest-driver gates needing
+prepares the revision-pinned C Meson subprojects, then runs the same script
+on Ubuntu 24.04 with ``--disable-download --disable-rust`` and the required
+Python build dependencies installed.  This minimal C-device build does not
+change ARM guest-language support.  Guest-driver gates needing
 external kernel/rootfs assets remain separate from this asset-free baseline.
 
 Reference baseline

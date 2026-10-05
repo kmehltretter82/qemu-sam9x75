@@ -40,5 +40,13 @@ jobs:
             python3-wheel \
             zlib1g-dev
 
+      - name: Prepare pinned Meson subprojects
+        run: |
+          python3 -m venv "$RUNNER_TEMP/sam9x75-meson"
+          "$RUNNER_TEMP/sam9x75-meson/bin/python" -m pip install \
+            --no-index --no-deps python/wheels/meson-1.11.1-py3-none-any.whl
+          "$RUNNER_TEMP/sam9x75-meson/bin/meson" subprojects download \
+            keycodemapdb dtc berkeley-softfloat-3 berkeley-testfloat-3
+
       - name: Build and test SAM9X75
-        run: sh scripts/ci/sam9x75-build-test.sh --disable-download
+        run: sh scripts/ci/sam9x75-build-test.sh --disable-download --disable-rust
