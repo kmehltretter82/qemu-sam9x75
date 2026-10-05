@@ -297,10 +297,9 @@ Support matrix
        per-instance USART feature enforcement,
        external chardev modem-line plumbing, TWI client mode, SMBus/PEC,
        high-speed timing, separately timed address/START/STOP phases and
-       arbitration fidelity remain missing.  SAM9X7 documentation and its
-       device pack do not define the legacy SPI version word at offset
-       ``0xfc``; the model conservatively returns zero until the reserved read
-       and Linux capability-detection behavior can be measured on hardware.
+       arbitration fidelity remain missing.  The measured ``SPI_VERSION``
+       behavior above is a hardware-derived exception to the documented
+       reserved-register layout, not an inferred capability value.
    * - XDMAC
      - Initial
      - All 16 channels expose global/channel control, clock gating, memory copy
@@ -1587,6 +1586,24 @@ The three LED objects are visible as ``/machine/rgb-led-red``,
 board LED.  PWM2/PWM3 reach the blue/green objects only while PIO assigns
 PC20/PC21 to peripheral C.  The observable intensity is the instantaneous
 digital pad level, not an averaged or calibrated analog brightness.
+
+Linux libc consumer validation
+------------------------------
+
+``tests/guest/at91/libc-consumer/`` provides a disposable, RAM-only Linux
+consumer gate for this machine. It cross-builds ARMv5 soft-float glibc
+time32/time64 and shared/static musl programs, then requires eleven named
+functional groups from each variant. The checks include threads/TLS,
+signals, timers, soft-float math, sparse large files and timestamps beyond
+2038 with the time64 ABI. The fixture README describes pinned userland
+assets, kernel requirements, preparation and evidence collection.
+
+This is system emulation on ``sam9x75-curiosity``, not a qemu-user or ARM
+``virt`` substitute. It does not attach persistent disks or networking and
+does not contact hardware. The CI script runs host-only validator tests;
+the guest gate additionally requires a supplied SAM9X75 Linux kernel, DTB
+and BusyBox initramfs. These targeted checks are not the complete upstream
+libc suites or evidence that another operating system supports the board.
 
 Connector and add-on devices
 ---------------------------

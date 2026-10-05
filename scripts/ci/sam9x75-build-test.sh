@@ -5,6 +5,9 @@ set -eu
 source_dir=$(CDPATH= cd "$(dirname "$0")/../.." && pwd)
 build_dir=${SAM9X75_BUILD_DIR:-"$source_dir/build-sam9x75"}
 
+PYTHONDONTWRITEBYTECODE=1 python3 \
+    "$source_dir/tests/guest/at91/libc-consumer/test-run-libc.py"
+
 mkdir -p "$build_dir"
 (
     cd "$build_dir"
