@@ -3,9 +3,9 @@
 SAM9X75 SD-over-SPI consumer gate
 =================================
 
-This is a pending Linux4Microchip 2026.04 end-to-end gate.  It has not yet
-passed in the exact guest and must not be quoted as a completed validation.
-The preferred first SPI consumer is QEMU's existing SD-over-SPI device.  It
+This Linux4Microchip 2026.04 end-to-end gate passed at checkpoint
+``fcf594706b``; the result and original blockers are recorded below.
+The first SPI consumer is QEMU's existing SD-over-SPI device.  It
 speaks the standard MMC/SD SPI protocol, gives Linux a real block device and
 drives both short PIO command transfers and 512-byte XDMAC data transfers.
 It represents storage, not the WILCS02 Wi-Fi/SDIO functions.
@@ -79,11 +79,11 @@ byte lanes, so the driver takes the modern path instead of the unmodelled
 PDC window.  The original blocker text is kept for the record:
 
 #. The SAM9X7 data sheet marks the FLEXCOM SPI ``+0xfc`` location reserved,
-   so QEMU currently returns zero.  The exact ``spi-atmel`` driver reads this
+   so the original model returned zero.  The exact ``spi-atmel`` driver reads this
    location as ``SPI_VERSION`` to choose SPI2/WDRBT, XDMAC or legacy PDC
-   behavior.  A zero value selects the unmodeled legacy PDC window at
-   ``+0x100`` and prevents a trustworthy Linux gate.  Do not invent a version
-   value: measure the read-only silicon value first.
+   behavior.  A zero value selected the unmodeled legacy PDC window at
+   ``+0x100`` and prevented a trustworthy Linux gate.  Measuring the read-only
+   silicon value, rather than inventing a version, closed this blocker.
 
 Read-only hardware probe
 ------------------------
