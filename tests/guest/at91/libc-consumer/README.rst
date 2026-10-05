@@ -92,6 +92,46 @@ Host-only validator tests::
     PYTHONDONTWRITEBYTECODE=1 python3 "$fixture/test-run-libc.py"
     PYTHONDONTWRITEBYTECODE=1 python3 "$fixture/test-run-upstream.py"
 
+Public-source boot assets and CI
+-------------------------------
+
+``prepare-boot.py`` removes the need for a locally supplied boot image. It
+downloads the Linux4Microchip ``linux4microchip-2026.04`` source at immutable
+commit ``8f2c610093aa3d5a7bd50a8d0597be4f0b7a3eda`` and BusyBox 1.37.0, checks
+their pinned SHA-256 digests before extraction, and builds a SAM9X75 kernel,
+the unmodified vendor board DTB and a minimal static ARMv5 musl initramfs.
+The kernel starts from ``at91_dt_defconfig``; the extra configuration enables
+the RAM filesystems, IPC and timer interfaces required by these tests. It
+does not remove board peripherals from the DTB to avoid driver coverage.
+
+Use a Linux build host with Clang/LLVM/LLD, GNU make, a native C compiler,
+bc, bison, flex, OpenSSL development headers and Python 3.12 or newer.
+Prepare the libc sysroots as above, then run::
+
+    python3 "$fixture/prepare-boot.py" \
+        --downloads /tmp/sam9x75-libc-downloads \
+        --output /tmp/sam9x75-boot-build \
+        --glibc /tmp/sam9x75-libc-sysroots/glibc-sysroot \
+        --musl /tmp/sam9x75-libc-sysroots/musl-sysroot
+
+The files under ``boot/`` are ``zImage``, ``board.dtb``,
+``initramfs.cpio.gz`` and ``manifest.json``. The manifest records public
+source URLs/hashes, compiler version, build commands, configuration hashes
+and output hashes. These are reproducible inputs, not a promise of identical
+kernel binaries across different toolchain versions. The base initramfs has
+canonical root ownership and zero timestamps, contains no credentials or
+host files, and requires this fixture's ``/init`` overlay. Builds and result
+directories must be new; only the checksum-verified download cache is reused.
+
+``scripts/ci/sam9x75-libc-test.sh`` prepares those assets and runs all 44
+contracts inside Linux on ``sam9x75-curiosity``. The GitHub SAM9X75 workflow
+runs it after the board qtests, with the guest network and persistent disks
+absent. Missing results, a failed case, a host deadline or QEMU diagnostics
+fail the job. Build logs and guest evidence are retained for 14 days, also
+on failure. Only CI-generated evidence is uploaded automatically; private
+local test directories remain local. The 248-case upstream characterization
+is separate and is not silently treated as an all-passing CI gate.
+
 Initial validation on 2026-10-05 passed all 44 contracts with Linux
 ``7.3.0-rc1+`` on the SAM9X75 machine, using PIT64B as the guest clocksource,
 glibc ``2.41-12+deb13u4`` and musl ``1.2.6``. No QEMU diagnostic messages

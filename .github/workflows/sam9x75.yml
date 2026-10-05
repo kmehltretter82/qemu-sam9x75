@@ -16,9 +16,10 @@ concurrency:
 jobs:
   arm-qtests:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       SAM9X75_BUILD_DIR: ${{ github.workspace }}/build
+      SAM9X75_GUEST_DIR: ${{ runner.temp }}/sam9x75-libc
     steps:
       - name: Check out QEMU
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -30,10 +31,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends \
             build-essential \
+            bc \
+            bison \
+            clang \
+            cpio \
+            flex \
             libfdt-dev \
             libglib2.0-dev \
             libpixman-1-dev \
             libslirp-dev \
+            libssl-dev \
+            lld \
+            llvm \
             ninja-build \
             pkg-config \
             python3-pip \
@@ -52,3 +61,22 @@ jobs:
 
       - name: Build and test SAM9X75
         run: sh scripts/ci/sam9x75-build-test.sh --disable-download --disable-rust --enable-slirp
+
+      - name: Boot Linux and run ARMv5 libc contracts on SAM9X75
+        run: sh scripts/ci/sam9x75-libc-test.sh
+
+      - name: Preserve Linux libc guest evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sam9x75-linux-libc-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/sam9x75-libc/results/
+            ${{ runner.temp }}/sam9x75-libc/contracts/manifest.json
+            ${{ runner.temp }}/sam9x75-libc/sysroots/assets.json
+            ${{ runner.temp }}/sam9x75-libc/sysroots/musl-build.log
+            ${{ runner.temp }}/sam9x75-libc/boot-build/boot/manifest.json
+            ${{ runner.temp }}/sam9x75-libc/boot-build/kernel-build.log
+            ${{ runner.temp }}/sam9x75-libc/boot-build/busybox-build.log

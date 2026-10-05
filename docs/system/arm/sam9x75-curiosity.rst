@@ -1600,9 +1600,12 @@ assets, kernel requirements, preparation and evidence collection.
 
 This is system emulation on ``sam9x75-curiosity``, not a qemu-user or ARM
 ``virt`` substitute. It does not attach persistent disks or networking and
-does not contact hardware. The CI script runs host-only validator tests;
-the guest gate additionally requires a supplied SAM9X75 Linux kernel, DTB
-and BusyBox initramfs. These targeted checks are not the complete upstream
+does not contact hardware. CI runs host-only validator and boot-asset tests,
+the board qtests, then a real Linux boot and all 44 libc contracts. The guest
+CI script builds its kernel, unmodified vendor board DTB and minimal static
+musl BusyBox initramfs from checksum-pinned public sources; it does not depend
+on local boot images or credentials. Independently supplied compatible boot
+assets remain supported. These targeted checks are not the complete upstream
 libc suites or evidence that another operating system supports the board.
 The same fixture also provides a pinned upstream ``libc-test`` functional
 characterization runner: 62 selected cases across the four variants. It
