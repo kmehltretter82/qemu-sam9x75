@@ -25,7 +25,7 @@ ninja -C "$build_dir" \
     tests/qtest/sam9x7-adc-test \
     tests/qtest/sam9x7-pwm-test
 
-"$build_dir/pyvenv/bin/meson" test \
+if ! "$build_dir/pyvenv/bin/meson" test \
     -C "$build_dir" \
     --print-errorlogs \
     --no-rebuild \
@@ -33,4 +33,11 @@ ninja -C "$build_dir" \
     'qemu:qtest-arm/sam9x75-curiosity-test' \
     'qemu:qtest-arm/sam9x75-lan8840-eeprom-test' \
     'qemu:qtest-arm/sam9x7-adc-test' \
-    'qemu:qtest-arm/sam9x7-pwm-test'
+    'qemu:qtest-arm/sam9x7-pwm-test'; then
+    # Meson's TAP error summary can omit the last successful test and the
+    # command that started the failing guest. Preserve that context in CI.
+    if test -f "$build_dir/meson-logs/testlog.txt"; then
+        tail -n 400 "$build_dir/meson-logs/testlog.txt"
+    fi
+    exit 1
+fi

@@ -2522,7 +2522,7 @@ static void test_rom_cpu_entry(void)
 
 static void test_rom_cpu_reset_entry(void)
 {
-    static const uint8_t mark_then_exit_after_reset[] = {
+    static const uint8_t mark_both_reset_entries[] = {
         0x28, 0x00, 0x9f, 0xe5, /* ldr r0, [pc, #40] (SRAM marker) */
         0x00, 0x10, 0x90, 0xe5, /* ldr r1, [r0] */
         0x24, 0x20, 0x9f, 0xe5, /* ldr r2, [pc, #36] (magic) */
@@ -2530,14 +2530,13 @@ static void test_rom_cpu_reset_entry(void)
         0x01, 0x00, 0x00, 0x0a, /* beq second_entry */
         0x00, 0x20, 0x80, 0xe5, /* str r2, [r0] */
         0xfe, 0xff, 0xff, 0xea, /* b . */
-        0x18, 0x00, 0xa0, 0xe3, /* second_entry: mov r0, #SYS_EXIT */
-        0x10, 0x10, 0x9f, 0xe5, /* ldr r1, [pc, #16] */
-        0x56, 0x34, 0x12, 0xef, /* svc 0x123456 */
+        0x01, 0x10, 0x81, 0xe2, /* second_entry: add r1, r1, #1 */
+        0x00, 0x10, 0x80, 0xe5, /* str r1, [r0] */
         0xfe, 0xff, 0xff, 0xea, /* b . */
+        0x00, 0x00, 0xa0, 0xe1, /* nop */
         0x00, 0x00, 0x00, 0x00, /* alignment */
         0x00, 0x00, 0x30, 0x00, /* SAM9X7_SRAM0_BASE */
         0xde, 0xc0, 0x75, 0x9a, /* marker magic */
-        0x26, 0x00, 0x02, 0x00, /* ADP_Stopped_ApplicationExit */
     };
     const uint32_t marker_magic = 0x9a75c0de;
     g_autofree char *rom_path = NULL;
@@ -2554,15 +2553,14 @@ static void test_rom_cpu_reset_entry(void)
     g_assert_cmpint(fd, >=, 0);
     ret = ftruncate(fd, SAM9X7_BOOT_ROM_SIZE);
     g_assert_cmpint(ret, ==, 0);
-    ret = pwrite(fd, mark_then_exit_after_reset,
-                 sizeof(mark_then_exit_after_reset), 0);
-    g_assert_cmpint(ret, ==, sizeof(mark_then_exit_after_reset));
+    ret = pwrite(fd, mark_both_reset_entries,
+                 sizeof(mark_both_reset_entries), 0);
+    g_assert_cmpint(ret, ==, sizeof(mark_both_reset_entries));
     close(fd);
 
     qts = qtest_initf(
         SAM9X75_MACHINE " -accel tcg,thread=single"
-        " -bios %s -serial none -nic none"
-        " -semihosting-config enable=on,target=native",
+        " -bios %s -serial none -nic none",
         rom_path);
 
     deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
@@ -2575,13 +2573,20 @@ static void test_rom_cpu_reset_entry(void)
     } while (g_get_monotonic_time() < deadline);
     g_assert_cmphex(marker, ==, marker_magic);
 
-    qtest_system_reset_nowait(qts);
+    /*
+     * Observe a second ROM entry through SRAM, not an immediate semihosting
+     * exit: the latter can close QMP before system_reset's reply is flushed.
+     */
+    qtest_system_reset(qts);
     deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
-    while (qtest_probe_child(qts) &&
-           g_get_monotonic_time() < deadline) {
+    do {
+        marker = qtest_readl(qts, SAM9X7_SRAM0_BASE);
+        if (marker == marker_magic + 1) {
+            break;
+        }
         g_usleep(1000);
-    }
-    g_assert_false(qtest_probe_child(qts));
+    } while (g_get_monotonic_time() < deadline);
+    g_assert_cmphex(marker, ==, marker_magic + 1);
 
     qtest_quit(qts);
     g_assert_cmpint(g_unlink(rom_path), ==, 0);
