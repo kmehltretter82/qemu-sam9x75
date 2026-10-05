@@ -1,11 +1,16 @@
 #!/usr/bin/expect -f
-set root "/home/karl/linux-work/qemu-SAM9X75"
+if {![info exists env(SAM_TOP)] || ![info exists env(QEMU_TREE)]} {
+    puts stderr "SAM_TOP and QEMU_TREE must be set by run-host.sh"
+    exit 2
+}
+set root $env(SAM_TOP)
+set qemu_tree $env(QEMU_TREE)
 set run [file dirname [file normalize [info script]]]
 log_user 1
 log_file -noappend "$run/console.log"
 proc await {p s} { global timeout; set timeout $s
     expect { -re $p {return 0} timeout {puts stderr "TIMEOUT $p"; exit 124} eof {puts stderr "EOF $p"; exit 125} } }
-spawn env TMPDIR=$run/tmp $root/qemu/build-verify-serial/qemu-system-arm \
+spawn env TMPDIR=$run/tmp $qemu_tree/build-verify-serial/qemu-system-arm \
     -M sam9x75-curiosity \
     -kernel $root/t/linux4microchip-ehci-fix-build-20260827/arch/arm/boot/zImage \
     -dtb $root/t/linux4microchip-2026.04-base.dtb \

@@ -24,7 +24,7 @@ The peer is an external synthetic device, not an implicit part of the QEMU
 machine.  Start its AF_UNIX server before QEMU (use a path on disk, not a
 RAM-backed ``/tmp``)::
 
-  UART_DIR=/home/karl/linux-work/qemu-SAM9X75/t/uart
+  UART_DIR=/path/to/sam9x75-workspace/t/uart
   mkdir -p "$UART_DIR"
   FC1_SOCKET="$UART_DIR/fc1.sock"
   python3 tests/guest/at91/linux4sam/uart-partner/sam9x75_uart_partner.py \

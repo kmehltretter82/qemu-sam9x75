@@ -349,10 +349,8 @@ Support matrix
        that the unchanged ``wilc_spi`` overlay uses, covering selection,
        deselection, reselection, the handover back to the peripheral function
        and migration of a machine whose card is selected through the GPIO
-       route.  Completing the ``mmc_spi`` consumer gate now only waits on the
-       read-only FLEXCOM SPI ``+0xfc`` value, which must be measured on
-       silicon rather than invented.  The SDMMC0 card-detect switch on PA23
-       follows the medium: the generic SDHCI model exposes a
+       route.  The SDMMC0 card-detect switch on PA23 follows the medium: the
+       generic SDHCI model exposes a
        ``card-inserted`` level output driven from its insertion path, the
        ``at91-sdhci`` wrapper re-exports it, and the board inverts it onto
        PA23 unconditionally, so an empty socket reads "no card" and QMP
@@ -397,9 +395,8 @@ Support matrix
        has only the FAT partition, so it cannot satisfy its
        ``root=/dev/mmcblk0p2`` command line.  The exact-head diagnostic log
        contained only the expected generic CMD1/CMD5/CMD52 media probes.  SDIO
-       I/O functions, full M.2
-       ``mmc_spi`` guest integration and dynamic card-detect/media-change
-       completeness remain under audit.
+       I/O functions and remaining SDHCI command, error and migration corner
+       cases remain under audit.
    * - OSPI/QSPI NOR
      - Initial
      - Controller and XIP windows, SST26VF064BEUI identity, SFDP/EUI data,
@@ -1661,7 +1658,9 @@ Completion gates
 Polling DBGU from SRAM, interrupt-driven bare metal and the populated
 LED/button paths are achieved.  The exact-EBI SD AT91Bootstrap path, Linux
 embedded-initramfs shell and a derivative-image ext4 disk-root shell are now
-repeated.  Exact-EBI NAND AT91Bootstrap is also repeated with clean, two-bit
+repeated.  The J24 ``mmc_spi`` path is achieved with the unchanged upstream
+overlay, FIFO/XDMAC operation, deterministic block I/O and a checked FAT32
+filesystem.  Exact-EBI NAND AT91Bootstrap is also repeated with clean, two-bit
 and BCH8-limit eight-bit-error media; all three reached a byte-identical U-Boot
 prompt with an empty diagnostic log.  GEM/LAN8840 discovery, PHY-interrupt
 bring-up, DHCP, ICMP and deterministic full-duplex TCP/UDP packet exchange are
@@ -1675,9 +1674,8 @@ UHPHS ext4 result disk was written, cleanly unmounted and passed host-side
 filesystem checking, with an empty QEMU diagnostic log.  Independent external CAN paths are also
 achieved: both controllers passed the semantic and ``canfdtest`` profiles
 through separate ``can-host-socketcan`` endpoints on isolated buses, including
-the CAN-FD ESI receive path.  Remaining integration
-gates include full guest ``mmc_spi`` operation through J24, the remaining
-board jumper and mux behavior, genuine QSPI
+the CAN-FD ESI receive path.  Remaining integration gates include the
+remaining board jumper and mux behavior, genuine QSPI
 and NAND RomBOOT, broader USB hotplug/error/migration behavior, expansion
 buses, multimedia/security and finally hardware differential validation.
 Normal supported boots must be clean with ``-d unimp,guest_errors``.

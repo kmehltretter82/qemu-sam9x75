@@ -113,13 +113,13 @@ grow a fictional PDC or version register merely to accommodate the driver.
 Disposable Linux4Microchip gate
 -------------------------------
 
-After both blockers are resolved, prepare a merged DTB and a new disposable
+To repeat the achieved gate, prepare a merged DTB and a new disposable
 64 MiB card.  These commands assume the project layout used by this checkout
 and deliberately keep temporary files on disk rather than in ``/tmp``::
 
   set -eu
-  QEMU_TREE=/home/karl/linux-work/qemu-SAM9X75/qemu
-  SAM_TOP=/home/karl/linux-work/qemu-SAM9X75
+  QEMU_TREE=/path/to/qemu
+  SAM_TOP=/path/to/sam9x75-workspace
   SPI_WORK="$SAM_TOP/t/spi-sd-20260826"
   SPI_CARD="$SPI_WORK/spi-card.raw"
   mkdir -p "$SPI_WORK"

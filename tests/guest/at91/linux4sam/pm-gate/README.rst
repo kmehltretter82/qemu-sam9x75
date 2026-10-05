@@ -13,9 +13,12 @@ deep entry was logged, that the file is byte-identical across both, that no
 fault or oops appeared, and that QEMU's ``unimp,guest_errors`` log is
 empty.
 
-Running it::
+Set ``SAM_TOP`` to the workspace containing the ``t/`` artifacts.  The QEMU
+checkout defaults to ``$SAM_TOP/qemu`` and can be overridden with
+``QEMU_TREE``::
 
-    ./run-host.sh
+    SAM_TOP=/path/to/sam9x75-workspace \
+      QEMU_TREE=/path/to/qemu ./run-host.sh
 
 The runner derives its own directory, so copy the four files somewhere
 under ``t/`` and run it there; it refuses to overwrite an existing run.
