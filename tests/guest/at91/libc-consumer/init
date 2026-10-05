@@ -1,6 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
 /bin/busybox --install -s /bin
+export LOCPATH=/lib/locale
 mkdir -p /proc /sys /dev /tmp
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys

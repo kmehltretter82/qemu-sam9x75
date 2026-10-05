@@ -14,6 +14,7 @@ import urllib.request
 ASSETS = (
     ("g/glibc", "libc6_2.41-12+deb13u4_armel.deb", "fd6308283cdad9b6dc5d04b1478d13022593997d269db26ee09bb3a31515e94f"),
     ("g/glibc", "libc6-dev_2.41-12+deb13u4_armel.deb", "26fa65007c9934d0836aee761577b598dd1432cc8a4a7e14bc7c2b9dc6eca1d9"),
+    ("g/glibc", "libc-bin_2.41-12+deb13u4_armel.deb", "37f296959f3fd8860af440dca616f0f161cd02a1bf26259c23599976e5da2a77"),
     ("g/gcc-12", "libgcc-12-dev_12.2.0-14+deb12u1_armel.deb", "5916311189291783f80bfde6cf833bfef1a55593b5a845cb662c036a54fc5f55"),
     ("g/gcc-12", "libgcc-s1_12.2.0-14+deb12u1_armel.deb", "4d9bf44b70e4437e652160ec8c042ed7a186662281f4d58a728f4a87225f1527"),
     ("l/linux", "linux-libc-dev_6.1.176-1_armel.deb", "06c6fb53c25b204500c74a44b5b39aaaf5609bcf12f6b1c0680665db1ea4366a"),

@@ -1604,6 +1604,11 @@ does not contact hardware. The CI script runs host-only validator tests;
 the guest gate additionally requires a supplied SAM9X75 Linux kernel, DTB
 and BusyBox initramfs. These targeted checks are not the complete upstream
 libc suites or evidence that another operating system supports the board.
+The same fixture also provides a pinned upstream ``libc-test`` functional
+characterization runner: 62 selected cases across the four variants. It
+retains raw failures and their output, exits nonzero for failing cases, and
+distinguishes an incomplete run or QEMU diagnostics from ordinary test
+failures. Known library differences are documented, not silently waived.
 
 Connector and add-on devices
 ---------------------------
