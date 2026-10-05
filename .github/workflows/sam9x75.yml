@@ -30,6 +30,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends \
             build-essential \
+            libfdt-dev \
             libglib2.0-dev \
             libpixman-1-dev \
             libslirp-dev \
